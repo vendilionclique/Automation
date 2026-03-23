@@ -1,0 +1,23 @@
+{
+  "plugin": {
+    "trigger_button": [
+      "text:市场分析"
+    ],
+    "search_input": [
+      "text:搜索内容",
+      "input[placeholder*='搜索']"
+    ],
+    "start_analysis": [
+      "text:开始分析"
+    ],
+    "results_summary": [
+      "text:已成功加载"
+    ],
+    "export_button": [
+      "text:导出表格"
+    ],
+    "close_dialog": [
+      "text:取消"
+    ]
+  }
+}

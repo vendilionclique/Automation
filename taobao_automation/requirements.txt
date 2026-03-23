@@ -1,0 +1,7 @@
+# 核心依赖
+DrissionPage>=4.0.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# 打包依赖（可选）
+# pyinstaller>=6.0.0

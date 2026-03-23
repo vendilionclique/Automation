@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 项目特定
+data/
+*.log
+*.pkl
+cookies/
+sessions/
+
+# PyInstaller
+*.spec
+build/
+dist/
+
+# 临时文件
+*.tmp
+*.bak
+*.old
+.DS_Store
+
+# 配置文件（包含敏感信息）
+# config/settings.ini
+# config/keywords.txt
+
+# 浏览器数据（含插件和登录状态，500MB+）
+chrome_profile/
+chrome_user_data/
+user_data/
