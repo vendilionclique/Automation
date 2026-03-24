@@ -175,12 +175,28 @@ class TaobaoAutomation:
             print(f"  进度: ", end='')
             print_progress(len(self.checkpoint.data['processed']), total)
 
+            # 每个关键词前检查登录状态
+            if not login_mgr.check_login_status(quick=True):
+                print("\n  登录已过期，请重新登录淘宝...")
+                if not login_mgr.auto_login():
+                    print("  无法恢复登录，跳过剩余关键词")
+                    self.checkpoint.mark_failed(keyword, '登录过期')
+                    break
+
             try:
                 # 执行搜索分析
-                success = self.plugin_operator.run_keyword_analysis(
-                    keyword,
-                    analysis_timeout=analysis_timeout
-                )
+                if idx == 1:
+                    # 第一个关键词：需要导航淘宝搜索页并打开插件
+                    success = self.plugin_operator.run_keyword_analysis(
+                        keyword,
+                        analysis_timeout=analysis_timeout
+                    )
+                else:
+                    # 后续关键词：在插件内循环，不碰淘宝页面
+                    success = self.plugin_operator.run_keyword_in_plugin(
+                        keyword,
+                        analysis_timeout=analysis_timeout
+                    )
 
                 if success:
                     # 导出结果（从DOM读取）

@@ -19,9 +19,12 @@ class TaobaoLogin:
         self.browser = browser_manager
         self.taobao_url = 'https://www.taobao.com'
 
-    def check_login_status(self):
+    def check_login_status(self, quick=False):
         """
         检查当前是否已登录淘宝
+
+        Args:
+            quick: 快速模式，仅检查当前页面URL，不跳转
 
         Returns:
             bool: 是否已登录
@@ -30,19 +33,23 @@ class TaobaoLogin:
             return False
 
         try:
-            self.browser.navigate_to(self.taobao_url)
-            time.sleep(3)
-
-            page_source = self.browser.page.html
-
-            # 已登录的标识（这些元素在登录后的页面上出现）
-            logged_in_indicators = ['我的淘宝', '购物车', '我的订单']
-
-            for indicator in logged_in_indicators:
-                if indicator in page_source:
-                    return True
-
-            return False
+            if quick:
+                # 快速检查：看当前URL是否跳转到了登录页
+                current_url = self.browser.page.url
+                if 'login.taobao.com' in current_url or 'login' in current_url:
+                    return False
+                # 检查页面中是否有登录指示元素
+                page_source = self.browser.page.html
+                return any(ind in page_source for ind in ['我的淘宝', '购物车'])
+            else:
+                self.browser.navigate_to(self.taobao_url)
+                time.sleep(3)
+                page_source = self.browser.page.html
+                logged_in_indicators = ['我的淘宝', '购物车', '我的订单']
+                for indicator in logged_in_indicators:
+                    if indicator in page_source:
+                        return True
+                return False
 
         except Exception as e:
             print(f"检查登录状态时出错: {e}")

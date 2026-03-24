@@ -4,6 +4,7 @@
 使用 DrissionPage 4.x 的 ChromiumPage + 项目专用Chrome配置目录
 """
 import os
+import subprocess
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 
@@ -51,14 +52,20 @@ class BrowserManager:
         return False
 
     def close(self):
-        """关闭浏览器"""
+        """关闭浏览器并确保清理所有Chrome进程"""
         if self.page:
             try:
-                self.page.close()
+                self.page.quit()
             except Exception:
                 pass
             self.page = None
-            print("浏览器已关闭")
+        # 确保杀掉残留的Chrome进程，避免端口占用
+        try:
+            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+        print("浏览器已关闭")
 
     def __enter__(self):
         self.init_browser()
