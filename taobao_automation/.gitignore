@@ -56,6 +56,6 @@ dist/
 # config/keywords.txt
 
 # 浏览器数据（含插件和登录状态，500MB+）
-chrome_profile/
+# chrome_profile/    # 已移除，允许推送到 GitHub
 chrome_user_data/
 user_data/
