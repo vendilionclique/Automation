@@ -1,3 +1,9 @@
 *.wasm filter=lfs diff=lfs merge=lfs -text
 chrome_profile/**/Cache_Data/* filter=lfs diff=lfs merge=lfs -text
+chrome_profile/**/GPUCache/* filter=lfs diff=lfs merge=lfs -text
+chrome_profile/**/ShaderCache/* filter=lfs diff=lfs merge=lfs -text
+chrome_profile/**/DawnGraphiteCache/* filter=lfs diff=lfs merge=lfs -text
+chrome_profile/**/DawnWebGPUCache/* filter=lfs diff=lfs merge=lfs -text
+chrome_profile/**/GrShaderCache/* filter=lfs diff=lfs merge=lfs -text
+chrome_profile/**/GraphiteDawnCache/* filter=lfs diff=lfs merge=lfs -text
 component_crx_cache/* filter=lfs diff=lfs merge=lfs -text
