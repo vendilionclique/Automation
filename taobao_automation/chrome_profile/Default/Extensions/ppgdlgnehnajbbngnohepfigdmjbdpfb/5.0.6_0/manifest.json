@@ -1,0 +1,52 @@
+{
+   "action": {
+      "default_icon": {
+         "128": "icons/icon-128.png",
+         "16": "icons/icon-16.png",
+         "19": "icons/icon-19.png",
+         "38": "icons/icon-38.png",
+         "64": "icons/icon-64.png"
+      },
+      "default_popup": "popup.html",
+      "default_title": "店透视"
+   },
+   "background": {
+      "service_worker": "script/service_worker.js"
+   },
+   "content_scripts": [ {
+      "all_frames": true,
+      "js": [ "script/content_scripts.js" ],
+      "matches": [ "\u003Call_urls>" ],
+      "run_at": "document_start",
+      "type": "module"
+   } ],
+   "content_security_policy": {
+      "extension_pages": "script-src 'self'; object-src 'self';"
+   },
+   "description": "专为电商卖家设计，集多平台行业、商品、店铺和详情数据的高效分析与导出等功能于一体。",
+   "externally_connectable": {
+      "accepts_tls_channel_id": false,
+      "ids": [ "*" ],
+      "matches": [ "*://*/*" ]
+   },
+   "homepage_url": "https://diantoushi.com",
+   "host_permissions": [ "\u003Call_urls>" ],
+   "icons": {
+      "128": "icons/icon-128.png",
+      "16": "icons/icon-16.png",
+      "19": "icons/icon-19.png",
+      "38": "icons/icon-38.png",
+      "64": "icons/icon-64.png"
+   },
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnLV3YW+iFj/kxjURmDLX+TqDTHfAZ979uXZejK5SR0HW0ZaTNS0LSHiXUrNxq7iXwWQ7RHViG0imeulEiBQKjKKBlZMxGfnYUjZulIYa8RsCoznNwdDZwiPIAtldSjGrypHDgW+KWz4wk6bbkvRNN0FAXjusYVlq6MhWgOk/+Aox0fwQroSFKGkea2i49QEvFcZRFrSApao7vd5zPFTGoJRsGy5k9ILhSbvezr1keg3DqDDuzaMDfZ2tGYKvGTqO3Fy4B64khMpGTDVawnjne1AsfEBJ1dhAXH1F+YkRTeA2oNI2ms5fTtqWIbQ42sjKYVPaBAOZrhOegKOtaPyoCwIDAQAB",
+   "manifest_version": 3,
+   "name": "店透视",
+   "permissions": [ "activeTab", "alarms", "background", "cookies", "declarativeContent", "declarativeNetRequest", "declarativeNetRequestFeedback", "declarativeNetRequestWithHostAccess", "downloads", "notifications", "offscreen", "scripting", "sessions", "storage", "tabs", "userScripts", "unlimitedStorage", "webNavigation", "webRequest" ],
+   "short_name": "店透视",
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "5.0.6",
+   "web_accessible_resources": [ {
+      "matches": [ "\u003Call_urls>" ],
+      "resources": [ "source/*", "script/*" ]
+   } ]
+}

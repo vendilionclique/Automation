@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>店透视</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    body, html { color: #404040; background: #f2f5fc; font-family: 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif; }
+    #app { width: 360px; padding: 6px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05); }
+    .header { background: url(/source/images/popup-bg.png); color: #fff; padding: 16px 16px 0 16px; border-radius: 8px 8px 0 0; }
+    .header-hd { display:flex;justify-content:space-between;align-items:center;}
+    .header .logo { display: flex; align-items: center; text-decoration: none; color: #fff; font-weight: bold; }
+    .header .logo img { width: 140px; height: 40px; }
+    .header .logo span { margin-left: 12px; font-size: 14px; font-weight: 600; }
+    .header .official-web { float: right; margin-top: 4px; }
+    .header .official-web img { width: 70px; height: 18px; }
+    .header .header-links { display: flex; justify-content: space-around; align-items: center; margin-top: 20px; }
+    .header .header-links a { color: #fff; text-decoration: none; font-size: 14px; position: relative; margin: 0 8px; }
+    .header .header-links em { background: #ff4e33; color: #fff; padding: 3px 5px; font-size: 10px; font-style: normal; border-radius: 10px 10px 10px 0; line-height: 10px; position: absolute; bottom: 20px; right: -38px; font-weight: normal; z-index: 10001; }
+    .tabs { display: flex; justify-content: space-around; align-items: center; margin: 20px auto 0; border-radius: 8px 8px 0 0; background: rgba(255, 255, 255, 0.2); color: #fff; overflow: hidden; }
+    .tabs-item { cursor: pointer; padding: 6px 12px; border-radius: 6px 6px 0 0; font-size: 15px; transition: background 0.2s, color 0.2s; }
+    .tabs-item.ischecked { font-weight: 600; color: #45474d; background: #fff; }
+    .tips { margin: 6px 0; display: flex; justify-content: flex-end; }
+    .tip { padding: 3px 7px; border-radius: 4px; background-color: #f4f4f4; color: #6c6c6c; font-size: 12px; }
+    .tips_icon { width: 12px; height: 12px; vertical-align: middle; }
+    .content-tab { display: flex; flex-wrap: wrap; align-content: flex-start; box-sizing: border-box; }
+    .content-item { margin-bottom: 16px; width: 25%; box-sizing: border-box; text-align: center; }
+    .content-item a { display: flex; flex-direction: column; align-items: center; text-decoration: none; color: #727680; position: relative; }
+    .content-item .img-wrapper { width: 30px; height: 30px; position: relative; }
+    .content-item .img-wrapper img { width: 100%; height: 100%; }
+    .content-item .img-wrapper img.radius_icon { width: 12px; height: 12px; position: absolute; top: 0; right: -6px; }
+    .content-item span { margin-top: 8px; font-size: 12px; color: #727680; line-height: 16px; }
+    .content-item em { background: #ff4e33; color: #fff; padding: 2px 4px; font-size: 10px; font-style: normal; border-radius: 10px; line-height: 10px; position: absolute; bottom: 16px; right: -2px; }
+    .footer { display: flex; justify-content: space-around; align-items: center; margin-top: 10px; height: 40px; background-color: #f2f5fc; border-radius: 0 0 8px 8px; padding: 0 16px; }
+    .footer img { width: 14px; height: 14px; margin-right: 8px; }
+    .footer a, .footer div { display: flex; align-items: center; text-decoration: none; color: #45474d; font-size: 14px; }
+    .footer .vertical { width: 1px; height: 20px; background: #fff; margin: 0 10px; }
+    .footer .qrcode { position: absolute; top: -130px; left: -30px; padding: 5px; border-radius: 3px; box-shadow: 0 0 5px #ccc; background: #fff; display: none; }
+    .footer .qrcode img { width: 120px; height: 120px; margin: 0; }
+    .footer .wx-service { position: relative; cursor: pointer; }
+  </style>
+  <script src="source/mustache.js" type="text/javascript"></script>
+</head>
+
+<body>
+  <div id="app"></div>
+  <script type="text/template" id="header-template">
+    <div class="header">
+      <div class="header-hd">
+        <a class="logo" href="{{site}}" target="_blank">
+          <img src="/source/images/popup-logo.png" />
+          <span>{{version}}</span>
+        </a>
+        <a class="official-web" href="{{site}}" target="_blank">
+          <img src="/source/images/popup-link.png" />
+        </a>
+      </div>
+      <div class="header-links">
+        {{#headerList}}
+          <a href="{{href}}" target="_blank">
+            {{name}}
+            {{#tips}}<em>{{tips}}</em>{{/tips}}
+          </a>
+        {{/headerList}}
+      </div>
+      <div class="tabs">
+        {{#tabOptions}}
+          <span class="tabs-item{{#checked}} ischecked{{/checked}}" data-index="{{idx}}">{{value}}</span>
+        {{/tabOptions}}
+      </div>
+    </div>
+  </script>
+  <script type="text/template" id="content-template">
+    <div class="body">
+      <div class="tips"><div class="tip">“<img class="tips_icon" src="/source/images/popup-radius.png" />”表示该功能已配置插件</div></div>
+      <div class="content-tabs">
+        {{#tabOptions}}
+          <div class="content-tab" data-tab-index="{{idx}}" style="display:none;">
+            {{#children}}
+              <div class="content-item">
+                <a href="{{href}}" target="_blank">
+                  <div class="img-wrapper">
+                    <img data-src="{{assets}}/images/vendors_popup/{{img}}" />
+                    {{#badge}}
+                      <img class="radius_icon" src="/source/images/popup-radius.png" />
+                    {{/badge}}
+                  </div>
+                  <span>{{name}}</span>
+                  {{#new}}
+                    <em>New</em>
+                  {{/new}}
+                </a>
+              </div>
+            {{/children}}
+          </div>
+        {{/tabOptions}}
+      </div>
+    </div>
+  </script>
+  <script type="text/template" id="footer-template">
+    {{#footerOptions}}
+    <div class="footer">
+      <a target="_blank" href="{{tgUrl}}">
+        <img src="/source/images/popup-tg.png" /><span>推广赚佣金</span>
+      </a>
+      <div class="vertical"></div>
+      <div class="wx-service" style="position:relative;">
+        <div class="qrcode"><img src="{{qrUrl}}" /></div>
+        <img src="/source/images/popup-wx.png" />在线客服
+      </div>
+    </div>
+    {{/footerOptions}}
+  </script>
+  <script src="popup.js"></script>
+</body>
+</html>

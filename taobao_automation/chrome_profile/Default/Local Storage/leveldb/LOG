@@ -1,0 +1,6 @@
+2026/03/24-16:30:03.369 22fe8 Reusing MANIFEST D:\workspace\Automation\taobao_automation\chrome_profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/03/24-16:30:03.372 22fe8 Recovering log #76
+2026/03/24-16:30:03.373 22fe8 Reusing old log D:\workspace\Automation\taobao_automation\chrome_profile\Default\Local Storage\leveldb/000076.log 
+2026/03/24-16:30:29.277 d5b4 Level-0 table #80: started
+2026/03/24-16:30:29.283 d5b4 Level-0 table #80: 392673 bytes OK
+2026/03/24-16:30:29.284 d5b4 Delete type=0 #76

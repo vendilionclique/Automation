@@ -1,0 +1,30 @@
+{
+   "background": {
+      "service_worker": "BackgroundServiceWorker.js"
+   },
+   "content_scripts": [ {
+      "all_frames": true,
+      "js": [ "Content.Static.js" ],
+      "match_about_blank": true,
+      "matches": [ "http://*/*", "https://*/*", "ftp://*/*", "file://*/*" ],
+      "run_at": "document_start"
+   } ],
+   "content_security_policy": {
+      "extension_pages": "script-src 'self'; object-src 'self'"
+   },
+   "description": "影刀Chrome自动化插件",
+   "host_permissions": [ "\u003Call_urls>" ],
+   "icons": {
+      "128": "icons/shadow128.png",
+      "16": "icons/shadow16.png",
+      "32": "icons/shadow32.png",
+      "48": "icons/shadow48.png",
+      "64": "icons/shadow64.png"
+   },
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAiY9MVNzlw/XMy4dWG3lU53slpFc9A3Hx8dEbsa3dHWb1cvtOY9W+Uk9ba68AdNOgsXHMzKpms/TQH9C9M7VtRd+ErTekK0DD2g7vDVRRtbsIGpZecvXpINaGswNCqJzGKMt3Rnf4o41RiFY22HkIREeCR5zepHy1tDZnejYyNzG+MjmRD5yvIe0TOBPt1AYY3Jz5+1aFqu0F/behCI0q5YwKvALhmNauOSt+vsIPjn/syh0WUxzvvMqs+BXCUvp2Xk2QmkYbG7pgq+eZNQiW0V23XiEI4WFl4RsuEjAlZXMKtH+iS9q2dKpIMIqAy8t5nwqhE3gR1SJ4TUAj8wrzpwIDAQAB",
+   "manifest_version": 3,
+   "name": "影刀RPA",
+   "permissions": [ "cookies", "management", "tabs", "debugger", "nativeMessaging", "webNavigation", "downloads", "clipboardRead", "clipboardWrite", "scripting", "storage" ],
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "3.1.0.0"
+}
