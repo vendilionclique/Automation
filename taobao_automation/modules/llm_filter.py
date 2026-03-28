@@ -4,10 +4,12 @@ LLM智能过滤模块
 """
 import os
 import logging
+import configparser
 import pandas as pd
 from datetime import datetime
 
 from modules.llm_client import LLMClient, build_filter_prompt, parse_llm_response
+from modules.mtg_db import MTGDatabase
 from modules.utils import get_project_root, ensure_dir, print_progress
 
 
@@ -29,6 +31,10 @@ def filter_with_llm(input_file, output_file=None, batch_size=5, logger=None):
         dict: 过滤结果摘要
     """
     log = logger or logging.getLogger(__name__)
+
+    config_file = os.path.join(get_project_root(), 'config', 'settings.ini')
+    config = configparser.ConfigParser()
+    config.read(config_file, encoding='utf-8')
 
     if not os.path.exists(input_file):
         log.error(f"输入文件不存在: {input_file}")
@@ -76,14 +82,44 @@ def filter_with_llm(input_file, output_file=None, batch_size=5, logger=None):
         log.error(f"LLM客户端初始化失败: {e}")
         return {'success': False, 'error': f'LLM初始化失败: {e}'}
 
+    # 初始化数据库参考客户端（可选）
+    use_db_reference = config.getboolean('FILTER', 'use_db_reference', fallback=False)
+    db_references = {}
+    db_client = None
+    if use_db_reference:
+        db_client = MTGDatabase(config_file=config_file, logger=log)
+        ok, message = db_client.test_connection()
+        if ok:
+            target_names = sorted({
+                str(name).strip()
+                for name in df['目标牌名'].tolist()
+                if str(name).strip()
+            })
+            db_references = db_client.lookup_card_references(target_names)
+            log.info(f"数据库参考已加载: {len(db_references)} 个目标牌名")
+        else:
+            log.warning(f"数据库参考未启用（{message}），将仅依赖LLM文本判断")
+
     # 准备处理数据
-    items = []
+    raw_items = []
     for idx, row in df.iterrows():
-        items.append({
+        target_name = str(row['目标牌名']).strip()
+        raw_items.append({
             'index': idx,
             '商品名称': str(row[title_col]),
-            '目标牌名': row['目标牌名']
+            '目标牌名': target_name
         })
+
+    title_hints_by_index = {}
+    if use_db_reference and db_client is not None:
+        title_hints_by_index = db_client.lookup_title_hints(raw_items)
+
+    items = []
+    for item in raw_items:
+        refs = list(db_references.get(item['目标牌名'], []))
+        refs.extend(title_hints_by_index.get(item['index'], []))
+        item['数据库候选'] = refs
+        items.append(item)
 
     total = len(items)
     log.info(f"共 {total} 条记录待处理")

@@ -192,10 +192,14 @@ def build_filter_prompt(items, config_file=None):
     system_prompt = prompt_config.get('system_prompt', '')
     user_template = prompt_config.get('user_prompt_template', '{items_text}')
 
-    items_text = "\n".join([
-        f"{i+1}. 商品名称: {item['商品名称']} | 目标牌名: {item['目标牌名']}"
-        for i, item in enumerate(items)
-    ])
+    rendered_items = []
+    for i, item in enumerate(items):
+        line = f"{i+1}. 商品名称: {item['商品名称']} | 目标牌名: {item['目标牌名']}"
+        db_refs = item.get('数据库候选') or []
+        if db_refs:
+            line += f"\n   数据库候选: {' || '.join(db_refs)}"
+        rendered_items.append(line)
+    items_text = "\n".join(rendered_items)
 
     user_prompt = user_template.format(items_text=items_text)
 

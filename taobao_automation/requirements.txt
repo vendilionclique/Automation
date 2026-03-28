@@ -3,6 +3,8 @@ DrissionPage>=4.0.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 pyperclip>=1.8.0
+PyMySQL>=1.1.0
+paramiko>=4.0.0
 
 # 打包依赖（可选）
 # pyinstaller>=6.0.0
