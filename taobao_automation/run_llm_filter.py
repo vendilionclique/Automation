@@ -97,7 +97,9 @@ def main():
         print(f"删除: {result['removed']}")
         print(f"处理失败: {result['uncertain']}")
         print(f"输出文件: {result['output_file']}")
+        print(f"  → 打开后看「全部」= 原表每一行+LLM 列；「已删除」= 仅筛掉行")
         print(f"纯净结果: {result['pure_output_file']}")
+        print(f"  → 仅含判定为保留的行，给后续步骤用")
     else:
         print(f"处理失败: {result['error']}")
         sys.exit(1)

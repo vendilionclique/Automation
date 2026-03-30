@@ -92,7 +92,46 @@ class LLMClient:
         else:
             raise ValueError(f"MiniMax API返回格式异常: {result}")
 
-    def _call_zhipu(self, messages, temperature=0.3, max_tokens=2048):
+    def _build_zhipu_web_search_tools(self):
+        """智谱「对话中的网络搜索」tools 载荷（与开放平台文档一致，非 Cursor MCP 进程）。"""
+        count = self.config.getint("LLM", "web_search_count", fallback=5)
+        prompt = self.config.get(
+            "LLM",
+            "web_search_prompt",
+            fallback=(
+                "你正在辅助判断淘宝商品是否为万智牌单卡、标题是否与目标牌名匹配。"
+                "请基于{search_result}中的摘要提炼与商品实体、卡牌名称相关的事实，忽略无关推广。"
+            ),
+        )
+        return [
+            {
+                "type": "web_search",
+                "web_search": {
+                    "enable": "True",
+                    "search_engine": self.config.get(
+                        "LLM", "web_search_engine", fallback="search_pro"
+                    ),
+                    "search_result": "True",
+                    "search_prompt": prompt,
+                    "count": str(count),
+                    "search_recency_filter": self.config.get(
+                        "LLM", "web_search_recency_filter", fallback="noLimit"
+                    ),
+                    "content_size": self.config.get(
+                        "LLM", "web_search_content_size", fallback="medium"
+                    ),
+                },
+            }
+        ]
+
+    def _call_zhipu(
+        self,
+        messages,
+        temperature=0.3,
+        max_tokens=2048,
+        model=None,
+        tools=None,
+    ):
         """调用智谱GLM API"""
         if not self.zhipu_api_key:
             raise ValueError("智谱GLM API Key未配置")
@@ -103,13 +142,16 @@ class LLMClient:
         }
 
         payload = {
-            "model": self.ZHIPU_MODEL,
+            "model": model or self.ZHIPU_MODEL,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
 
-        response = requests.post(self.ZHIPU_API_URL, headers=headers, json=payload, timeout=60)
+        response = requests.post(self.ZHIPU_API_URL, headers=headers, json=payload, timeout=120)
         response.raise_for_status()
 
         result = response.json()
@@ -118,8 +160,19 @@ class LLMClient:
         else:
             raise ValueError(f"智谱GLM API返回格式异常: {result}")
 
-    def chat(self, prompt, system_prompt=None, temperature=0.3):
-        """通用聊天接口"""
+    def chat(
+        self,
+        prompt,
+        system_prompt=None,
+        temperature=0.3,
+        zhipu_model=None,
+        zhipu_web_search=False,
+    ):
+        """通用聊天接口
+
+        zhipu_web_search: 为 True 时在请求中附带智谱 web_search 工具（仅 provider=zhipu）。
+        zhipu_model: 覆盖本次请求的智谱模型名（如联网轮次用 glm-4-air）。
+        """
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -128,7 +181,13 @@ class LLMClient:
         if self.current_provider == 'minimax':
             return self._call_minimax(messages, temperature)
         elif self.current_provider == 'zhipu':
-            return self._call_zhipu(messages, temperature)
+            tools = self._build_zhipu_web_search_tools() if zhipu_web_search else None
+            return self._call_zhipu(
+                messages,
+                temperature,
+                model=zhipu_model,
+                tools=tools,
+            )
         else:
             raise ValueError(f"不支持的LLM provider: {self.current_provider}")
 
@@ -175,13 +234,14 @@ def load_prompt_config(config_file=None):
         return json.load(f)
 
 
-def build_filter_prompt(items, config_file=None):
+def build_filter_prompt(items, config_file=None, second_round_web=False):
     """
     构建LLM过滤的Prompt
 
     Args:
         items: 商品列表，每项包含商品名称和目标牌名
         config_file: Prompt配置文件路径
+        second_round_web: 第二轮已开启联网时的补充说明
 
     Returns:
         str: 构造的prompt
@@ -202,6 +262,10 @@ def build_filter_prompt(items, config_file=None):
     items_text = "\n".join(rendered_items)
 
     user_prompt = user_template.format(items_text=items_text)
+    if second_round_web:
+        note = prompt_config.get('second_round_web_note', '')
+        if note:
+            user_prompt = f"{user_prompt}\n\n{note}"
 
     return system_prompt, user_prompt
 

@@ -293,6 +293,34 @@ class MTGDatabase:
 
         return result
 
+    def lookup_longer_name_conflicts(
+        self, card_names: List[str], limit_count: int = 20
+    ) -> Dict[str, List[str]]:
+        """
+        查询“更长官方中文名”冲突词：
+        - key: 目标牌名（通常较短）
+        - value: 数据库中包含该牌名、且不等于该牌名的 chineseName 列表（按长度降序）
+        """
+        result: Dict[str, List[str]] = {}
+        if not self.is_ready():
+            return result
+
+        clean_names = sorted({str(name).strip() for name in card_names if str(name).strip()})
+        if not clean_names:
+            return result
+
+        try:
+            with self._connection_with_optional_tunnel() as conn:
+                with conn.cursor() as cursor:
+                    for name in clean_names:
+                        rows = self._query_longer_name_conflicts(cursor, name, limit_count)
+                        result[name] = [str(r.get("chineseName", "")).strip() for r in rows if r.get("chineseName")]
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.warning(f"短名冲突词查询失败，已忽略该策略: {exc}")
+            return {}
+
+        return result
+
     def _query_candidates(self, cursor, card_name, limit_count):
         exact_sql = """
             SELECT
@@ -378,6 +406,18 @@ class MTGDatabase:
             LIMIT %s
         """
         cursor.execute(query, (card_name, card_name, card_name, limit_count))
+        return cursor.fetchall()
+
+    def _query_longer_name_conflicts(self, cursor, card_name, limit_count):
+        query = """
+            SELECT DISTINCT chineseName
+            FROM product
+            WHERE chineseName LIKE %s
+              AND chineseName <> %s
+            ORDER BY CHAR_LENGTH(chineseName) DESC, chineseName ASC
+            LIMIT %s
+        """
+        cursor.execute(query, (f"%{card_name}%", card_name, limit_count))
         return cursor.fetchall()
 
     def _query_groups_in_title(self, cursor, title, limit_count):
