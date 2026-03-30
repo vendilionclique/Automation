@@ -51,9 +51,9 @@ dist/
 *.old
 .DS_Store
 
-# 配置文件（包含敏感信息）
-# config/settings.ini
-# config/keywords.txt
+# 配置文件（包含敏感信息）；仓库内仅保留 *.example.*
+config/settings.ini
+config/keywords.txt
 
 # 浏览器数据（含插件和登录状态，500MB+）
 # chrome_profile/    # 已移除，允许推送到 GitHub

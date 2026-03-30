@@ -52,8 +52,8 @@ def test_project_structure():
 
     required_files = [
         'main.py',
-        'config/settings.ini',
-        'config/keywords.txt',
+        'config/settings.example.ini',
+        'config/keywords.example.txt',
         'modules/__init__.py',
         'modules/browser.py',
         'modules/login.py',
@@ -73,6 +73,18 @@ def test_project_structure():
     if missing_files:
         print(f"\n缺少文件: {', '.join(missing_files)}")
         return False
+
+    local_from_example = [
+        ('config/settings.ini', 'config/settings.example.ini'),
+        ('config/keywords.txt', 'config/keywords.example.txt'),
+    ]
+    for local_path, example_path in local_from_example:
+        if not os.path.exists(local_path):
+            print(f"✗ {local_path} - 不存在")
+            print(f"  请将 {example_path} 复制为 {local_path} 并填写配置")
+            return False
+        print(f"✓ {local_path}")
+
     return True
 
 
