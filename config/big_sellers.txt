@@ -1,0 +1,5 @@
+# 大店名单（每行一个店名）
+# 支持 contains / exact，取决于 settings.ini 的 SKU_SAMPLING.big_seller_match_mode
+# 示例：
+# 卡豆卡牌旗舰店
+# 某某卡牌专营店
