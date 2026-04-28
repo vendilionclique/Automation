@@ -223,7 +223,7 @@ def ensure_dir(directory):
         directory: 目录路径
     """
     if not os.path.exists(directory):
-        os.makedirs(directory)
+        os.makedirs(directory, exist_ok=True)
 
 
 def get_timestamp():
