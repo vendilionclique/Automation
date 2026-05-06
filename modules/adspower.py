@@ -1,6 +1,13 @@
 """
-Small AdsPower Local API client used by harness diagnostics.
+LEGACY: AdsPower Local API diagnostics.
+
+The AdsPower + non-login + proxy-pool collection route was tested and abandoned.
+Keep this module only for historical diagnostics; do not use it in the main
+visual collection workflow.
 """
+
+LEGACY = True
+LEGACY_REASON = "AdsPower/non-login/proxy collection route abandoned after field tests."
 import json
 import urllib.parse
 import urllib.request

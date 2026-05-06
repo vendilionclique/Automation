@@ -1,9 +1,12 @@
 """
-导出模块
-优先通过插件的"复制表格"按钮从剪贴板读取数据（完整数据），
-剪贴板失败时降级到DOM读取（仅可见行，可能不完整）
-支持分页加载以获取多页结果
+LEGACY: plugin/DOM export module.
+
+The new workflow writes raw rows from OCR/VLM recognition of system screenshots.
+Keep this module only for historical reference.
 """
+
+LEGACY = True
+LEGACY_REASON = "Plugin table export replaced by visual OCR/VLM extraction."
 import os
 import io
 import json

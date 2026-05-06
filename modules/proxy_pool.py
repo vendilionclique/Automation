@@ -1,10 +1,13 @@
 """
-Proxy pool diagnostics.
+LEGACY: proxy pool diagnostics.
 
-The first implementation is deliberately vendor-neutral: it can fetch one or
-more proxies from a configured URL, or validate a manually supplied proxy.
-Provider-specific parsing can be added after the real supplier format is known.
+The proxy-rotation anonymous collection route was tested and abandoned. Keep
+this module only for historical diagnostics; do not use it in the main visual
+collection workflow.
 """
+
+LEGACY = True
+LEGACY_REASON = "Proxy-pool anonymous collection route abandoned after field tests."
 import json
 import re
 import urllib.error

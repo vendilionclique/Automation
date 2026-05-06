@@ -1,9 +1,12 @@
 """
-页面预热模块
+LEGACY: old DOM/browser warmup module.
 
-浏览器启动后、登录检查前，先导航淘宝首页并尝试关闭营销弹窗，
-再可选地等待人工确认（带超时，无人值守时自动继续）。
+The new workflow should detect page state from screenshots and pause for manual
+intervention when needed.
 """
+
+LEGACY = True
+LEGACY_REASON = "Old browser warmup replaced by screenshot-based page-state detection."
 import sys
 import time
 import logging

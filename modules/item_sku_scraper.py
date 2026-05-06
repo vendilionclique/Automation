@@ -1,4 +1,14 @@
 """
+LEGACY: login-state SKU scraping module.
+
+SKU/detail collection is out of scope for the current visual search-result
+workflow and must not be used from the main flow.
+"""
+
+LEGACY = True
+LEGACY_REASON = "SKU scraping removed from main scope."
+
+"""
 商品 SKU 采集模块
 逐条打开淘宝商品页，通过店透视插件复制 SKU 表并解析。
 输入：LLM 过滤后的 pure Excel（需含「商品链接」列）。

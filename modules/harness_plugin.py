@@ -1,6 +1,12 @@
 """
-店透视插件单关键词交互式调试（供 harness plugin 调用）。
+LEGACY: shop-insight plugin single-keyword debug harness.
+
+This command uses the old DrissionPage/local Chrome profile route. It is not a
+valid diagnostic for the new visual collection workflow.
 """
+
+LEGACY = True
+LEGACY_REASON = "Old plugin harness superseded by future visual harness."
 import os
 import sys
 import json

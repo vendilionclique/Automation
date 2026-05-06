@@ -1,7 +1,12 @@
 """
-搜索模块
-负责店透视插件的搜索操作：打开对话框 → 输入关键词 → 开始分析 → 等待结果
+LEGACY: shop-insight plugin operation module.
+
+The plugin/DOM collection route was tested and abandoned. The new workflow does
+not open the plugin, read DOM, or use CDP/Playwright for page data.
 """
+
+LEGACY = True
+LEGACY_REASON = "Shop-insight plugin and DOM collection route abandoned."
 import os
 import json
 import re

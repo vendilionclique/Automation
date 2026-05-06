@@ -1,4 +1,14 @@
 """
+LEGACY: old Taobao login-state helper.
+
+The new workflow does not automate login. It detects login-required states from
+screenshots and pauses for manual intervention.
+"""
+
+LEGACY = True
+LEGACY_REASON = "Automated login handling replaced by human-in-the-loop visual workflow."
+
+"""
 登录模块
 负责淘宝网站的登录状态检查
 使用真实Chrome配置文件，通常已保持登录状态

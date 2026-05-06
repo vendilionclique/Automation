@@ -34,7 +34,23 @@ ENV/
 *~
 
 # Project data and generated artifacts
-data/
+data/*
+!data/.gitkeep
+!data/downloads/
+data/downloads/*
+!data/downloads/.gitkeep
+!data/filtered/
+data/filtered/*
+!data/filtered/.gitkeep
+!data/checkpoints/
+data/checkpoints/*
+!data/checkpoints/.gitkeep
+!data/logs/
+data/logs/*
+!data/logs/.gitkeep
+!data/tasks/
+data/tasks/*
+!data/tasks/.gitkeep
 *.log
 *.pkl
 cookies/
@@ -55,3 +71,6 @@ config/keywords.txt
 chrome_profile/
 chrome_user_data/
 user_data/
+local/*
+!local/.gitkeep
+!local/README.md

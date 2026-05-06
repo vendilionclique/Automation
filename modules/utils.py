@@ -368,6 +368,17 @@ class ConfigManager:
 
     def _create_default_config(self):
         """创建默认配置文件"""
+        example = os.path.join(os.path.dirname(self.config_file), "settings.example.ini")
+        if os.path.exists(example):
+            try:
+                import shutil
+
+                shutil.copy2(example, self.config_file)
+                print(f"已从模板创建配置文件: {self.config_file}")
+                return
+            except Exception as e:
+                print(f"复制配置模板失败，将创建最小默认配置: {e}")
+
         config = configparser.ConfigParser()
 
         # 浏览器设置
@@ -396,6 +407,39 @@ class ConfigManager:
             'level': 'INFO',
             'log_file': 'data/automation.log',
             'max_size': '10'
+        }
+
+        config['INPUT'] = {
+            'keyword_prefix': '万智牌',
+        }
+
+        config['CHECKPOINT'] = {
+            'checkpoint_dir': 'data/checkpoints',
+            'auto_resume': 'true',
+        }
+
+        config['VISUAL_CAPTURE'] = {
+            'driver': 'pyautogui',
+            'browser_name': 'Google Chrome',
+            'chrome_path': '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            'chrome_user_data_dir': '',
+            'chrome_profile_directory': '',
+            'window_x': '0',
+            'window_y': '0',
+            'window_width': '1600',
+            'window_height': '1000',
+            'startup_wait': '4',
+            'page_load_wait': '8',
+            'post_search_wait': '2',
+            'search_mode': 'url',
+            'ocr_confidence_threshold': '0.80',
+        }
+
+        config['SESSION'] = {
+            'daily_keyword_budget': '20',
+            'hourly_keyword_budget': '5',
+            'cooldown_minutes': '60',
+            'max_consecutive_abnormal': '2',
         }
 
         # 保存默认配置

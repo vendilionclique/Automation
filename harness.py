@@ -2,10 +2,12 @@
 """
 Unified diagnostics entry point.
 
-The harness is not the production scheduler. It splits external dependencies
-into small checks that humans and future agent skills can run independently.
+The main workflow is moving to login-state visual collection. Legacy AdsPower,
+proxy-pool, and shop-insight plugin diagnostics remain available only for
+historical troubleshooting.
 """
 import argparse
+import json
 import os
 import sys
 
@@ -31,7 +33,9 @@ def cmd_setup(args):
             ("pandas", "pandas"),
             ("openpyxl", "openpyxl"),
             ("configparser", "configparser"),
-            ("playwright", "playwright"),
+            ("Pillow", "PIL"),
+            ("pyautogui", "pyautogui"),
+            ("pyperclip", "pyperclip"),
         ]
         missing = []
         for name, mod in required:
@@ -43,25 +47,28 @@ def cmd_setup(args):
                 missing.append(name)
         if missing:
             print("\n请运行: pip install -r requirements.txt")
-            if "playwright" in missing:
-                print("Playwright 首次安装后还需运行: python -m playwright install chromium")
             return False
         return True
 
     def test_project_structure():
+        import configparser
+
         print("\n检查项目结构...")
         required_files = [
             "main.py",
             "harness.py",
             "config/settings.example.ini",
             "modules/__init__.py",
-            "modules/adspower.py",
-            "modules/proxy_pool.py",
             "modules/task_state.py",
             "modules/input_reader.py",
             "modules/filter.py",
             "modules/checkpoint.py",
             "modules/utils.py",
+            "modules/visual_driver.py",
+            "modules/page_state.py",
+            "modules/visual_capture.py",
+            "modules/vision_extract.py",
+            "modules/visual_pipeline.py",
         ]
         for fp in required_files:
             if os.path.exists(fp):
@@ -74,6 +81,21 @@ def cmd_setup(args):
             print(f"[FAIL] {args.config} 不存在，请复制 config/settings.example.ini 并填写本机配置")
             return False
         print(f"[OK] {args.config}")
+
+        cfg = configparser.ConfigParser()
+        cfg.read(args.config, encoding="utf-8")
+        required_config = {
+            "VISUAL_CAPTURE": ["chrome_path", "chrome_user_data_dir", "window_width", "window_height"],
+            "SESSION": ["daily_keyword_budget", "hourly_keyword_budget", "max_consecutive_abnormal"],
+        }
+        for section, keys in required_config.items():
+            if not cfg.has_section(section):
+                print(f"[FAIL] {args.config} 缺少 [{section}]，请从 config/settings.example.ini 同步新配置")
+                return False
+            for key in keys:
+                if not cfg.has_option(section, key):
+                    print(f"[FAIL] {args.config} 缺少 [{section}] {key}")
+                    return False
         return True
 
     print("=" * 60)
@@ -118,6 +140,7 @@ def cmd_db(args):
 
 
 def cmd_ip_pool(args):
+    print("[LEGACY] 代理池匿名采集路线已废弃；此命令仅用于历史诊断。")
     from modules.proxy_pool import ProxyPoolClient
     from modules.task_state import EvidenceRecorder
     from modules.utils import ConfigManager
@@ -198,6 +221,7 @@ def cmd_ip_pool(args):
 
 
 def cmd_adspower(args):
+    print("[LEGACY] AdsPower 非登录采集路线已废弃；此命令仅用于历史诊断。")
     from modules.adspower import AdsPowerClient
     from modules.proxy_pool import ProxyPoolClient
     from modules.task_state import EvidenceRecorder
@@ -330,9 +354,102 @@ def parse_proxy(proxy: str):
 
 
 def cmd_plugin(args):
+    print("[LEGACY] 店透视插件/DOM 采集路线已废弃；此命令仅用于历史诊断。")
     from modules.harness_plugin import run_plugin_debug
 
     run_plugin_debug(args.card)
+
+
+def _keyword_with_prefix(config_file, card_name):
+    from modules.utils import ConfigManager
+
+    config = ConfigManager(config_file)
+    prefix = config.get("INPUT", "keyword_prefix", fallback="万智牌")
+    return f"{prefix} {card_name}".strip()
+
+
+def cmd_visual_one(args):
+    from modules.visual_pipeline import prepare_single_keyword_run, run_visual_collection
+
+    keyword = _keyword_with_prefix(args.config, args.card)
+    manifest = prepare_single_keyword_run(keyword, config_file=args.config)
+    run_id = manifest["run_id"]
+    result = run_visual_collection(
+        run_id,
+        config_file=args.config,
+        limit=1,
+        manual_state=args.state,
+        launch=not args.no_launch,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_run(args):
+    from modules.visual_pipeline import run_visual_collection
+
+    result = run_visual_collection(
+        args.run_id,
+        config_file=args.config,
+        limit=args.limit,
+        manual_state=args.state,
+        launch=not args.no_launch,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_ingest(args):
+    from modules.vision_extract import ingest_rows, load_rows
+    from modules.visual_pipeline import update_manifest_after_ingest
+
+    rows = load_rows(rows_json=args.rows_json, rows_file=args.rows_file)
+    retain = True if args.retain_screenshot else None
+    result = ingest_rows(
+        task_dir=os.path.abspath(args.task_dir),
+        keyword=args.keyword,
+        rows=rows,
+        screenshot_path=os.path.abspath(args.screenshot) if args.screenshot else "",
+        confidence_threshold=args.confidence_threshold,
+        retain_screenshot=retain,
+    )
+    run_id = args.run_id
+    if not run_id:
+        task_dir = os.path.abspath(args.task_dir)
+        run_id = os.path.basename(task_dir.rstrip(os.sep))
+    try:
+        update_manifest_after_ingest(run_id, args.keyword, result.to_dict())
+    except Exception:
+        pass
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+
+
+def cmd_visual_export(args):
+    from modules.visual_pipeline import export_raw_rows, task_dir_for_run
+
+    result = export_raw_rows(args.run_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    if args.filter:
+        from modules.filter import filter_exported_results
+        from modules.utils import ConfigManager, setup_logging
+
+        config = ConfigManager(args.config)
+        logger = setup_logging(level=20)
+        task_dir = task_dir_for_run(args.run_id)
+        filtered_dir = os.path.join(task_dir, "filtered")
+        keyword = args.keyword or ""
+        card_name = args.card or keyword.replace(config.get("INPUT", "keyword_prefix", fallback="万智牌"), "").strip()
+        filter_result = filter_exported_results(
+            result["raw_excel"],
+            keyword=keyword or args.run_id,
+            card_name=card_name,
+            output_dir=filtered_dir,
+            require_magic_prefix=config.getboolean("FILTER", "require_magic_prefix", fallback=True),
+            require_card_name=bool(card_name) and config.getboolean("FILTER", "require_card_name", fallback=True),
+            exclude_shop_names=config.get("FILTER", "exclude_shop_names", fallback=""),
+            exclude_title_keywords=config.get("FILTER", "exclude_title_keywords", fallback=""),
+            logger=logger,
+        )
+        print(json.dumps(filter_result, ensure_ascii=False, indent=2))
 
 
 def main():
@@ -343,12 +460,12 @@ def main():
     sub.add_parser("setup", help="Python/依赖/目录自检")
     sub.add_parser("db", help="万智牌数据库（含 SSH 隧道）连通性")
 
-    ip = sub.add_parser("ip-pool", help="代理供应商接口和出口 IP 连通性自检")
+    ip = sub.add_parser("ip-pool", help="[legacy] 代理供应商接口和出口 IP 连通性自检")
     ip.add_argument("--proxy", help="跳过供应商接口，直接验证指定代理（host:port 或 URL）")
     ip.add_argument("--limit", type=int, default=1, help="最多测试多少个供应商返回的代理")
     ip.add_argument("--require-proxy", action="store_true", help="供应商未返回代理时视为失败，不走直连检查")
 
-    adsp = sub.add_parser("adspower", help="AdsPower Local API 自检")
+    adsp = sub.add_parser("adspower", help="[legacy] AdsPower Local API 自检")
     adsp.add_argument("--profile-id", help="AdsPower profile user_id，覆盖配置文件")
     adsp.add_argument("--start", action="store_true", help="启动指定 profile")
     adsp.add_argument("--stop", action="store_true", help="停止指定 profile")
@@ -356,8 +473,35 @@ def main():
     adsp.add_argument("--set-proxy-from-pool", action="store_true", help="从 [IP_POOL] 提取 1 个代理并写入 profile")
     adsp.add_argument("--probe-url", help="启动 profile 后用 Playwright CDP 打开 URL 并截图")
 
-    plugin = sub.add_parser("plugin", help="店透视插件单关键词 DOM 调试（旧实现，待迁移到 AdsPower）")
+    plugin = sub.add_parser("plugin", help="[legacy] 店透视插件单关键词 DOM 调试")
     plugin.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
+
+    visual_one = sub.add_parser("visual-one", help="视觉采集单关键词：系统级输入、截图、状态识别")
+    visual_one.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
+    visual_one.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
+    visual_one.add_argument("--no-launch", action="store_true", help="不启动 Chrome，只操作当前前台窗口")
+
+    visual_run = sub.add_parser("visual-run", help="运行已准备 run_id 的视觉截图采集")
+    visual_run.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
+    visual_run.add_argument("--limit", type=int, help="最多处理多少个 pending 关键词")
+    visual_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
+    visual_run.add_argument("--no-launch", action="store_true", help="不启动 Chrome，只操作当前前台窗口")
+
+    ingest = sub.add_parser("visual-ingest", help="Codex 识别后写入结构化视觉结果")
+    ingest.add_argument("task_dir", help="任务目录，如 data/tasks/xxx")
+    ingest.add_argument("--keyword", required=True, help="截图对应搜索关键词")
+    ingest.add_argument("--screenshot", help="截图路径；正常高置信识别后可删除")
+    ingest.add_argument("--rows-json", help="JSON 数组，或包含 rows 的 JSON object")
+    ingest.add_argument("--rows-file", help="识别结果 JSON 文件")
+    ingest.add_argument("--run-id", help="可选：显式指定 run_id；默认取 task_dir 末级目录")
+    ingest.add_argument("--confidence-threshold", type=float, default=0.80, help="低于该置信度标记 needs_review")
+    ingest.add_argument("--retain-screenshot", action="store_true", default=False, help="即使识别成功也保留原始截图")
+
+    export = sub.add_parser("visual-export", help="将 raw_rows.jsonl 导出为 raw_results.xlsx")
+    export.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
+    export.add_argument("--filter", action="store_true", help="导出后运行现有规则过滤")
+    export.add_argument("--keyword", help="过滤时使用的搜索关键词")
+    export.add_argument("--card", help="过滤时使用的目标牌名")
 
     args = parser.parse_args()
     if args.cmd == "setup":
@@ -370,6 +514,14 @@ def main():
         cmd_adspower(args)
     elif args.cmd == "plugin":
         cmd_plugin(args)
+    elif args.cmd == "visual-one":
+        cmd_visual_one(args)
+    elif args.cmd == "visual-run":
+        cmd_visual_run(args)
+    elif args.cmd == "visual-ingest":
+        cmd_visual_ingest(args)
+    elif args.cmd == "visual-export":
+        cmd_visual_export(args)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
 """
-浏览器管理模块
-负责浏览器的初始化、配置和会话管理
-使用 DrissionPage 4.x 的 ChromiumPage + 项目专用Chrome配置目录
+LEGACY: DrissionPage browser manager.
+
+The old Chrome profile / login / plugin / DOM collection route is no longer a
+main workflow. Keep this module only for historical reference and diagnostics.
 """
+
+LEGACY = True
+LEGACY_REASON = "Old DrissionPage browser collection route replaced by visual collection."
 import os
 import socket
 import time

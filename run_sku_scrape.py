@@ -1,11 +1,18 @@
 """
-SKU 采集独立运行脚本
+LEGACY: SKU 采集独立运行脚本
+
+SKU/detail collection and shop-insight plugin usage are out of scope for the new
+visual search-result workflow. This script is retained only for historical
+reference and exits unless explicitly allowed.
 
 用法:
     python run_sku_scrape.py -i data/tasks/xxx/合并结果_llm_filtered_pure.xlsx -r data/tasks/xxx/采数输入表_final_assignment_v1.xlsx
     python run_sku_scrape.py -i filtered_pure.xlsx -r final_assignment_v1.xlsx -o sku_output.xlsx
     python run_sku_scrape.py -i filtered_pure.xlsx -r final_assignment_v1.xlsx --resume   # 从断点恢复
 """
+LEGACY = True
+LEGACY_REASON = "SKU/plugin collection removed from the main workflow."
+
 import os
 import sys
 import argparse
@@ -64,6 +71,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="逐条打开淘宝商品页，通过店透视插件采集 SKU 数据"
     )
+    parser.add_argument(
+        "--legacy-allow",
+        action="store_true",
+        help="明确允许运行已废弃的 SKU/插件采集脚本",
+    )
     parser.add_argument("-i", "--input", help="输入 Excel（需含「商品链接」列）")
     parser.add_argument(
         "-r",
@@ -79,6 +91,11 @@ def main():
         help="日志级别",
     )
     args = parser.parse_args()
+
+    if not args.legacy_allow:
+        print("[LEGACY] SKU/店透视采集路线已废弃，默认禁止运行。")
+        print("如确需历史诊断，请显式传入 --legacy-allow。")
+        return
 
     input_file = args.input
     if not input_file:
