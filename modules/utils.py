@@ -435,8 +435,14 @@ class ConfigManager:
             'ocr_confidence_threshold': '0.80',
         }
 
-        config['BROWSER_USE_CAPTURE'] = {
+        config['BROWSER_USE'] = {
             'allowed_domains': 'https://www.taobao.com,https://s.taobao.com,*.taobao.com',
+            'chrome_executable_path': '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            'chrome_user_data_dir': '',
+            'chrome_profile_directory': 'Default',
+            'headless': 'false',
+            'keep_alive': 'false',
+            'enable_default_extensions': 'false',
             'window_width': '1600',
             'window_height': '1000',
             'max_scrolls_per_keyword': '2',
@@ -444,6 +450,18 @@ class ConfigManager:
             'min_rows_per_keyword': '5',
             'confidence_threshold': '0.80',
             'screenshot_retention': 'true',
+            'max_steps': '20',
+            'use_vision': 'true',
+            'save_history': 'true',
+        }
+
+        config['BROWSER_USE_AGENT'] = {
+            'enabled': 'false',
+            'llm_provider': 'zhipu',
+            'llm_model': 'glm-4.7-flashx',
+            'llm_api_key': '',
+            'llm_api_key_env': 'ZHIPU_API_KEY',
+            'llm_base_url': 'https://open.bigmodel.cn/api/paas/v4',
         }
 
         config['SESSION'] = {

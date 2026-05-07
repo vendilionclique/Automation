@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Codex Browser Use MCP collection task entry point.
+browser-use local Chrome collection task entry point.
 
 The old browser/plugin/DOM collection path is legacy and is intentionally not
 invoked from this file. This entry point prepares keyword tasks and evidence
-directories for the Codex-app Browser Use MCP workflow.
+directories for the public browser-use Python package workflow.
 """
 import argparse
 import json
@@ -71,7 +71,7 @@ def prepare_visual_task(args):
             evidence_dir=evidence_dir,
             last_action="browser_use_task_prepared",
             agent_notes=(
-                "Prepared for Codex Browser Use MCP login-state collection. "
+                "Prepared for browser-use local Chrome login-state collection. "
                 "Do not use legacy AdsPower/plugin/DOM collection for this task."
             ),
         )
@@ -90,8 +90,8 @@ def prepare_visual_task(args):
         "keywords": keywords,
         "records": records,
         "next_steps": [
-            "Use Codex App Browser Use MCP with logged-in browser state and low-frequency scheduling.",
-            "Capture visible screenshots and Codex-visible state summaries into each evidence_dir.",
+            "Use browser-use with logged-in local Chrome state and low-frequency scheduling.",
+            "Capture visible screenshots and browser-use state summaries into each evidence_dir.",
             "Extract visible product rows into raw rows without network/cookie/storage access.",
             "Feed raw rows into existing filter/DB/LLM/statistical assignment pipeline.",
         ],

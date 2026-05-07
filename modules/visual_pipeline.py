@@ -6,7 +6,11 @@ import os
 from datetime import datetime
 from typing import Dict, Optional
 
-from modules.browser_use_driver import browser_use_config_from_settings, write_browser_use_request
+from modules.browser_use_driver import (
+    browser_use_config_from_settings,
+    run_browser_use_capture,
+    write_browser_use_request,
+)
 from modules.session_state import initial_session_state, session_policy_from_settings
 from modules.utils import ConfigManager, ensure_dir, get_project_root
 from modules.visual_capture import (
@@ -16,6 +20,7 @@ from modules.visual_capture import (
     write_json,
 )
 from modules.vision_extract import export_jsonl_to_excel
+from modules.vision_extract import ingest_rows
 
 
 def task_dir_for_run(run_id: str) -> str:
@@ -82,6 +87,7 @@ def run_visual_collection(
     limit: Optional[int] = None,
     manual_state: Optional[str] = None,
     launch: bool = True,
+    execute_browser_use: bool = False,
 ) -> Dict:
     config = ConfigManager(config_file)
     browser_use_config = browser_use_config_from_settings(config)
@@ -95,11 +101,17 @@ def run_visual_collection(
     for record in manifest.get("records", []):
         if limit is not None and processed >= limit:
             break
-        if record.get("status") not in ("pending", "cooldown", "failed", "needs_codex_browser_use"):
+        if record.get("status") not in (
+            "pending",
+            "cooldown",
+            "failed",
+            "needs_codex_browser_use",
+            "needs_browser_use_agent",
+        ):
             continue
 
         keyword = record["keyword"]
-        record["status"] = "needs_codex_browser_use"
+        record["status"] = "needs_browser_use_agent"
         record["started_at"] = record.get("started_at") or datetime.now().isoformat(timespec="seconds")
         record["updated_at"] = datetime.now().isoformat(timespec="seconds")
         record["last_action"] = "browser_use_mcp_request_prepared"
@@ -124,19 +136,72 @@ def run_visual_collection(
         record["extra"]["target_url"] = request.url
         record["extra"]["expected_screenshot"] = request.screenshot_path
 
+        result_payload = {
+            "keyword": keyword,
+            "status": request.status,
+            "request": request.request_path,
+            "instructions": request.instruction_path,
+            "target_url": request.url,
+        }
+
         session = manifest.setdefault("session", initial_session_state(policy))
-        session["status"] = "awaiting_codex_browser_use"
+        if execute_browser_use:
+            run_result = run_browser_use_capture(
+                run_id=run_id,
+                keyword=keyword,
+                evidence_dir=evidence_dir,
+                config=browser_use_config,
+                manual_state=manual_state,
+            )
+            write_json(os.path.join(evidence_dir, "browser_use_run_result.json"), run_result.to_dict())
+            record["extra"]["browser_use_run_result"] = run_result.to_dict()
+            record["extra"]["last_screenshot"] = run_result.screenshot_path
+            record["extra"]["browser_use_history"] = run_result.history_path
+
+            capture = CaptureRecord(
+                run_id=run_id,
+                keyword=keyword,
+                evidence_dir=evidence_dir,
+                screenshot_path=run_result.screenshot_path,
+                status=run_result.status,
+                page_state={
+                    "status": run_result.page_state,
+                    "reason": run_result.error or "browser_use_agent_result",
+                    "rows_returned": len(run_result.rows),
+                },
+                retained=True,
+                notes="real_browser_use",
+            )
+            write_capture_manifest(capture)
+
+            if run_result.rows:
+                ingest_result = ingest_rows(
+                    task_dir=task_dir,
+                    keyword=keyword,
+                    rows=run_result.rows,
+                    screenshot_path=run_result.screenshot_path,
+                    confidence_threshold=browser_use_config.confidence_threshold,
+                    retain_screenshot=browser_use_config.screenshot_retention,
+                )
+                record["extra"]["ingest_result"] = ingest_result.to_dict()
+                record["status"] = "extracted" if ingest_result.ok else "needs_review"
+                record["failure_reason"] = None if ingest_result.ok else ingest_result.error
+                if ingest_result.ok:
+                    record["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            else:
+                record["status"] = run_result.status
+                record["failure_reason"] = run_result.error
+
+            record["last_action"] = "browser_use_agent_executed"
+            record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            session["status"] = "healthy" if record["status"] == "extracted" else "needs_review"
+            result_payload["browser_use_result"] = run_result.to_dict()
+        else:
+            session["status"] = "awaiting_browser_use_agent"
+
         session["updated_at"] = datetime.now().isoformat(timespec="seconds")
         save_visual_manifest(run_id, manifest)
-        results.append(
-            {
-                "keyword": keyword,
-                "status": request.status,
-                "request": request.request_path,
-                "instructions": request.instruction_path,
-                "target_url": request.url,
-            }
-        )
+        results.append(result_payload)
         processed += 1
 
     summary_path = write_json(
@@ -162,9 +227,11 @@ def export_raw_rows(run_id: str) -> Dict:
 def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict) -> str:
     manifest = load_visual_manifest(run_id)
     now = datetime.now().isoformat(timespec="seconds")
+    updated_record = False
     for record in manifest.get("records", []):
         if record.get("keyword") != keyword:
             continue
+        updated_record = True
         record["status"] = "extracted" if ingest_result.get("ok") else "needs_review"
         record["failure_reason"] = None if ingest_result.get("ok") else ingest_result.get("error")
         record["last_action"] = "visual_rows_ingested"
@@ -191,4 +258,8 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
             )
             write_capture_manifest(capture)
         break
+    if updated_record:
+        session = manifest.setdefault("session", {})
+        session["status"] = "healthy" if ingest_result.get("ok") else "needs_review"
+        session["updated_at"] = now
     return save_visual_manifest(run_id, manifest)

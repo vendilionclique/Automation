@@ -85,7 +85,7 @@ def cmd_setup(args):
         cfg = configparser.ConfigParser()
         cfg.read(args.config, encoding="utf-8")
         required_config = {
-            "BROWSER_USE_CAPTURE": ["allowed_domains", "max_scrolls_per_keyword", "min_rows_per_keyword"],
+            "BROWSER_USE": ["allowed_domains", "max_scrolls_per_keyword", "min_rows_per_keyword"],
             "VISUAL_CAPTURE": ["chrome_path", "chrome_user_data_dir", "window_width", "window_height"],
             "SESSION": ["daily_keyword_budget", "hourly_keyword_budget", "max_consecutive_abnormal"],
         }
@@ -97,15 +97,33 @@ def cmd_setup(args):
                 if not cfg.has_option(section, key):
                     print(f"[FAIL] {args.config} 缺少 [{section}] {key}")
                     return False
-        profile_dir = cfg.get("VISUAL_CAPTURE", "chrome_user_data_dir", fallback="").strip()
+        try:
+            import browser_use  # noqa: F401
+            print("[OK] browser-use Python package")
+        except ImportError:
+            print("[FAIL] browser-use 未安装；请运行: pip install -r requirements.txt")
+            return False
+
+        executable = cfg.get("BROWSER_USE", "chrome_executable_path", fallback="").strip()
+        if executable:
+            executable = os.path.expanduser(os.path.expandvars(executable))
+            if os.path.exists(executable):
+                print(f"[OK] browser-use Chrome executable: {executable}")
+            else:
+                print(f"[WARN] browser-use Chrome executable 不存在: {executable}")
+                print("       请安装 Google Chrome，或把 [BROWSER_USE] chrome_executable_path 改为本机 Chrome/Chromium 路径。")
+
+        profile_dir = cfg.get("BROWSER_USE", "chrome_user_data_dir", fallback="").strip()
         if not profile_dir:
-            print(f"[WARN] {args.config} 未配置 [VISUAL_CAPTURE] chrome_user_data_dir")
-            print("       若使用 Codex App Browser Use MCP，可在 Codex App 中维护浏览器登录态。")
+            profile_dir = cfg.get("VISUAL_CAPTURE", "chrome_user_data_dir", fallback="").strip()
+        if not profile_dir:
+            print(f"[WARN] {args.config} 未配置 [BROWSER_USE] chrome_user_data_dir")
+            print("       browser-use 会启动本机 Chrome；如需复用淘宝登录态，请配置 Chrome user data dir/profile。")
             return True
         profile_dir = os.path.expanduser(profile_dir)
         if not os.path.exists(profile_dir):
             print(f"[WARN] Chrome profile 目录不存在: {profile_dir}")
-            print("       若使用 Codex App Browser Use MCP，可在 Codex App 中维护浏览器登录态。")
+            print("       可先用 browser-use/Chrome 创建专用 profile 并人工登录淘宝。")
             return True
         return True
 
@@ -391,6 +409,7 @@ def cmd_visual_one(args):
         limit=1,
         manual_state=args.state,
         launch=not args.no_launch,
+        execute_browser_use=args.agent_execute,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -404,6 +423,7 @@ def cmd_visual_run(args):
         limit=args.limit,
         manual_state=args.state,
         launch=not args.no_launch,
+        execute_browser_use=args.agent_execute,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -487,16 +507,18 @@ def main():
     plugin = sub.add_parser("plugin", help="[legacy] 店透视插件单关键词 DOM 调试")
     plugin.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
 
-    visual_one = sub.add_parser("visual-one", help="准备单关键词 Codex Browser Use MCP 采集请求")
+    visual_one = sub.add_parser("visual-one", help="准备单关键词 browser-use MCP 采集任务")
     visual_one.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
     visual_one.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
     visual_one.add_argument("--no-launch", action="store_true", help="不启动 Chrome，只操作当前前台窗口")
+    visual_one.add_argument("--agent-execute", action="store_true", help="[fallback] 项目内直接运行 browser-use Agent；需要额外 LLM API key")
 
-    visual_run = sub.add_parser("visual-run", help="为已准备 run_id 生成 Codex Browser Use MCP 采集请求")
+    visual_run = sub.add_parser("visual-run", help="为已准备 run_id 生成 browser-use MCP 采集任务")
     visual_run.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
     visual_run.add_argument("--limit", type=int, help="最多处理多少个 pending 关键词")
     visual_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
     visual_run.add_argument("--no-launch", action="store_true", help="不启动 Chrome，只操作当前前台窗口")
+    visual_run.add_argument("--agent-execute", action="store_true", help="[fallback] 项目内直接运行 browser-use Agent；需要额外 LLM API key")
 
     ingest = sub.add_parser("visual-ingest", help="Codex 识别后写入结构化视觉结果")
     ingest.add_argument("task_dir", help="任务目录，如 data/tasks/xxx")

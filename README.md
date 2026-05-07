@@ -1,330 +1,183 @@
-# 淘宝店透视插件自动化工具
+# 淘宝万智牌价格视觉采集工具
 
-## 项目简介
+本项目用于采集淘宝上万智牌相关商品的可见价格信息，并接入规则过滤、DB/LLM 过滤、统计评估和最终赋值流程。
 
-这是一个基于Python开发的淘宝自动化工具，专门用于使用店透视插件批量搜索关键词并导出数据。工具支持模块化设计，可以方便地进行功能扩展和优化。
+当前主线已经从旧的“非登录态 + AdsPower 指纹浏览器 + 代理池 + 店透视插件 + DOM 导出”切换为：
 
-## 主要功能
+```text
+开源 browser-use MCP server
++ 本机 Chrome 真实登录态
++ Codex App 低频人工辅助操作
++ 可见截图/状态
++ Codex 视觉识别
+```
 
-- ✅ 自动登录淘宝（支持Cookie保存，避免重复登录）
-- ✅ 使用店透视插件搜索关键词
-- ✅ 批量处理关键词列表
-- ✅ 多种数据导出格式（Excel、CSV、JSON）
-- ✅ 可配置的运行参数
-- ✅ 交互式和命令行两种运行模式
-- ✅ 可打包为独立exe文件
-- ✅ SKU 采集支持 A/B/C 采样（大店名单 + 高付款店），降低打开 URL 数量
-- ✅ 海量 listing 支持 SPU 一口价统计捷径（`card_price_proxy`）
-- ✅ 无 SKU 场景自动兜底（SPU 标题 + 一口价 + stock=1）
+旧模块仍保留为 legacy 诊断，不再作为新增功能的设计基础。
 
-## 技术栈
+## 当前状态
 
-- **语言**: Python 3.10+
-- **浏览器自动化**: DrissionPage（专为中文电商网站设计）
-- **数据处理**: pandas, openpyxl
-- **打包工具**: PyInstaller
+- 依赖自检已通过：`.venv/bin/python harness.py setup`
+- 已验证 browser-use 本地工具可以打开淘宝搜索页并看到商品列表。
+- 单关键词 `万智牌 中止` 已跑通可见页面闭环：
+  - browser-use 打开淘宝搜索结果页
+  - Codex 从可见截图整理 6 条商品行
+  - `visual-ingest` 写入 `raw_rows.jsonl` / `raw_results.xlsx`
+  - `visual-export --filter` 接入现有规则过滤，6 行过滤为 5 行，最低价为 80
+- 待补强：Codex App/macOS 权限刚调整后需要重启 Codex App；截图文件自动落盘仍需复测并补齐。
+
+## 快速开始
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp config/settings.example.ini config/settings.ini
+```
+
+编辑 `config/settings.ini`：
+
+- `[BROWSER_USE] chrome_executable_path` 指向本机 Chrome。
+- `[BROWSER_USE] chrome_user_data_dir` / `chrome_profile_directory` 指向已人工登录淘宝的 Chrome profile。
+- 不要把 `config/settings.ini` 提交到 Git，它会包含本机路径和可能的密钥。
+
+自检：
+
+```bash
+.venv/bin/python harness.py setup
+```
+
+准备单关键词视觉任务：
+
+```bash
+.venv/bin/python harness.py visual-one 中止
+```
+
+Codex App 通过 browser-use MCP 打开任务中的淘宝 URL，确认页面状态并从可见截图整理商品行后，写入结构化结果：
+
+```bash
+.venv/bin/python harness.py visual-ingest data/tasks/<run_id> \
+  --keyword "万智牌 中止" \
+  --rows-file rows.json \
+  --screenshot "data/tasks/<run_id>/evidence/万智牌 中止/<screenshot>.png" \
+  --retain-screenshot
+```
+
+导出 raw Excel，并可选接入规则过滤：
+
+```bash
+.venv/bin/python harness.py visual-export <run_id>
+.venv/bin/python harness.py visual-export <run_id> --filter --keyword "万智牌 中止" --card "中止"
+```
+
+## Codex App / browser-use 权限提醒
+
+如果刚给 Codex App、Chrome、终端或自动化组件打开了 macOS 权限，请先重启 Codex App 再测试。否则可能出现浏览器能打开但截图、屏幕读取、辅助功能控制不稳定的情况。
+
+测试时只做低频、可观察操作：
+
+- 不自动登录。
+- 不处理验证码、短信、安全验证。
+- 不读 DOM、接口、cookies、storage、CDP 数据。
+- 只采集真实登录用户当前可见页面里的标题、价格、店铺、地区等信息。
+
+## 主要入口
+
+```bash
+# 准备视觉采集任务
+.venv/bin/python main.py -e cards.xlsx
+.venv/bin/python main.py -k 中止
+
+# 视觉采集任务
+.venv/bin/python harness.py visual-one 中止
+.venv/bin/python harness.py visual-run <run_id> --limit 1
+.venv/bin/python harness.py visual-ingest data/tasks/<run_id> --keyword "万智牌 中止" --rows-file rows.json
+.venv/bin/python harness.py visual-export <run_id>
+
+# 后处理
+.venv/bin/python run_llm_filter.py -i data/tasks/<run_id>/合并结果.xlsx
+.venv/bin/python run_statistical_eval.py -i data/tasks/<run_id>/合并结果.xlsx
+.venv/bin/python run_final_assignment.py -i data/tasks/<run_id>/合并结果.xlsx
+
+# 自检
+.venv/bin/python harness.py setup
+.venv/bin/python harness.py db
+
+# legacy 诊断，仅用于历史排查
+.venv/bin/python harness.py ip-pool
+.venv/bin/python harness.py adspower
+.venv/bin/python harness.py plugin 中止
+```
 
 ## 项目结构
 
-```
-taobao_automation/
-├── main.py                 # 主程序入口
-├── config/
-│   ├── keywords.txt        # 关键词列表
-│   └── settings.ini       # 配置文件
-├── modules/
-│   ├── __init__.py        # 模块包初始化
-│   ├── browser.py         # 浏览器管理模块
-│   ├── login.py           # 登录模块
-│   ├── search.py          # 搜索模块
-│   ├── export.py          # 导出模块
-│   └── utils.py           # 工具函数模块
-├── data/                  # 数据输出目录
-├── requirements.txt       # 依赖列表
-└── README.md             # 使用说明文档
-```
+```text
+main.py                  # 新主入口：准备视觉采集任务
+harness.py               # 诊断与视觉任务入口
+run_llm_filter.py        # LLM 过滤 CLI
+run_statistical_eval.py  # 统计诊断
+run_final_assignment.py  # 最终赋值
+modules/
+  input_reader.py        # Excel 输入、去重、关键词生成
+  filter.py              # 规则过滤与最低价提取
+  checkpoint.py          # checkpoint 能力
+  task_state.py          # 任务状态、失败原因、证据目录
+  llm_client.py          # LLM 调用与 prompt 拼装
+  llm_filter.py          # LLM 批量过滤合并结果 Excel
+  mtg_db.py              # MySQL/SSH 隧道查牌名参考与短名冲突
+  price_cluster_eval.py  # 统计评估
+  final_assignment.py    # 最终赋值
+  browser_use_driver.py  # browser-use MCP 请求/执行说明/agent fallback
+  page_state.py          # 基于截图的页面状态判断
+  visual_capture.py      # 截图证据与 capture manifest
+  vision_extract.py      # 视觉识别结果写入 JSONL/XLSX
+  session_state.py       # 账号健康与安全预算状态
+  visual_pipeline.py     # 视觉任务运行、ingest、export 编排
 
-## 安装和配置
-
-### 1. 环境要求
-
-- Python 3.10 或更高版本
-- Chrome 浏览器（最新版本）
-- Windows 操作系统
-
-### 2. 安装依赖
-
-```bash
-# 进入项目目录
-cd taobao_automation
-
-# 安装依赖包
-pip install -r requirements.txt
-```
-
-### 3. 配置店透视插件
-
-1. 在Chrome浏览器中安装店透视插件
-2. 登录淘宝账号
-3. 测试插件是否正常工作
-
-## 使用方法
-
-### 方法一：命令行模式
-
-#### 基础使用
-
-```bash
-# 使用默认关键词文件
-python main.py
-
-# 指定关键词文件
-python main.py -f config/keywords.txt
-
-# 直接指定关键词
-python main.py -k "手机,电脑,平板"
-
-# 指定导出格式
-python main.py -f config/keywords.txt --format excel
-
-# 强制重新登录
-python main.py -f config/keywords.txt --force-login
+  # legacy
+  adspower.py
+  proxy_pool.py
+  browser.py
+  login.py
+  search.py
+  export.py
+  harness_plugin.py
+  warmup.py
+  item_sku_scraper.py
 ```
 
-#### 高级参数
+## 输出与本机文件
 
-```bash
-# 查看帮助信息
-python main.py --help
+Git 只同步代码、配置模板和空目录骨架。以下内容不提交：
 
-# 指定配置文件
-python main.py -c custom_settings.ini
+- `config/settings.ini`
+- `config/keywords.txt`
+- `local/*`
+- `data/tasks/*`
+- `data/checkpoints/*`
+- `data/logs/*`
+- 浏览器 profile、cookies、截图证据、运行 Excel
 
-# 使用CSV格式导出
-python main.py -k "手机,电脑" --format csv
+换机器或重启环境后，需要重新安装依赖、复制 `settings.ini`、配置 Chrome profile，并人工确认淘宝登录态。
 
-# 使用JSON格式导出
-python main.py -k "手机,电脑" --format json
-```
+## 已废弃路线
 
-### 方法二：交互模式
+以下路线已经通过实测判定不适合作为后续主线：
 
-```bash
-# 启动交互模式
-python main.py -i
-```
+- AdsPower 新指纹 + 本机 IP + 非登录态
+- AdsPower 新指纹 + 代理 IP + 非登录态
+- 本机 Chrome 新 profile + 非登录态
+- 店透视插件路线
+- DOM、接口、CDP 读取路线
 
-交互模式支持：
-1. 从文件加载关键词
-2. 手动输入关键词
-3. 实时选择操作
+后续开发不要围绕这些路线新增功能。保留相关代码只为历史诊断和对照排查。
 
-### 方法三：作为Python模块使用
+## 下一步
 
-```python
-from modules import TaobaoAutomation
+1. 重启 Codex App，确认新开的权限生效。
+2. 复测 browser-use 可见截图自动保存到 `data/tasks/<run_id>/evidence/`。
+3. 用 3-5 个关键词做小批量试跑，每个关键词之间保持人工可观察节奏。
+4. 补异常状态样例：登录弹窗、验证码/安全验证、白框架、空结果。
+5. 加强视觉行字段校验和人工复核入口。
 
-# 创建自动化工具实例
-automation = TaobaoAutomation()
+## 免责声明
 
-# 初始化
-automation.initialize()
-
-# 运行自动化流程
-keywords = ['手机', '电脑', '平板']
-results = automation.run(keywords, export_format='excel')
-
-# 查看结果
-print(f"成功导出: {results['successful_exports']}/{results['total_keywords']}")
-```
-
-## 配置说明
-
-### settings.ini 配置文件
-
-```ini
-[BROWSER]
-# 是否使用无头模式（后台运行）
-headless = False
-# 用户数据目录（用于保存登录状态）
-user_data_dir =
-
-[SEARCH]
-# 关键词搜索之间的延迟时间（秒）
-delay_between_keywords = 2
-# 搜索结果最大等待时间（秒）
-max_wait_time = 30
-
-[EXPORT]
-# 默认导出格式：excel, csv, json
-default_format = excel
-# 数据输出目录
-output_dir = data
-
-[LOGGING]
-# 日志级别：DEBUG, INFO, WARNING, ERROR
-level = INFO
-# 日志文件路径
-log_file = data/automation.log
-
-[SKU_SAMPLING]
-# 每个牌名最多打开 URL 数
-max_open_urls = 5
-# 活跃店铺阈值（按付款人数聚合店铺后取前K）
-pay_top_k = 12
-# 大店名单
-big_sellers_file = config/big_sellers.txt
-big_seller_match_mode = contains
-# 海量 listing 快捷阈值
-massive_listing_threshold = 120
-massive_unique_shop_threshold = 20
-min_valid_prices_for_massive = 50
-```
-
-`config/big_sellers.txt` 每行一个店名，可用 `contains` 或 `exact` 匹配。
-
-### keywords.txt 关键词文件
-
-```
-# 每行一个关键词
-# 以#开头的行是注释
-手机
-电脑
-平板
-```
-
-## 打包为EXE文件
-
-### 打包步骤
-
-1. **安装打包工具**
-
-```bash
-pip install pyinstaller
-```
-
-2. **打包为单个exe文件**
-
-```bash
-# 基础打包
-pyinstaller --onefile main.py
-
-# 完整打包（推荐）
-pyinstaller --onefile --windowed --add-data "config;config" --add-data "modules;modules" --name "淘宝自动化工具" main.py
-```
-
-3. **打包选项说明**
-
-- `--onefile`: 打包为单个exe文件
-- `--windowed`: 不显示控制台窗口（GUI模式）
-- `--add-data`: 添加数据文件
-- `--name`: 指定输出文件名
-
-### 使用打包后的exe
-
-```bash
-# 直接运行
-淘宝自动化工具.exe
-
-# 指定关键词文件
-淘宝自动化工具.exe -f keywords.txt
-
-# 交互模式
-淘宝自动化工具.exe -i
-```
-
-## 注意事项
-
-### 1. 店透视插件选择器
-
-由于店透视插件版本可能不同，插件按钮和导出按钮的选择器可能需要调整。请根据实际插件版本修改以下文件中的选择器：
-
-- `modules/search.py`: `plugin_selectors` 字典
-- `modules/export.py`: 导出按钮选择器列表
-
-### 2. 登录问题
-
-- 首次运行需要手动登录
-- 登录信息会保存在cookie文件中
-- 如遇登录失败，使用 `--force-login` 参数强制重新登录
-
-### 3. 反爬虫机制
-
-- 淘宝有反爬虫机制，请注意请求频率
-- 建议在配置文件中设置适当的延迟时间
-- 避免在短时间内进行大量请求
-
-### 4. 浏览器兼容性
-
-- 确保Chrome浏览器是最新版本
-- 如遇到兼容性问题，请更新Chrome和DrissionPage
-
-## 功能扩展
-
-### 1. 添加新的导出格式
-
-在 `modules/export.py` 中添加新的导出方法：
-
-```python
-def export_to_custom_format(self, data, filename=None):
-    # 实现自定义导出逻辑
-    pass
-```
-
-### 2. 添加新的搜索功能
-
-在 `modules/search.py` 中扩展搜索功能：
-
-```python
-def advanced_search(self, keyword, filters=None):
-    # 实现高级搜索功能
-    pass
-```
-
-### 3. 添加代理支持
-
-修改 `modules/browser.py` 添加代理配置：
-
-```python
-co.set_proxy('http://proxy.example.com:8080')
-```
-
-## 常见问题
-
-### Q1: 运行时提示找不到Chrome浏览器
-
-**A**: 请确保Chrome浏览器已安装并设置为默认浏览器。DrissionPage会自动检测Chrome安装位置。
-
-### Q2: 插件按钮找不到
-
-**A**: 可能是插件版本不同，需要使用浏览器开发者工具查看插件按钮的实际选择器，然后修改代码。
-
-### Q3: Cookie保存失败
-
-**A**: 检查data目录是否有写入权限，确保程序有权限创建和修改文件。
-
-### Q4: 打包后exe无法运行
-
-**A**: 可能是依赖文件未正确包含。尝试使用 `--onedir` 模式打包，检查是否缺少文件。
-
-## 技术支持
-
-如有问题，请检查：
-1. 日志文件：`data/automation.log`
-2. 错误信息的堆栈跟踪
-3. 浏览器控制台的错误信息
-
-## 版本历史
-
-- **v1.0.0** (2026-03-18)
-  - 初始版本发布
-  - 支持基本的搜索和导出功能
-  - 支持多种导出格式
-
-## 许可证
-
-本项目仅供学习和研究使用，请遵守淘宝平台的使用条款和相关法律法规。
-
----
-
-**免责声明**: 本工具仅用于合法的数据采集和分析目的。使用本工具进行大规模数据爬取或商业用途时，请确保遵守相关网站的服务条款和当地法律法规。开发者不对因使用本工具而产生的任何法律问题或经济损失承担责任。
+本工具仅用于合法的数据采集和分析目的。使用时请遵守相关网站服务条款和当地法律法规。采集速度从属于账号安全和数据可审计性。
