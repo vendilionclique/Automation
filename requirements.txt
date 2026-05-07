@@ -7,11 +7,5 @@ paramiko>=4.0.0
 Pillow>=10.0.0
 browser-use>=0.12.6
 
-# Legacy PyAutoGUI visual fallback:
-pyautogui>=0.9.54
-
-# Legacy diagnostics only:
-# playwright>=1.45.0
-
 # 打包依赖（可选）
 # pyinstaller>=6.0.0

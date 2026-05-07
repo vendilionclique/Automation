@@ -84,8 +84,6 @@ class BrowserUseRunResult:
 
 def browser_use_config_from_settings(config) -> BrowserUseConfig:
     section = "BROWSER_USE"
-    old_section = "BROWSER_USE_CAPTURE"
-    visual = "VISUAL_CAPTURE"
     agent_section = "BROWSER_USE_AGENT"
     llm_section = "LLM"
     return BrowserUseConfig(
@@ -93,15 +91,11 @@ def browser_use_config_from_settings(config) -> BrowserUseConfig:
             config.get(
                 section,
                 "allowed_domains",
-                fallback=config.get(
-                    old_section,
-                    "allowed_domains",
-                    fallback="https://www.taobao.com,https://s.taobao.com,*.taobao.com",
-                ),
+                fallback="https://www.taobao.com,https://s.taobao.com,*.taobao.com",
             )
         ),
-        window_width=config.getint(section, "window_width", fallback=config.getint(visual, "window_width", fallback=1600)),
-        window_height=config.getint(section, "window_height", fallback=config.getint(visual, "window_height", fallback=1000)),
+        window_width=config.getint(section, "window_width", fallback=1600),
+        window_height=config.getint(section, "window_height", fallback=1000),
         max_scrolls_per_keyword=config.getint(section, "max_scrolls_per_keyword", fallback=2),
         page_load_wait=config.getfloat(section, "page_load_wait", fallback=8.0),
         min_rows_per_keyword=config.getint(section, "min_rows_per_keyword", fallback=5),
@@ -110,18 +104,10 @@ def browser_use_config_from_settings(config) -> BrowserUseConfig:
         chrome_executable_path=config.get(
             section,
             "chrome_executable_path",
-            fallback=config.get(visual, "chrome_path", fallback="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            fallback="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         ),
-        chrome_user_data_dir=config.get(
-            section,
-            "chrome_user_data_dir",
-            fallback=config.get(visual, "chrome_user_data_dir", fallback=""),
-        ),
-        chrome_profile_directory=config.get(
-            section,
-            "chrome_profile_directory",
-            fallback=config.get(visual, "chrome_profile_directory", fallback=""),
-        ),
+        chrome_user_data_dir=config.get(section, "chrome_user_data_dir", fallback=""),
+        chrome_profile_directory=config.get(section, "chrome_profile_directory", fallback=""),
         headless=config.getboolean(section, "headless", fallback=False),
         keep_alive=config.getboolean(section, "keep_alive", fallback=False),
         enable_default_extensions=config.getboolean(section, "enable_default_extensions", fallback=False),

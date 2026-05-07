@@ -26,12 +26,14 @@ class TaskStatus(str, Enum):
 
 
 class FailureReason(str, Enum):
-    PROXY_ERROR = "proxy_error"
-    ADSPOWER_ERROR = "adspower_error"
-    PLUGIN_ERROR = "plugin_error"
     CAPTCHA_OR_RISK = "captcha_or_risk"
+    LOGIN_REQUIRED = "login_required"
+    WHITE_SKELETON = "white_skeleton"
+    SCREENSHOT_FAILED = "screenshot_failed"
+    OCR_LOW_CONFIDENCE = "ocr_low_confidence"
+    MANUAL_REVIEW_NEEDED = "manual_review_needed"
+    RATE_LIMITED = "rate_limited"
     NO_RESULTS = "no_results"
-    DOM_CHANGED = "dom_changed"
     TIMEOUT = "timeout"
     UNKNOWN = "unknown"
 
@@ -50,8 +52,6 @@ class TaskRecord:
     retry_count: int = 0
     last_action: Optional[str] = None
     agent_notes: str = ""
-    profile_id: Optional[str] = None
-    proxy: Optional[str] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     updated_at: str = field(default_factory=now_iso)

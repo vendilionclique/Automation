@@ -56,7 +56,6 @@ def prepare_single_keyword_run(keyword: str, config_file: str = "config/settings
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source": {"keyword": keyword, "config": os.path.abspath(config_file)},
         "workflow": "browser_use_login_state_capture",
-        "legacy_collection_disabled": True,
         "keywords": [keyword],
         "records": [
             {
@@ -68,8 +67,6 @@ def prepare_single_keyword_run(keyword: str, config_file: str = "config/settings
                 "retry_count": 0,
                 "last_action": "visual_task_prepared",
                 "agent_notes": "",
-                "profile_id": None,
-                "proxy": None,
                 "started_at": None,
                 "finished_at": None,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -86,7 +83,6 @@ def run_visual_collection(
     config_file: str = "config/settings.ini",
     limit: Optional[int] = None,
     manual_state: Optional[str] = None,
-    launch: bool = True,
     execute_browser_use: bool = False,
 ) -> Dict:
     config = ConfigManager(config_file)

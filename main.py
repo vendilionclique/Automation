@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-browser-use local Chrome collection task entry point.
-
-The old browser/plugin/DOM collection path is legacy and is intentionally not
-invoked from this file. This entry point prepares keyword tasks and evidence
-directories for the public browser-use Python package workflow.
-"""
+"""browser-use local Chrome collection task entry point."""
 import argparse
 import json
 import os
@@ -72,7 +66,7 @@ def prepare_visual_task(args):
             last_action="browser_use_task_prepared",
             agent_notes=(
                 "Prepared for browser-use local Chrome login-state collection. "
-                "Do not use legacy AdsPower/plugin/DOM collection for this task."
+                "Collect only visible page evidence and structured visual rows."
             ),
         )
         records.append(record.to_dict())
@@ -86,7 +80,6 @@ def prepare_visual_task(args):
             "config": os.path.abspath(args.config),
         },
         "workflow": "browser_use_login_state_capture",
-        "legacy_collection_disabled": True,
         "keywords": keywords,
         "records": records,
         "next_steps": [
@@ -126,7 +119,7 @@ def prepare_visual_task(args):
     print(f"关键词文件: {keywords_path}")
     if checkpoint_copy:
         print(f"checkpoint: {checkpoint_copy}")
-    print("\n旧 AdsPower/店透视/DOM 采集链路已从 main.py 禁用。")
+    print("\n下一步: 使用 harness.py visual-run 生成 browser-use MCP 采集请求。")
 
 
 def _safe_name(value):

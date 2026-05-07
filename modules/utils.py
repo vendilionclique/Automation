@@ -381,58 +381,16 @@ class ConfigManager:
 
         config = configparser.ConfigParser()
 
-        # 浏览器设置
-        config['BROWSER'] = {
-            'headless': 'False',
-            'user_data_dir': '',
-            'timeout': '30'
-        }
-
-        # 搜索设置
-        config['SEARCH'] = {
-            'delay_between_keywords': '2',
-            'max_wait_time': '30',
-            'retry_attempts': '3'
-        }
-
-        # 导出设置
-        config['EXPORT'] = {
-            'default_format': 'excel',
-            'output_dir': 'data',
-            'auto_download': 'True'
-        }
-
-        # 日志设置
-        config['LOGGING'] = {
-            'level': 'INFO',
-            'log_file': 'data/automation.log',
-            'max_size': '10'
-        }
-
         config['INPUT'] = {
+            'excel_file': '',
+            'card_name_column': '中文卡牌名',
+            'product_id_column': 'productId',
             'keyword_prefix': '万智牌',
         }
 
         config['CHECKPOINT'] = {
             'checkpoint_dir': 'data/checkpoints',
             'auto_resume': 'true',
-        }
-
-        config['VISUAL_CAPTURE'] = {
-            'driver': 'pyautogui',
-            'browser_name': 'Google Chrome',
-            'chrome_path': '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-            'chrome_user_data_dir': '',
-            'chrome_profile_directory': '',
-            'window_x': '0',
-            'window_y': '0',
-            'window_width': '1600',
-            'window_height': '1000',
-            'startup_wait': '4',
-            'page_load_wait': '8',
-            'post_search_wait': '2',
-            'search_mode': 'url',
-            'ocr_confidence_threshold': '0.80',
         }
 
         config['BROWSER_USE'] = {
@@ -469,6 +427,26 @@ class ConfigManager:
             'hourly_keyword_budget': '5',
             'cooldown_minutes': '60',
             'max_consecutive_abnormal': '2',
+            'pause_on_login_required': 'true',
+            'pause_on_captcha_required': 'true',
+            'pause_on_white_skeleton': 'true',
+        }
+
+        config['FILTER'] = {
+            'require_magic_prefix': 'true',
+            'require_card_name': 'true',
+            'exclude_title_keywords': 'token,徽记,补充包,补充盒,衍生物,代牌,牌套,卡膜,卡盒,牌盒,卡册,牌本,收纳,周边,海报,指示物',
+            'filtered_dir': 'data/filtered',
+            'use_db_reference': 'true',
+            'enable_llm_filter': 'true',
+            'exclude_shop_names': '真橙卡牌',
+            'short_name_hard_veto': 'true',
+            'short_name_conflict_limit': '200',
+        }
+
+        config['LOGGING'] = {
+            'level': 'INFO',
+            'log_file': 'data/logs/automation.log',
         }
 
         # 保存默认配置

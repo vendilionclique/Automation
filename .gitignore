@@ -29,10 +29,10 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
-taobao_automation/.skill-sources/
 
 # Project data and generated artifacts
 data/*
@@ -72,6 +72,7 @@ config/keywords.txt
 chrome_profile/
 chrome_user_data/
 user_data/
+taobao_automation/
 local/*
 !local/.gitkeep
 !local/README.md
