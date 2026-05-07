@@ -1,0 +1,68 @@
+{
+  "plugin": {
+    "trigger_button": [
+      "text:市场分析"
+    ],
+    "search_input": [
+      "text:搜索内容",
+      "input[placeholder*='搜索']"
+    ],
+    "start_analysis": [
+      "text:开始分析"
+    ],
+    "results_summary": [
+      "text:已成功加载"
+    ],
+    "export_button": [
+      "text:导出表格"
+    ],
+    "clear_cache": [
+      "text:清理缓存",
+      "text:清缓存"
+    ],
+    "close_dialog": [
+      "text:取消"
+    ]
+  },
+  "item_sku": {
+    "panel_trigger": [
+      "text:店透视",
+      "text:店透视插件",
+      "text:数据看板",
+      "text:插件"
+    ],
+    "sku_preview_entry": [
+      "text:SKU预览",
+      "text:sku预览",
+      "text:规格预览",
+      "text:SKU"
+    ],
+    "export_tab": [
+      "text:导出表格",
+      "text:导出",
+      "text:表格导出"
+    ],
+    "copy_sku_button": [
+      "text:复制表格",
+      "text:复制SKU",
+      "text:复制"
+    ],
+    "sku_table": [
+      "tag:table"
+    ],
+    "page_load_indicator": [
+      "css:.sku-item",
+      "css:.tb-sku",
+      "css:.detail-content"
+    ],
+    "login_indicator": [
+      "text:请登录",
+      "css:input[name='TPL_username']"
+    ],
+    "captcha_indicator": [
+      "css:#nc_1_n1z",
+      "css:.J_MIDDLEWARE_FRAME_WIDGET",
+      "text:请滑动验证"
+    ]
+  }
+}

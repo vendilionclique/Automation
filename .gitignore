@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project data and generated artifacts
+data/*
+!data/.gitkeep
+!data/downloads/
+data/downloads/*
+!data/downloads/.gitkeep
+!data/filtered/
+data/filtered/*
+!data/filtered/.gitkeep
+!data/checkpoints/
+data/checkpoints/*
+!data/checkpoints/.gitkeep
+!data/logs/
+data/logs/*
+!data/logs/.gitkeep
+!data/tasks/
+data/tasks/*
+!data/tasks/.gitkeep
+*.log
+*.pkl
+cookies/
+sessions/
+*.tmp
+*.bak
+*.old
+.DS_Store
+
+# PyInstaller
+*.spec
+
+# Sensitive local configuration
+config/settings.ini
+config/keywords.txt
+
+# Local browser and session data
+chrome_profile/
+chrome_user_data/
+user_data/
+local/*
+!local/.gitkeep
+!local/README.md
