@@ -34,7 +34,6 @@ def cmd_setup(args):
             ("openpyxl", "openpyxl"),
             ("configparser", "configparser"),
             ("Pillow", "PIL"),
-            ("pyautogui", "pyautogui"),
             ("pyperclip", "pyperclip"),
         ]
         missing = []
@@ -65,6 +64,7 @@ def cmd_setup(args):
             "modules/checkpoint.py",
             "modules/utils.py",
             "modules/visual_driver.py",
+            "modules/browser_use_driver.py",
             "modules/page_state.py",
             "modules/visual_capture.py",
             "modules/vision_extract.py",
@@ -85,6 +85,7 @@ def cmd_setup(args):
         cfg = configparser.ConfigParser()
         cfg.read(args.config, encoding="utf-8")
         required_config = {
+            "BROWSER_USE_CAPTURE": ["allowed_domains", "max_scrolls_per_keyword", "min_rows_per_keyword"],
             "VISUAL_CAPTURE": ["chrome_path", "chrome_user_data_dir", "window_width", "window_height"],
             "SESSION": ["daily_keyword_budget", "hourly_keyword_budget", "max_consecutive_abnormal"],
         }
@@ -96,6 +97,16 @@ def cmd_setup(args):
                 if not cfg.has_option(section, key):
                     print(f"[FAIL] {args.config} 缺少 [{section}] {key}")
                     return False
+        profile_dir = cfg.get("VISUAL_CAPTURE", "chrome_user_data_dir", fallback="").strip()
+        if not profile_dir:
+            print(f"[WARN] {args.config} 未配置 [VISUAL_CAPTURE] chrome_user_data_dir")
+            print("       若使用 Codex App Browser Use MCP，可在 Codex App 中维护浏览器登录态。")
+            return True
+        profile_dir = os.path.expanduser(profile_dir)
+        if not os.path.exists(profile_dir):
+            print(f"[WARN] Chrome profile 目录不存在: {profile_dir}")
+            print("       若使用 Codex App Browser Use MCP，可在 Codex App 中维护浏览器登录态。")
+            return True
         return True
 
     print("=" * 60)
@@ -476,12 +487,12 @@ def main():
     plugin = sub.add_parser("plugin", help="[legacy] 店透视插件单关键词 DOM 调试")
     plugin.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
 
-    visual_one = sub.add_parser("visual-one", help="视觉采集单关键词：系统级输入、截图、状态识别")
+    visual_one = sub.add_parser("visual-one", help="准备单关键词 Codex Browser Use MCP 采集请求")
     visual_one.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
     visual_one.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
     visual_one.add_argument("--no-launch", action="store_true", help="不启动 Chrome，只操作当前前台窗口")
 
-    visual_run = sub.add_parser("visual-run", help="运行已准备 run_id 的视觉截图采集")
+    visual_run = sub.add_parser("visual-run", help="为已准备 run_id 生成 Codex Browser Use MCP 采集请求")
     visual_run.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
     visual_run.add_argument("--limit", type=int, help="最多处理多少个 pending 关键词")
     visual_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")

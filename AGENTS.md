@@ -1,13 +1,13 @@
 # 淘宝万智牌价格视觉采集工具
 
-本项目用于采集淘宝上万智牌相关商品的可见价格信息，并进入规则/DB/LLM 过滤、统计评估和最终赋值流程。项目正在重构中：旧的“非登录态 + AdsPower 指纹浏览器 + 代理池 + 店透视插件 + DOM 导出”路线已经通过实测判定不可行，后续切换为“真实 Chrome 登录态 + 低频 human-in-the-loop 操作 + 系统截图 + OCR/VLM 视觉识别”的采集路线。
+本项目用于采集淘宝上万智牌相关商品的可见价格信息，并进入规则/DB/LLM 过滤、统计评估和最终赋值流程。项目正在重构中：旧的“非登录态 + AdsPower 指纹浏览器 + 代理池 + 店透视插件 + DOM 导出”路线已经通过实测判定不可行，后续切换为“Codex App Browser Use MCP + 真实登录态 + 低频 human-in-the-loop 操作 + 可见截图/状态 + Codex 视觉识别”的采集路线。
 
 ## 技术栈
 
 - Python 3.10+
 - pandas + openpyxl（Excel 读写）
-- 视觉采集层待实现：优先 Python + PyAutoGUI/系统截图，Hammerspoon 可作为 macOS 辅助执行器
-- OCR/VLM 识别层待实现：从商品列表截图抽取标题、价格、店铺、地区等可见字段
+- 视觉采集层：优先使用 Codex App 内配置的 Browser Use MCP；Python 项目只准备任务、保存证据、ingest 结构化结果
+- 视觉识别层：Codex 基于 Browser Use MCP 截图/可见状态抽取标题、价格、店铺、地区等字段
 - DB/LLM/统计后处理沿用现有模块
 
 ## 当前项目结构
@@ -29,7 +29,8 @@ modules/
   price_cluster_eval.py  # 保留：统计评估资产
   final_assignment.py    # 保留：最终赋值资产
   utils.py               # 保留：配置、日志、路径工具
-  visual_driver.py       # MVP：PyAutoGUI 系统级 Chrome 启动、输入、截图
+  visual_driver.py       # legacy fallback：PyAutoGUI 系统级 Chrome 启动、输入、截图
+  browser_use_driver.py  # 新主线：生成 Codex Browser Use MCP 采集请求，不调用 API/Cloud
   page_state.py          # MVP：基于截图判断页面状态
   visual_capture.py      # MVP：截图证据与 capture manifest
   vision_extract.py      # MVP：Codex 识别结果写入 JSONL/XLSX
@@ -70,19 +71,19 @@ modules/
 ## 新判断逻辑
 
 - 淘宝并非绝对不向非登录态返回商品结果，但匿名冷会话窗口极脆弱，不适合批量采集。
-- 本机长期使用的真实 Chrome 登录态是当前唯一被验证可稳定看到商品列表的底座。
+- 本机长期使用的真实登录态是当前唯一被验证可稳定看到商品列表的底座；Browser Use MCP 的登录态由 Codex App/browser 环境维护。
 - 频繁创建新 profile、新指纹、新代理并不像“新用户”，更像高风险身份制造行为。
 - 后续项目应从“伪装新匿名用户”转为“登录用户低频人工辅助采集”，以账号安全和可中断恢复为第一优先级。
 
 ## 当前进展（2026-05-05）
 
 - 旧 AdsPower/代理池/店透视/DOM 采集模块已标记为 legacy，`main.py` 不再启动旧采集链路。
-- 视觉采集 MVP 骨架已实现：
-  - `harness.py visual-one <牌名>`：创建单关键词视觉任务，并通过 PyAutoGUI 启动/操作 Chrome、截图、记录页面状态。
-  - `harness.py visual-run <run_id> --limit N`：运行已准备任务的视觉截图采集。
+- 视觉采集 MCP handoff 骨架已实现：
+  - `harness.py visual-one <牌名>`：创建单关键词视觉任务，并生成 Codex Browser Use MCP 采集请求。
+  - `harness.py visual-run <run_id> --limit N`：为已准备任务生成 Browser Use MCP 请求与执行说明。
   - `harness.py visual-ingest <task_dir> --keyword ... --rows-json/--rows-file ...`：Codex 看图后把结构化商品行写入 `raw_rows.jsonl` 和 `raw_results.xlsx`。
   - `harness.py visual-export <run_id>`：从 `raw_rows.jsonl` 生成现有后处理可读的 raw Excel；`--filter` 可接入规则过滤。
-- 当前本机依赖自检已通过：`pandas`、`openpyxl`、`Pillow`、`pyautogui`、`pyperclip` 均可导入。
+- 当前本机依赖自检已通过：`pandas`、`openpyxl`、`Pillow`、`pyperclip` 均可导入；不要求 OpenAI API、Zhipu API、browser-use Python 包或 pydantic。
 - 本机 `config/settings.ini` 已重建为新视觉配置，并写入长期 Chrome profile：
   - `/Users/zhunshi/workspace/automation/local/chrome-taobao-visual-profile`
 - `config/settings.ini`、`local/*`、`data/tasks/*`、`data/checkpoints/*` 等本机敏感/大体积运行内容均被 `.gitignore` 忽略。
@@ -92,9 +93,9 @@ modules/
 
 1. 从 Excel 读取卡牌名，加上前缀（默认“万智牌”）生成搜索关键词
 2. 为每个关键词创建视觉采集任务与证据目录
-3. 使用真实 Chrome 登录态，低频、可暂停地打开淘宝搜索结果页
-4. 通过系统级截图工具采集商品列表可视区域
-5. OCR/VLM 从截图识别商品标题、价格、店铺、地区等字段，输出 raw Excel
+3. Codex 使用 Browser Use MCP 与真实登录态，低频、可暂停地打开淘宝搜索结果页
+4. Browser Use MCP 采集商品列表可视区域截图/可见状态，保存证据
+5. Codex 从截图识别商品标题、价格、店铺、地区等字段，输出 raw Excel
 6. 复用现有规则/DB/LLM 过滤，生成合并结果
 7. 运行统计诊断与最终赋值
 8. checkpoint 记录关键词状态、截图目录、识别结果、账号状态、失败原因和人工备注
@@ -103,9 +104,10 @@ modules/
 
 ### 1. 采集层替换
 
-新增视觉采集模块，旧插件/DOM/AdsPower 采集层全部 legacy：
+新增 Browser Use MCP handoff 模块，旧插件/DOM/AdsPower 采集层全部 legacy：
 
-- `modules/visual_driver.py`：系统级鼠标、键盘、窗口、截图抽象。MVP 优先 PyAutoGUI，Hammerspoon 作为 macOS 辅助执行器。
+- `modules/browser_use_driver.py`：生成 Codex Browser Use MCP 采集请求、执行说明和证据目标路径；不导入 Python `browser-use` 包，不创建 LLM client，不要求 API key。
+- `modules/visual_driver.py`：legacy fallback；系统级鼠标、键盘、窗口、截图抽象。
 - `modules/page_state.py`：基于截图判断页面状态，如商品可见、登录态异常、验证码、弹窗、白框架、加载中。
 - `modules/visual_capture.py`：保存关键词截图、证据、屏幕状态和任务上下文。
 - `modules/vision_extract.py`：调用 OCR/VLM，把截图中的商品卡片结构化为 raw rows。
@@ -114,10 +116,10 @@ modules/
 
 ### 2. 自动化层选型
 
-MVP 主线：Python + PyAutoGUI/系统截图。
+MVP 主线：Codex App Browser Use MCP。
 
-- 优点：Codex 最易开发，和现有 Python 项目融合最好，状态/日志/checkpoint 可控。
-- Hammerspoon：可选 macOS 增强，用于固定窗口、切前台、热键、屏幕信息。
+- 优点：智能浏览器操作由 Codex plan 承担，不需要项目配置 OpenAI API；Python 侧只做任务状态、证据、checkpoint、ingest/export。
+- PyAutoGUI/Hammerspoon：只作为备用外部执行器，不作为主线。
 - 商用 RPA：只作为备用外部执行器，不作为主状态持有方。
 
 自动化层只暴露窄接口：
@@ -165,7 +167,7 @@ MVP 主线：Python + PyAutoGUI/系统截图。
 python main.py -e cards.xlsx
 python main.py -k 中止
 
-# MVP 视觉采集
+# Codex Browser Use MCP handoff
 python harness.py visual-one 中止
 python harness.py visual-run <run_id> --limit 1
 python harness.py visual-ingest data/tasks/<run_id> --keyword "万智牌 中止" --rows-file rows.json
@@ -196,15 +198,15 @@ python harness.py plugin 中止
 
 ## 下一步具体计划
 
-1. **初始化长期 Chrome profile**
-   - 运行 `python harness.py visual-one 中止` 启动 `local/chrome-taobao-visual-profile`。
-   - 第一次启动后人工登录淘宝，确认登录态下搜索结果页能正常显示商品。
-   - 如 macOS 弹权限窗，给终端/Python 所在 App 开启“辅助功能”和“屏幕录制”权限。
+1. **确认 Browser Use MCP 登录态**
+   - 在 Codex App 中确认 Browser Use MCP 可用，并能打开淘宝搜索结果页。
+   - 人工完成淘宝登录，确认登录态下搜索结果页能正常显示商品。
+   - 如 Browser Use MCP 浏览器环境与本机 Chrome profile 不共享登录态，以 Codex App 中实际可见登录态为准。
 
 2. **单关键词视觉闭环**
-   - 登录完成后再次运行 `python harness.py visual-one 中止`。
-   - 检查 `data/tasks/<run_id>/evidence/.../capture_manifest.json` 中的页面状态是否为 `visible_ready`。
-   - Codex 读取该截图，整理至少 5 条商品行，调用 `visual-ingest` 写入 `raw_rows.jsonl`/`raw_results.xlsx`。
+   - 运行 `python harness.py visual-one 中止` 生成 `browser_use_request.json` 和 `codex_browser_use_instructions.md`。
+   - Codex 按请求使用 Browser Use MCP 打开目标页、截图、判断页面状态。
+   - Codex 从截图整理至少 5 条商品行，调用 `visual-ingest` 写入 `raw_rows.jsonl`/`raw_results.xlsx`。
    - 运行 `visual-export <run_id>`，确认 raw Excel 字段满足现有过滤链。
 
 3. **异常状态验证**

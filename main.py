@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Visual collection task entry point.
+Codex Browser Use MCP collection task entry point.
 
 The old browser/plugin/DOM collection path is legacy and is intentionally not
 invoked from this file. This entry point prepares keyword tasks and evidence
-directories for the new human-in-the-loop visual collection workflow.
+directories for the Codex-app Browser Use MCP workflow.
 """
 import argparse
 import json
@@ -69,9 +69,9 @@ def prepare_visual_task(args):
             keyword=keyword,
             status="pending",
             evidence_dir=evidence_dir,
-            last_action="visual_task_prepared",
+            last_action="browser_use_task_prepared",
             agent_notes=(
-                "Prepared for login-state visual collection. "
+                "Prepared for Codex Browser Use MCP login-state collection. "
                 "Do not use legacy AdsPower/plugin/DOM collection for this task."
             ),
         )
@@ -85,14 +85,14 @@ def prepare_visual_task(args):
             "keyword": args.keyword,
             "config": os.path.abspath(args.config),
         },
-        "workflow": "visual_login_state_capture",
+        "workflow": "browser_use_login_state_capture",
         "legacy_collection_disabled": True,
         "keywords": keywords,
         "records": records,
         "next_steps": [
-            "Use real Chrome login state and low-frequency human-in-the-loop operation.",
-            "Capture system screenshots into each evidence_dir.",
-            "Run OCR/VLM extraction to produce raw product rows.",
+            "Use Codex App Browser Use MCP with logged-in browser state and low-frequency scheduling.",
+            "Capture visible screenshots and Codex-visible state summaries into each evidence_dir.",
+            "Extract visible product rows into raw rows without network/cookie/storage access.",
             "Feed raw rows into existing filter/DB/LLM/statistical assignment pipeline.",
         ],
     }

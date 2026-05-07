@@ -35,6 +35,7 @@ class IngestResult:
     rows_written: int
     raw_jsonl: str
     raw_excel: str
+    screenshot_path: str = ""
     screenshot_deleted: bool = False
     error: Optional[str] = None
 
@@ -45,6 +46,7 @@ class IngestResult:
             "rows_written": self.rows_written,
             "raw_jsonl": self.raw_jsonl,
             "raw_excel": self.raw_excel,
+            "screenshot_path": self.screenshot_path,
             "screenshot_deleted": self.screenshot_deleted,
             "error": self.error,
         }
@@ -136,6 +138,7 @@ def ingest_rows(
         rows_written=len(normalized),
         raw_jsonl=raw_jsonl,
         raw_excel=raw_excel,
+        screenshot_path=screenshot_path,
         screenshot_deleted=screenshot_deleted,
         error=None if ok else "empty_rows_or_low_confidence_or_missing_required_fields",
     )

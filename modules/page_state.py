@@ -14,6 +14,7 @@ WHITE_SKELETON = "white_skeleton"
 LOGIN_REQUIRED = "login_required"
 CAPTCHA_REQUIRED = "captcha_required"
 POPUP_BLOCKED = "popup_blocked"
+EMPTY_RESULT = "empty_result"
 UNKNOWN = "unknown"
 
 

@@ -435,6 +435,17 @@ class ConfigManager:
             'ocr_confidence_threshold': '0.80',
         }
 
+        config['BROWSER_USE_CAPTURE'] = {
+            'allowed_domains': 'https://www.taobao.com,https://s.taobao.com,*.taobao.com',
+            'window_width': '1600',
+            'window_height': '1000',
+            'max_scrolls_per_keyword': '2',
+            'page_load_wait': '8',
+            'min_rows_per_keyword': '5',
+            'confidence_threshold': '0.80',
+            'screenshot_retention': 'true',
+        }
+
         config['SESSION'] = {
             'daily_keyword_budget': '20',
             'hourly_keyword_budget': '5',

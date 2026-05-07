@@ -5,6 +5,8 @@ pyperclip>=1.8.0
 PyMySQL>=1.1.0
 paramiko>=4.0.0
 Pillow>=10.0.0
+
+# Legacy PyAutoGUI visual fallback:
 pyautogui>=0.9.54
 
 # Legacy diagnostics only:
