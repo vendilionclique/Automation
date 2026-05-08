@@ -1,6 +1,6 @@
 # 淘宝万智牌价格视觉采集工具
 
-本项目用于采集淘宝上万智牌相关商品的可见价格信息，并进入规则/DB/LLM 过滤、统计评估和最终赋值流程。当前仓库已清理为单一主线：开源 browser-use MCP server + 本机 Chrome 真实登录态 + 低频 human-in-the-loop 操作 + 可见截图/状态 + Codex 视觉识别。
+本项目用于采集淘宝上万智牌相关商品的可见价格信息，并进入规则/DB/LLM 过滤、统计评估和最终赋值流程。当前核心方向已调整为：本机 Chrome 真实登录态 + 低频 human-in-the-loop 操作 + 纯视觉截图证据 + Codex/视觉模型识别。采集控制层准备从 browser-use MCP 迁移到更贴近 pure-vision browser automation 的方案，优先评估 Midscene。
 
 旧的 AdsPower、代理池、店透视插件、DOM 导出、SKU 插件采集、项目内 Chrome profile 和旧项目副本已经从代码树删除。后续不要重新围绕这些路线新增功能。
 
@@ -8,8 +8,8 @@
 
 - Python 3.10+
 - pandas + openpyxl（Excel 读写）
-- 视觉采集层：通过 Codex App 调度开源 browser-use MCP server 控制本机 Chrome；Python 项目准备任务、保存证据、ingest 结构化结果
-- 视觉识别层：Codex 基于 browser-use MCP 截图/可见页面抽取标题、价格、店铺、地区等字段
+- 视觉采集层：Python 项目准备任务、保存证据、ingest 结构化结果；浏览器控制层优先评估 Midscene pure-vision action，browser-use MCP 不再作为淘宝主线
+- 视觉识别层：Codex/视觉模型基于可见截图抽取标题、价格、店铺、地区等字段
 - DB/LLM/统计后处理沿用现有模块
 
 ## 当前项目结构
@@ -31,7 +31,7 @@ modules/
   price_cluster_eval.py  # 统计评估资产
   final_assignment.py    # 最终赋值资产
   utils.py               # 配置、日志、路径工具
-  browser_use_driver.py  # browser-use MCP 请求/执行说明/Agent fallback
+  browser_use_driver.py  # browser-use MCP 旧试验骨架，保留但不再作为淘宝主线
   page_state.py          # 基于截图判断页面状态
   visual_capture.py      # 截图证据与 capture manifest
   vision_extract.py      # Codex 识别结果写入 JSONL/XLSX
@@ -51,7 +51,44 @@ modules/
 6. SKU 插件采集路线
 7. 项目内提交的 Chrome profile / 旧项目副本
 
-## 当前进展（2026-05-07）
+## 选型过程与当前判断（2026-05-08）
+
+项目一路试过多条路线，核心约束逐渐明确：淘宝账号安全优先，商品数据必须来自可见页面证据，不能走接口、插件、隐藏 DOM、HTML、cookies/storage 或 network response。
+
+已碰壁/降级的方向：
+
+1. AdsPower/代理/新指纹路线：登录态、账号画像和环境一致性差，不适合作为主线。
+2. 店透视、SKU 插件、DOM/API 路线：数据效率高但边界过重，和“可见证据采集”目标冲突。
+3. 本机 Chrome 新 profile 非登录态：结果质量和稳定性不足。
+4. browser-use MCP：已完成单关键词 MVP 闭环，但源码审计发现 `browser_get_state` 会触发 DOM/AX/DOMSnapshot、`Runtime.evaluate()`、`DOM.getDocument`、可交互元素 selector map 等；index 点击/输入也依赖该 selector map。其默认 agent/state 体系为了好用会读取页面结构，因此不再适合作为淘宝采集主线。
+
+当前判断：
+
+- CDP/浏览器控制本身不等于平台可直接知道“被 CDP 控制”，平台主要看到的是页面行为后果、事件节奏、账号/IP/设备画像和长期模式。
+- 风险重点不是“是否存在 CDP”，而是是否读取隐藏结构/接口/存储，以及操作是否呈现高频、重复、异常路径。
+- 后续主线应避免 browser-use 的 state/index/HTML/extract 能力，转向 pure-vision action：模型看截图，输出坐标点击、键盘输入、滚动；商品字段只从保存的截图识别。
+
+## Midscene 评估方向（暂定新主线）
+
+Midscene 是当前优先评估的浏览器视觉自动化方案。源码审计结论：Web 端通过 Puppeteer/Playwright/CDP 或 Chrome Extension bridge 控制浏览器；`Tap/Input/Scroll` 等 action 在 `packages/web-integration/src/web-page.ts` 中主要把视觉定位得到的坐标交给 `page.mouse.click/move/wheel`、`page.keyboard.type/press` 执行。Puppeteer/Playwright 封装在 `packages/web-integration/src/puppeteer/base-page.ts`，截图用 `page.screenshot()` 或 CDP `Page.captureScreenshot`，导航用 `goto/reload/goBack/goForward`。这比 browser-use 的 `browser_get_state/index` 路线更接近 pure-vision action。
+
+但 Midscene 不是“零 DOM/零 JS”的工具。源码中仍存在以下高风险/需禁用能力：`getElementsNodeTree/getElementsInfo` 会注入脚本并 `evaluate` 页面结构；`cacheFeatureForPoint/rectMatchesCacheFeature` 会通过 XPath/DOM 做元素缓存；`domIncluded` 虽默认 false，但一旦打开会把 DOM 加入上下文；Chrome extension bridge 会用 `chrome.debugger.sendCommand('Runtime.evaluate')` 注入动画/获取页面内容/读取 `document.readyState`；部分 `size/scroll/navigationState/waitForNavigation` 会 `evaluate window.innerWidth/innerHeight/document.readyState` 或等待 network idle。淘宝主线必须禁用这些辅助能力。
+
+预期使用边界：
+
+- 只用 Midscene 的视觉定位、坐标点击、输入、页面级滚动和截图能力。
+- 不用 Midscene 的 DOM extraction、HTML extraction、接口/network、cookies/storage、JS eval。
+- 禁用/避免 Midscene 的元素缓存与 XPath 回放：不要启用 cache；每个 locate/action 传 `cacheable: false` 或使用等价配置，避免 `cacheFeatureForPoint` 和 `rectMatchesCacheFeature`。
+- 避免 Chrome extension bridge 作为淘宝主线，优先审计 Puppeteer/Playwright 连接已有 Chrome profile 的路径；extension bridge 会主动 `Runtime.evaluate` 注入脚本和动画。
+- 避免 `scrollToTop/Bottom` 这类依赖页面尺寸辅助计算的动作；优先使用明确距离的页面级滚动，并评估是否会触发 `window.innerHeight` 读取。
+- 商品标题、价格、店铺、地区等字段仍由 Codex/视觉模型从截图证据识别，不从页面结构读取。
+- 截图证据优先使用系统截图或确认不会触发 DOM state 的截图入口。
+- 继续使用本机长期 Chrome 采集 profile 和真实登录态，人工登录、人工处理验证码/安全验证。
+- 保持低频、可暂停、异常即停、checkpoint 可恢复。
+
+下一步应做一个 Midscene spike：连接专用 Chrome profile，打开淘宝首页，从可见搜索框输入单关键词，搜索后保存首屏和滚动分屏截图，并确认全程没有调用 DOM/HTML/network/storage 读取能力。
+
+## 当前进展（2026-05-07 至 2026-05-08）
 
 - browser-use MCP 采集骨架已实现：
   - `harness.py visual-one <牌名>`：创建单关键词视觉任务，并生成 browser-use MCP 采集请求。
@@ -69,14 +106,15 @@ modules/
 - browser-use MCP 运行策略已确认：`~/.codex/config.toml` 保留 `browser-use-local` 注册。Chrome 136+ 不允许远程调试默认用户数据目录，后续使用专用长期采集 profile：
   `/Users/zhunshi/workspace/automation/local/chrome-taobao-visual-profile`。
   采集前人工用 `local/start_taobao_visual_chrome.sh` 启动该 profile，登录淘宝，并通过本地 CDP `http://127.0.0.1:9222` 让 browser-use MCP 连接同一个可见浏览器。
+- 2026-05-08 源码审计后修正：browser-use MCP 的 `browser_get_state` 和 index 操作会读取 DOM/AX/snapshot 等页面结构，和淘宝主线安全边界冲突。该 MVP 证明了视觉闭环可行，但 browser-use 默认能力不再作为后续主线。
 - `config/settings.ini`、`local/*`、`data/tasks/*`、`data/checkpoints/*` 等本机敏感/大体积运行内容均被 `.gitignore` 忽略。
 
 ## 新核心流程
 
 1. 从 Excel 读取卡牌名，加上前缀（默认“万智牌”）生成搜索关键词
 2. 为每个关键词创建视觉采集任务与证据目录
-3. Codex 通过 browser-use MCP 使用本机 Chrome 真实登录态，低频、可暂停地打开淘宝搜索结果页
-4. Codex 通过 browser-use MCP 采集商品列表可视区域截图/可见状态，保存证据
+3. Codex/视觉自动化层使用本机 Chrome 真实登录态，低频、可暂停地打开淘宝首页并从可见搜索框搜索
+4. 通过 pure-vision action 或系统级截图采集商品列表可视区域截图，保存证据
 5. Codex 从截图识别商品标题、价格、店铺、地区等字段，输出 raw Excel
 6. 复用现有规则/DB/LLM 过滤，生成合并结果
 7. 运行统计诊断与最终赋值
@@ -98,7 +136,7 @@ modules/
 
 ## 远期协作方向（暂不排期）
 
-未来可能拆出员工版轻量采集端，但不作为当前开发日程。员工版不包含 DB/SSH/后处理/最终赋值资产，只负责使用本机 Chrome 登录态和 Zhipu API 驱动 browser-use Agent 采集可见结果，输出标准化 `raw_results.xlsx`、`raw_rows.jsonl`、截图证据和 manifest。
+未来可能拆出员工版轻量采集端，但不作为当前开发日程。员工版不包含 DB/SSH/后处理/最终赋值资产，只负责使用本机 Chrome 登录态和 Zhipu API/视觉自动化 Agent 采集可见结果，输出标准化 `raw_results.xlsx`、`raw_rows.jsonl`、截图证据和 manifest。
 
 多人协作优先考虑“共享表格任务池 + 共享盘证据仓库”的轻量方案：任务按 `task_id` 领取，记录 assignee、状态、提交时间、结果文件、证据目录和审核备注，避免重复采集。待流程稳定、任务量上升后，再考虑轻量 Web 后台或更强的任务锁/审核系统；GitHub 主要保留给代码和自动化，不优先作为员工采集台账。
 
@@ -118,7 +156,7 @@ modules/
 python main.py -e cards.xlsx
 python main.py -k 中止
 
-# Codex 开源 browser-use MCP server
+# 旧 browser-use MCP MVP 入口（已降级为历史试验，不作为淘宝主线）
 python harness.py visual-one 中止
 python harness.py visual-run <run_id> --limit 1
 python harness.py visual-ingest data/tasks/<run_id> --keyword "万智牌 中止" --rows-file rows.json
@@ -137,8 +175,9 @@ python harness.py db
 ## 开发注意事项
 
 - 不自动处理验证码或登录，只检测、暂停、通知人工。
-- 不抓接口、不读 cookies/storage、不用隐藏 DOM/HTML/JS eval 提取商品数据。
-- browser-use MCP/CDP 只允许读取安全状态摘要用于页面状态判断：URL/title/tabs、可见可交互元素文本、viewport/scroll 元数据和截图。商品标题、价格、店铺、地区等采集结果必须来自保留的可见截图，不能从 HTML/DOM/network/storage 中抽取。
+- 不抓接口、不读 cookies/storage、不读隐藏 DOM/HTML，不用 JS eval/DOMSnapshot/AX tree 提取页面结构或商品数据。
+- 淘宝主线禁用 browser-use MCP 的 `browser_get_state`、`browser_get_html`、`browser_extract_content`、index 点击/输入和任何依赖 selector map 的操作。
+- 允许的浏览器自动化方向是 pure-vision：截图识别页面，坐标点击、键盘输入、页面级滚动。商品标题、价格、店铺、地区等采集结果必须来自保留的可见截图，不能从 HTML/DOM/network/storage 中抽取。
 - browser-use MCP 由 Codex App 手动开关控制；平时关闭以避免 Python MCP 进程反复弹出，需要采集时再打开。
 - 采集访问路径应从淘宝首页可见搜索框输入关键词并触发搜索，不直接以带关键词的搜索 URL 作为常规采集入口。
 - 视觉识别结果必须保留截图证据、坐标、置信度和人工复核入口。
@@ -147,14 +186,15 @@ python harness.py db
 
 ## 下一步具体计划
 
-1. **截图证据复测**
-   - 重启 Codex App 后确认 browser-use MCP 仍可调用，并能打开淘宝搜索结果页。
-   - 重点复测截图保存到 `data/tasks/<run_id>/evidence/`，确保审计证据链完整。
+1. **Midscene spike**
+   - 连接专用 Chrome profile：`local/chrome-taobao-visual-profile`。
+   - 从淘宝首页可见搜索框输入单关键词并触发搜索。
+   - 保存首屏和滚动分屏截图到 `data/tasks/<run_id>/evidence/`。
+   - 审计确认没有调用 DOM/HTML/network/storage/JS eval 读取能力。
 
 2. **单关键词视觉闭环复测**
-   - 运行 `python harness.py visual-one 中止` 生成 `browser_use_request.json` 和 `codex_browser_use_instructions.md`。
-   - Codex 通过 browser-use MCP 使用本机 Chrome 打开目标页、截图、判断页面状态。
-   - Codex 从截图整理至少 5 条商品行，调用 `visual-ingest` 写入 `raw_rows.jsonl`/`raw_results.xlsx`。
+   - 运行 `python harness.py visual-one 中止` 或后续 Midscene 等价入口创建任务。
+   - Codex/视觉模型从截图整理至少 5 条商品行，调用 `visual-ingest` 写入 `raw_rows.jsonl`/`raw_results.xlsx`。
    - 运行 `visual-export <run_id>`，确认 raw Excel 字段满足现有过滤链。
 
 3. **异常状态验证**
