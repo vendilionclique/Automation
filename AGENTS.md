@@ -66,7 +66,9 @@ modules/
   - Codex 基于可见截图整理 6 条商品行，`visual-ingest` 成功写入 `raw_rows.jsonl` / `raw_results.xlsx`。
   - `visual-export --filter --keyword "万智牌 中止" --card "中止"` 成功接入规则过滤：6 行进，5 行出，最低价 `80`。
 - 发现待补强点：Codex App/macOS 权限刚打开后需要重启 Codex App；截图自动落盘到 evidence 目录仍需重启后复测，目前可见截图能用于识别，但 `screencapture` 曾报 `could not create image from display`。
-- browser-use MCP 运行策略已确认：`~/.codex/config.toml` 保留 `browser-use-local` 注册，但平时通过 Codex App 手动关闭，开始采集前手动开启，采集结束后手动关闭；不再用脚本反复改 config。
+- browser-use MCP 运行策略已确认：`~/.codex/config.toml` 保留 `browser-use-local` 注册。Chrome 136+ 不允许远程调试默认用户数据目录，后续使用专用长期采集 profile：
+  `/Users/zhunshi/workspace/automation/local/chrome-taobao-visual-profile`。
+  采集前人工用 `local/start_taobao_visual_chrome.sh` 启动该 profile，登录淘宝，并通过本地 CDP `http://127.0.0.1:9222` 让 browser-use MCP 连接同一个可见浏览器。
 - `config/settings.ini`、`local/*`、`data/tasks/*`、`data/checkpoints/*` 等本机敏感/大体积运行内容均被 `.gitignore` 忽略。
 
 ## 新核心流程
@@ -93,6 +95,12 @@ modules/
 账号状态：`healthy`、`login_required`、`captcha_required`、`popup_blocked`、`risk_suspected`、`cooling_down`、`locked`
 
 失败原因：`login_required`、`captcha_required`、`page_not_loaded`、`white_skeleton`、`popup_blocked`、`screenshot_failed`、`ocr_low_confidence`、`manual_review_needed`、`rate_limited`、`unknown`
+
+## 远期协作方向（暂不排期）
+
+未来可能拆出员工版轻量采集端，但不作为当前开发日程。员工版不包含 DB/SSH/后处理/最终赋值资产，只负责使用本机 Chrome 登录态和 Zhipu API 驱动 browser-use Agent 采集可见结果，输出标准化 `raw_results.xlsx`、`raw_rows.jsonl`、截图证据和 manifest。
+
+多人协作优先考虑“共享表格任务池 + 共享盘证据仓库”的轻量方案：任务按 `task_id` 领取，记录 assignee、状态、提交时间、结果文件、证据目录和审核备注，避免重复采集。待流程稳定、任务量上升后，再考虑轻量 Web 后台或更强的任务锁/审核系统；GitHub 主要保留给代码和自动化，不优先作为员工采集台账。
 
 ## 必须保留的资产
 
@@ -129,8 +137,10 @@ python harness.py db
 ## 开发注意事项
 
 - 不自动处理验证码或登录，只检测、暂停、通知人工。
-- 不读 DOM、不抓接口、不读 cookies/storage、不通过 CDP/Playwright 获取页面结构数据。
+- 不抓接口、不读 cookies/storage、不用隐藏 DOM/HTML/JS eval 提取商品数据。
+- browser-use MCP/CDP 只允许读取安全状态摘要用于页面状态判断：URL/title/tabs、可见可交互元素文本、viewport/scroll 元数据和截图。商品标题、价格、店铺、地区等采集结果必须来自保留的可见截图，不能从 HTML/DOM/network/storage 中抽取。
 - browser-use MCP 由 Codex App 手动开关控制；平时关闭以避免 Python MCP 进程反复弹出，需要采集时再打开。
+- 采集访问路径应从淘宝首页可见搜索框输入关键词并触发搜索，不直接以带关键词的搜索 URL 作为常规采集入口。
 - 视觉识别结果必须保留截图证据、坐标、置信度和人工复核入口。
 - 采集速度从属于账号安全和数据可审计性。
 - 后处理资产必须和采集层解耦，确保视觉采集替换后仍能继续使用现有过滤、DB、LLM、统计和赋值流程。

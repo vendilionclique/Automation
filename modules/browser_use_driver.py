@@ -19,6 +19,7 @@ from modules.visual_capture import screenshot_path_for
 
 
 TAOBAO_SEARCH = "https://s.taobao.com/search?q={keyword}"
+TAOBAO_HOME = "https://www.taobao.com/"
 
 
 @dataclass
@@ -300,14 +301,27 @@ def write_browser_use_request(
         **request.to_dict(),
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "manual_state": manual_state,
+        "start_url": TAOBAO_HOME,
+        "search_mode": "taobao_home_search_box",
         "config": config.to_dict(),
         "for_executor": "Codex App using the open-source browser-use MCP server",
         "forbidden": [
             "Browser Use Cloud",
             "proxy rotation or stealth profile creation",
             "cookies/storage/network/source extraction",
+            "HTML/DOM scraping, arbitrary JavaScript eval, or hidden page data for product rows",
             "automatic login, captcha, SMS, or risk-check handling",
         ],
+        "safe_state_policy": {
+            "allowed": [
+                "browser_get_state URL/title/tabs",
+                "visible interactive element text",
+                "viewport and scroll metadata",
+                "visible screenshot",
+            ],
+            "state_only": True,
+            "product_rows_source": "visible screenshot only",
+        },
         "expected_ingest": {
             "command": (
                 f"python harness.py visual-ingest {json.dumps(task_dir, ensure_ascii=False)} "
@@ -340,21 +354,35 @@ def build_browser_use_instructions(payload: Dict[str, Any]) -> str:
 Keyword: {payload["keyword"]}
 URL: {payload["url"]}
 Screenshot target: {payload["screenshot_path"]}
+Start URL: {payload["start_url"]}
+Search keyword: {payload["keyword"]}
 
 Use the open-source browser-use MCP server configured in Codex App. Codex is the
 agent; browser-use MCP only provides local Chrome tools. Do not use Browser Use
 Cloud, proxy rotation, stealth profiles, cookies/storage/network extraction, or
 automatic login/captcha handling.
 
+Safety boundary:
+- For page-state classification, browser-use MCP may provide only safe visible
+  state: URL/title/tabs, visible interactive text, viewport, and scroll metadata.
+- Do not use HTML/DOM scraping, arbitrary JavaScript eval, network payloads,
+  cookies/storage, or hidden page data.
+- Product rows must be extracted from the retained visible screenshot only.
+
 Steps:
-1. Use browser-use MCP to open the target URL in the logged-in local Chrome profile.
-2. Wait about {cfg["page_load_wait"]} seconds for visible content to settle.
-3. Decide page state: visible_ready, login_required, captcha_required,
+1. Use browser-use MCP to open Taobao home in the logged-in local Chrome profile:
+   {payload["start_url"]}
+2. Click/focus the visible Taobao search input, type the keyword exactly as:
+   {payload["keyword"]}
+   Then trigger the visible search action.
+3. Wait about {cfg["page_load_wait"]} seconds for visible content to settle.
+4. Call browser_get_state(include_screenshot=false) and decide page state using
+   only safe visible state: visible_ready, login_required, captcha_required,
    white_skeleton, empty_result, or unknown.
-4. If visible_ready, capture the visible screenshot and extract at least
-   {cfg["min_rows_per_keyword"]} visible product rows when possible.
-5. Scroll at most {cfg["max_scrolls_per_keyword"]} times, then stop.
-6. Write a rows JSON file and ingest it with harness.py visual-ingest.
+5. If visible_ready, capture the visible screenshot and extract at least
+   {cfg["min_rows_per_keyword"]} visible product rows from the screenshot when possible.
+6. Scroll at most {cfg["max_scrolls_per_keyword"]} times, then stop.
+7. Write a rows JSON file and ingest it with harness.py visual-ingest.
 
 Rows JSON shape:
 ```json
@@ -382,19 +410,23 @@ def _build_agent_task(url: str, keyword: str, config: BrowserUseConfig, manual_s
 Open this Taobao search page in the local Chrome browser: {url}
 
 Goal: collect visible product listing information for keyword "{keyword}".
-Only use normal browser-use browser actions and visible page content. Do not
-solve captcha, do not automate login, do not use proxies, and do not switch to
-network/API/cookie/storage extraction.
+Only use normal browser-use browser actions and visible page content. Page state
+may be judged from URL/title/tabs, visible interactive text, viewport, scroll
+metadata, and screenshots. Do not solve captcha, do not automate login, do not
+use proxies, and do not switch to network/API/cookie/storage extraction,
+HTML/DOM scraping, arbitrary JavaScript eval, or hidden page data.
 
 Wait about {config.page_load_wait} seconds after navigation. Determine page_state
 as one of: visible_ready, login_required, captcha_required, white_skeleton,
 empty_result, unknown.{manual}
 
-If page_state is visible_ready, extract up to {config.min_rows_per_keyword} to
-{max(config.min_rows_per_keyword, 12)} visible product rows. Scroll at most
+If page_state is visible_ready, use retained visible screenshots as the source
+of product rows and extract up to {config.min_rows_per_keyword} to
+{max(config.min_rows_per_keyword, 12)} rows. Scroll at most
 {config.max_scrolls_per_keyword} times if needed. For each row capture title,
 price, shop, pay_count, location, approximate visible bounding box, confidence,
-and notes. If login/captcha/risk page appears, stop and return no rows.
+and notes from the screenshot. If login/captcha/risk page appears, stop and
+return no rows.
 
 Return only the requested structured output.
 """.strip()
