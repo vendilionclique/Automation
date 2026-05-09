@@ -2,8 +2,8 @@
 """
 Diagnostics and visual collection entry point.
 
-The repository now keeps only the browser-use + local Chrome visual workflow
-and the downstream DB/LLM/statistical assignment assets.
+The repository keeps a pure-vision local Chrome collection workflow and the
+downstream DB/LLM/statistical assignment assets.
 """
 import argparse
 import configparser
@@ -63,6 +63,7 @@ def cmd_setup(args):
             "modules/checkpoint.py",
             "modules/utils.py",
             "modules/browser_use_driver.py",
+            "modules/midscene_computer_driver.py",
             "modules/page_state.py",
             "modules/visual_capture.py",
             "modules/vision_extract.py",
@@ -83,13 +84,8 @@ def cmd_setup(args):
         cfg = configparser.ConfigParser()
         cfg.read(args.config, encoding="utf-8")
         required_config = {
-            "BROWSER_USE": [
-                "allowed_domains",
-                "chrome_executable_path",
-                "chrome_user_data_dir",
-                "max_scrolls_per_keyword",
-                "min_rows_per_keyword",
-            ],
+            "VISUAL_CAPTURE": ["provider", "confidence_threshold", "screenshot_retention"],
+            "MIDSCENE_COMPUTER": ["max_scrolls_per_keyword", "min_rows_per_keyword", "page_load_wait"],
             "SESSION": ["daily_keyword_budget", "hourly_keyword_budget", "max_consecutive_abnormal"],
         }
         for section, keys in required_config.items():
@@ -101,18 +97,34 @@ def cmd_setup(args):
                     print(f"[FAIL] {args.config} 缺少 [{section}] {key}")
                     return False
 
+        provider = cfg.get("VISUAL_CAPTURE", "provider", fallback="midscene_computer").strip()
+        print(f"[OK] visual provider: {provider or 'midscene_computer'}")
+        if (provider or "midscene_computer").replace("-", "_") == "midscene_computer":
+            env_example = os.path.join(ROOT, "local", "midscene-computer.env.example")
+            env_file = os.path.join(ROOT, "local", "midscene-computer.env")
+            mcp_script = os.path.join(ROOT, "local", "start_midscene_computer_mcp.sh")
+            print(f"[OK] Midscene MCP launcher: {mcp_script}" if os.path.exists(mcp_script) else f"[FAIL] 缺少 {mcp_script}")
+            if not os.path.exists(mcp_script):
+                return False
+            print(f"[OK] Midscene env example: {env_example}" if os.path.exists(env_example) else f"[WARN] 缺少 {env_example}")
+            if os.path.exists(env_file):
+                print(f"[OK] Midscene local env: {env_file}")
+            else:
+                print(f"[WARN] Midscene local env 未创建: {env_file}")
+                print("       拿到外部 VLM key 后，复制 local/midscene-computer.env.example 并填写本机 env。")
+
         executable = cfg.get("BROWSER_USE", "chrome_executable_path", fallback="").strip()
         if executable:
             executable = os.path.expanduser(os.path.expandvars(executable))
             if os.path.exists(executable):
-                print(f"[OK] browser-use Chrome executable: {executable}")
+                print(f"[OK] Chrome executable: {executable}")
             else:
-                print(f"[WARN] browser-use Chrome executable 不存在: {executable}")
+                print(f"[WARN] Chrome executable 不存在: {executable}")
 
         profile_dir = cfg.get("BROWSER_USE", "chrome_user_data_dir", fallback="").strip()
         if not profile_dir:
             print(f"[WARN] {args.config} 未配置 [BROWSER_USE] chrome_user_data_dir")
-            print("       如需复用淘宝登录态，请配置 Chrome user data dir/profile。")
+            print("       如需复用旧 browser-use/CDP 路线，请配置 Chrome user data dir/profile。")
             return True
         profile_dir = os.path.expanduser(profile_dir)
         if not os.path.exists(profile_dir):
@@ -263,16 +275,16 @@ def main():
     sub.add_parser("setup", help="Python/依赖/目录自检")
     sub.add_parser("db", help="万智牌数据库（含 SSH 隧道）连通性")
 
-    visual_one = sub.add_parser("visual-one", help="准备单关键词 browser-use MCP 采集任务")
+    visual_one = sub.add_parser("visual-one", help="准备单关键词视觉采集任务")
     visual_one.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
     visual_one.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
-    visual_one.add_argument("--agent-execute", action="store_true", help="[fallback] 项目内直接运行 browser-use Agent；需要额外 LLM API key")
+    visual_one.add_argument("--agent-execute", action="store_true", help="[legacy fallback] 项目内直接运行 browser-use Agent；需要 provider=browser_use 和额外 LLM API key")
 
-    visual_run = sub.add_parser("visual-run", help="为已准备 run_id 生成 browser-use MCP 采集任务")
+    visual_run = sub.add_parser("visual-run", help="为已准备 run_id 生成视觉采集请求")
     visual_run.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
     visual_run.add_argument("--limit", type=int, help="最多处理多少个 pending 关键词")
     visual_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
-    visual_run.add_argument("--agent-execute", action="store_true", help="[fallback] 项目内直接运行 browser-use Agent；需要额外 LLM API key")
+    visual_run.add_argument("--agent-execute", action="store_true", help="[legacy fallback] 项目内直接运行 browser-use Agent；需要 provider=browser_use 和额外 LLM API key")
 
     ingest = sub.add_parser("visual-ingest", help="Codex 识别后写入结构化视觉结果")
     ingest.add_argument("task_dir", help="任务目录，如 data/tasks/xxx")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""browser-use local Chrome collection task entry point."""
+"""Local Chrome visual collection task preparation entry point."""
 import argparse
 import json
 import os
@@ -63,9 +63,9 @@ def prepare_visual_task(args):
             keyword=keyword,
             status="pending",
             evidence_dir=evidence_dir,
-            last_action="browser_use_task_prepared",
+            last_action="visual_task_prepared",
             agent_notes=(
-                "Prepared for browser-use local Chrome login-state collection. "
+                "Prepared for local Chrome pure-vision collection. "
                 "Collect only visible page evidence and structured visual rows."
             ),
         )
@@ -79,12 +79,12 @@ def prepare_visual_task(args):
             "keyword": args.keyword,
             "config": os.path.abspath(args.config),
         },
-        "workflow": "browser_use_login_state_capture",
+        "workflow": "local_chrome_visual_capture",
         "keywords": keywords,
         "records": records,
         "next_steps": [
-            "Use browser-use with logged-in local Chrome state and low-frequency scheduling.",
-            "Capture visible screenshots and browser-use state summaries into each evidence_dir.",
+            "Use the configured visual provider with logged-in local Chrome and low-frequency scheduling.",
+            "Capture retained visible screenshots into each evidence_dir.",
             "Extract visible product rows into raw rows without network/cookie/storage access.",
             "Feed raw rows into existing filter/DB/LLM/statistical assignment pipeline.",
         ],
@@ -119,7 +119,7 @@ def prepare_visual_task(args):
     print(f"关键词文件: {keywords_path}")
     if checkpoint_copy:
         print(f"checkpoint: {checkpoint_copy}")
-    print("\n下一步: 使用 harness.py visual-run 生成 browser-use MCP 采集请求。")
+    print("\n下一步: 使用 harness.py visual-run 生成视觉采集请求。")
 
 
 def _safe_name(value):

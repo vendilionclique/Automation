@@ -11,6 +11,10 @@ from modules.browser_use_driver import (
     run_browser_use_capture,
     write_browser_use_request,
 )
+from modules.midscene_computer_driver import (
+    midscene_computer_config_from_settings,
+    write_midscene_computer_request,
+)
 from modules.session_state import initial_session_state, session_policy_from_settings
 from modules.utils import ConfigManager, ensure_dir, get_project_root
 from modules.visual_capture import (
@@ -47,6 +51,8 @@ def save_visual_manifest(run_id: str, manifest: Dict) -> str:
 
 
 def prepare_single_keyword_run(keyword: str, config_file: str = "config/settings.ini") -> Dict:
+    config = ConfigManager(config_file)
+    provider = _collection_provider(config)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_dir = task_dir_for_run(run_id)
     evidence_dir = keyword_evidence_dir(task_dir, keyword)
@@ -55,7 +61,7 @@ def prepare_single_keyword_run(keyword: str, config_file: str = "config/settings
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source": {"keyword": keyword, "config": os.path.abspath(config_file)},
-        "workflow": "browser_use_login_state_capture",
+        "workflow": f"{provider}_visual_capture",
         "keywords": [keyword],
         "records": [
             {
@@ -86,7 +92,9 @@ def run_visual_collection(
     execute_browser_use: bool = False,
 ) -> Dict:
     config = ConfigManager(config_file)
+    provider = _collection_provider(config)
     browser_use_config = browser_use_config_from_settings(config)
+    midscene_config = midscene_computer_config_from_settings(config)
     policy = session_policy_from_settings(config)
     manifest = load_visual_manifest(run_id)
     manifest.setdefault("session", initial_session_state(policy))
@@ -103,33 +111,52 @@ def run_visual_collection(
             "failed",
             "needs_codex_browser_use",
             "needs_browser_use_agent",
+            "needs_midscene_computer",
         ):
             continue
 
         keyword = record["keyword"]
-        record["status"] = "needs_browser_use_agent"
+        record["status"] = "needs_browser_use_agent" if provider == "browser_use" else "needs_midscene_computer"
         record["started_at"] = record.get("started_at") or datetime.now().isoformat(timespec="seconds")
         record["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        record["last_action"] = "browser_use_mcp_request_prepared"
+        record["last_action"] = f"{provider}_request_prepared"
         save_visual_manifest(run_id, manifest)
 
         evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
-        request = write_browser_use_request(
-            run_id=run_id,
-            keyword=keyword,
-            evidence_dir=evidence_dir,
-            config=browser_use_config,
-            manual_state=manual_state,
-        )
+        if provider == "browser_use":
+            request = write_browser_use_request(
+                run_id=run_id,
+                keyword=keyword,
+                evidence_dir=evidence_dir,
+                config=browser_use_config,
+                manual_state=manual_state,
+            )
+            request_kind = "browser_use"
+            request_key = "browser_use_request"
+            instructions_key = "browser_use_instructions"
+            target = request.url
+        else:
+            request = write_midscene_computer_request(
+                run_id=run_id,
+                keyword=keyword,
+                evidence_dir=evidence_dir,
+                config=midscene_config,
+                manual_state=manual_state,
+            )
+            request_kind = "midscene_computer"
+            request_key = "midscene_computer_request"
+            instructions_key = "midscene_computer_instructions"
+            target = request.start_url
+
         record["status"] = request.status
         record["failure_reason"] = None
         record["evidence_dir"] = evidence_dir
-        record["last_action"] = "browser_use_mcp_request_prepared"
+        record["last_action"] = f"{request_kind}_request_prepared"
         record["updated_at"] = datetime.now().isoformat(timespec="seconds")
         record.setdefault("extra", {})
-        record["extra"]["browser_use_request"] = request.request_path
-        record["extra"]["browser_use_instructions"] = request.instruction_path
-        record["extra"]["target_url"] = request.url
+        record["extra"][request_key] = request.request_path
+        record["extra"][instructions_key] = request.instruction_path
+        record["extra"]["target_url"] = target
         record["extra"]["expected_screenshot"] = request.screenshot_path
 
         result_payload = {
@@ -137,11 +164,18 @@ def run_visual_collection(
             "status": request.status,
             "request": request.request_path,
             "instructions": request.instruction_path,
-            "target_url": request.url,
+            "target_url": target,
+            "provider": request_kind,
         }
 
         session = manifest.setdefault("session", initial_session_state(policy))
-        if execute_browser_use:
+        if execute_browser_use and provider != "browser_use":
+            record["status"] = "needs_midscene_computer"
+            record["failure_reason"] = "agent_execute_is_only_available_for_legacy_browser_use"
+            record["last_action"] = "midscene_computer_request_prepared"
+            session["status"] = "awaiting_midscene_computer"
+            result_payload["warning"] = record["failure_reason"]
+        elif execute_browser_use:
             run_result = run_browser_use_capture(
                 run_id=run_id,
                 keyword=keyword,
@@ -193,7 +227,7 @@ def run_visual_collection(
             session["status"] = "healthy" if record["status"] == "extracted" else "needs_review"
             result_payload["browser_use_result"] = run_result.to_dict()
         else:
-            session["status"] = "awaiting_browser_use_agent"
+            session["status"] = f"awaiting_{request_kind}"
 
         session["updated_at"] = datetime.now().isoformat(timespec="seconds")
         save_visual_manifest(run_id, manifest)
@@ -246,11 +280,11 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
                 status=record["status"],
                 page_state={
                     "status": record["status"],
-                    "reason": "codex_browser_use_mcp_ingested_rows",
+                    "reason": "codex_visual_mcp_ingested_rows",
                     "rows_written": ingest_result.get("rows_written", 0),
                 },
                 retained=True,
-                notes="codex_browser_use_mcp",
+                notes="codex_visual_mcp",
             )
             write_capture_manifest(capture)
         break
@@ -259,3 +293,13 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
         session["status"] = "healthy" if ingest_result.get("ok") else "needs_review"
         session["updated_at"] = now
     return save_visual_manifest(run_id, manifest)
+
+
+def _collection_provider(config: ConfigManager) -> str:
+    provider = config.get("VISUAL_CAPTURE", "provider", fallback="midscene_computer")
+    provider = str(provider or "").strip().lower().replace("-", "_")
+    if provider in ("midscene", "midscene_computer", "computer"):
+        return "midscene_computer"
+    if provider in ("browser_use", "browseruse", "browser_use_legacy"):
+        return "browser_use"
+    raise ValueError(f"不支持的视觉采集 provider: {provider}")

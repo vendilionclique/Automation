@@ -1,0 +1,17 @@
+{
+  "name": "taobao-mtg-visual-collector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local visual collection tooling spike for Taobao MTG price evidence.",
+  "type": "module",
+  "scripts": {
+    "midscene:version": "node -e \"const fs=require('fs'); for (const p of ['node_modules/@midscene/web/package.json','node_modules/@midscene/computer/package.json']) { const pkg=JSON.parse(fs.readFileSync(p,'utf8')); console.log(pkg.name, pkg.version); }\"",
+    "midscene:web:help": "midscene-web --help",
+    "midscene:computer:help": "midscene-computer --help"
+  },
+  "devDependencies": {
+    "@midscene/computer": "^1.7.10",
+    "@midscene/web": "^1.7.10",
+    "puppeteer": "^24.43.0"
+  }
+}

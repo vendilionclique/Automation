@@ -25,6 +25,10 @@ venv/
 env/
 ENV/
 .venv/
+node_modules/
+.npm/
+.cache/
+midscene_run/
 
 # IDE
 .vscode/
@@ -76,3 +80,6 @@ taobao_automation/
 local/*
 !local/.gitkeep
 !local/README.md
+!local/start_taobao_visual_chrome.sh
+!local/start_midscene_computer_mcp.sh
+!local/midscene-computer.env.example
