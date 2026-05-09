@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${MIDSCENE_ENV_FILE:-${ROOT_DIR}/local/midscene-computer.env}"
 NODE_BIN="${NODE_BIN:-/Users/zhunshi/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node}"
-MIDSCENE_BIN="${ROOT_DIR}/node_modules/@midscene/computer/bin/midscene-computer"
+MIDSCENE_MCP_LAUNCHER="${ROOT_DIR}/scripts/midscene_computer_mcp_launcher.cjs"
 
 if [[ -f "${ENV_FILE}" ]]; then
   set -a
@@ -16,4 +16,4 @@ fi
 export MIDSCENE_RUN_DIR="${MIDSCENE_RUN_DIR:-${ROOT_DIR}/local/midscene-run}"
 export MIDSCENE_REPORT_QUIET="${MIDSCENE_REPORT_QUIET:-true}"
 
-exec "${NODE_BIN}" "${MIDSCENE_BIN}" "$@"
+exec "${NODE_BIN}" "${MIDSCENE_MCP_LAUNCHER}" "$@"

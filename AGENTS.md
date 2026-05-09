@@ -191,12 +191,14 @@ python harness.py db
 ## 开发注意事项
 
 - 不自动处理验证码或登录，只检测、暂停、通知人工。
+- 如果页面显示登录提示，但人工明确确认当前采集 profile 已登录，允许仅刷新当前可见页面一次做状态复核；刷新后仍显示登录/风险状态则立即暂停并记录 `login_required` 或对应异常。
 - 不抓接口、不读 cookies/storage、不读隐藏 DOM/HTML，不用 JS eval/DOMSnapshot/AX tree 提取页面结构或商品数据。
 - 淘宝主线禁用 browser-use MCP 的 `browser_get_state`、`browser_get_html`、`browser_extract_content`、index 点击/输入和任何依赖 selector map 的操作。
 - 允许的浏览器自动化方向是 pure-vision：截图识别页面，坐标点击、键盘输入、页面级滚动。商品标题、价格、店铺、地区等采集结果必须来自保留的可见截图，不能从 HTML/DOM/network/storage 中抽取。
+- 暂不采用 CDP/full-page screenshot 作为淘宝主线；它虽然未必能被网页 JS 直接感知，但会把路线带回浏览器调试控制层，并可能引入 layout/evaluate/network/viewport 等附带能力与长期环境画像风险。
 - browser-use MCP 由 Codex App 手动开关控制；平时关闭以避免 Python MCP 进程反复弹出，需要采集时再打开。
 - 采集访问路径应从淘宝首页可见搜索框输入关键词并触发搜索，不直接以带关键词的搜索 URL 作为常规采集入口。
-- 视觉识别结果必须保留截图证据、坐标、置信度和人工复核入口。
+- 视觉识别结果必须保留坐标、置信度和人工复核入口；正常高置信 ingest 成功后可删除原始截图，异常、低置信、登录/验证码/风险等需要复核的截图必须保留。
 - 采集速度从属于账号安全和数据可审计性。
 - 后处理资产必须和采集层解耦，确保视觉采集替换后仍能继续使用现有过滤、DB、LLM、统计和赋值流程。
 

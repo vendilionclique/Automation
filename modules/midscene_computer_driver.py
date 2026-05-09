@@ -140,8 +140,7 @@ def write_midscene_computer_request(
                 f"python harness.py visual-ingest {json.dumps(task_dir, ensure_ascii=False)} "
                 f"--keyword {json.dumps(keyword, ensure_ascii=False)} "
                 "--rows-file <rows.json> "
-                f"--screenshot {json.dumps(screenshot_path, ensure_ascii=False)} "
-                "--retain-screenshot"
+                f"--screenshot {json.dumps(screenshot_path, ensure_ascii=False)}"
             ),
             "rows_schema": [
                 "商品名称",
@@ -185,7 +184,7 @@ Architecture:
 - Midscene may use its configured external VLM only for bounded visual
   grounding of UI operations, such as finding the visible Taobao search box or
   search button.
-- Final product rows must be based on retained screenshots and reviewed by
+- Final product rows must be based on visible screenshots and reviewed by
   Codex before visual-ingest. Midscene VLM output is an operation aid, not the
   final evidence source.
 
@@ -224,8 +223,11 @@ Steps:
    times with page-level scroll input and save additional screenshots in the
    same evidence directory.
 8. Codex should identify at least {cfg["min_rows_per_keyword"]} visible product
-   rows when possible from the retained screenshots, then write rows JSON and
+   rows when possible from visible screenshots, then write rows JSON and
    ingest with harness.py visual-ingest.
+   Do not pass `--retain-screenshot` for normal successful extraction; the
+   ingest step keeps screenshots only when extraction needs review. Retain
+   abnormal-state screenshots such as login, captcha, risk, or white skeleton.
 
 Rows JSON shape:
 ```json
