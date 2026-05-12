@@ -407,6 +407,21 @@ only the keyword capture tasks listed below, then stop. Do not create new daily
 plans, choose new keywords, retry future sessions, or decide final exception
 strategy.
 
+Chrome foreground rule:
+- If the current screenshot shows Codex, Cursor, Terminal, or another app, do
+  not classify that as Taobao/Chrome failure. It usually only means Chrome is
+  not foreground.
+- First try to bring Chrome forward visually: taskbar/Dock click, Alt-Tab on
+  Windows, or Cmd-Tab on macOS.
+- If Chrome is not visible after switching, run the platform launcher from the
+  repository root. It reuses the dedicated-profile Chrome if already running and
+  starts it only when needed:
+  - Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start_taobao_visual_chrome.ps1`
+  - macOS: `bash scripts/start_taobao_visual_chrome.sh`
+- After the launcher, take a fresh system screenshot and continue from the
+  visible Chrome page. Only stop with `chrome_start_failed` if Chrome still
+  cannot be foregrounded.
+
 Keywords:
 {keywords or "- none"}
 
@@ -428,6 +443,8 @@ State boundary:
   {payload["hard_stop_policy"]["timeout_per_keyword_seconds"]} seconds.
 - If a hard stop occurs, retain the abnormal screenshot, write
   session_worker_result.json with status `needs_review`, and stop the session.
+  Do not use `unknown` merely because Codex was foreground before switching to
+  Chrome.
 
 Data boundary:
 - Use system screenshots only. Do not read DOM, HTML, AX tree, selector maps,
@@ -492,8 +509,10 @@ Suggested screenshot prefixes: {prefixes}{manual}
 
 Use the midscene-computer MCP server from Codex App. The browser must already be
 the visible, foreground Chrome window using the dedicated Taobao collection
-profile. Midscene computer should only use system screenshots for observation
-and system mouse, keyboard, and scroll events for action.
+profile. If another app is foreground, bring Chrome forward or run the project
+launcher before deciding page state. Midscene computer should only use system
+screenshots for observation and system mouse, keyboard, and scroll events for
+action.
 
 Architecture:
 - Codex is the long-running task agent: scheduling, checkpointing, abnormal
@@ -577,11 +596,18 @@ Safety boundary:
   interacting with account-state controls.
 
 Steps:
-1. Confirm Chrome is foreground and on the dedicated profile. If needed, ask a
-   human to start local/start_taobao_visual_chrome.sh and log in manually.
-   The startup script should be run once per session; if Chrome is already
-   running with the dedicated profile, reuse that window instead of opening a
-   new tab.
+1. Confirm Chrome is foreground and on the dedicated profile. If the screenshot
+   shows Codex, Cursor, Terminal, or another app, this is not a blocker; switch
+   to Chrome first with taskbar/Dock click, Alt-Tab on Windows, or Cmd-Tab on
+   macOS. If Chrome is not visible, run the platform launcher from the
+   repository root:
+   - Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start_taobao_visual_chrome.ps1`
+   - macOS: `bash scripts/start_taobao_visual_chrome.sh`
+   These launchers reuse the dedicated-profile Chrome if it is already running
+   and start it only when needed. After running the launcher, take a fresh
+   system screenshot and continue from the visible Chrome window. Ask a human
+   only for login/captcha/security verification or if Chrome still cannot be
+   foregrounded.
 2. Use system screenshot observation to verify initialization before any
    keyword work:
    - Chrome is the visible foreground app.

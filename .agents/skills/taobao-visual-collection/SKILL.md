@@ -21,15 +21,39 @@ Use this skill for project-specific Taobao collection work in this repository. I
 2. Run `python harness.py setup` when environment readiness is unclear.
 3. Use `python harness.py visual-plan-day` or `visual-auto-tick` for ledger-driven planning.
 4. Use `python harness.py visual-session-run <plan_id> --session <N>` to prepare bounded Midscene worker contracts.
-5. Execute the generated session worker request with Midscene computer MCP only if the MCP tools are callable in the current agent app.
-6. Stop safely on login/captcha/security/risk/white-skeleton/continuous abnormal states; record session and keyword results instead of retrying aggressively.
-7. After screenshots exist, extract rows visually, then run `visual-ingest` and `visual-export`.
-8. Keep DB/LLM/statistical/final assignment decoupled from the capture layer.
+5. Before declaring Chrome unavailable, bring the dedicated Chrome profile to the foreground or start/reuse it with the project script below.
+6. Execute the generated session worker request with Midscene computer MCP only if the MCP tools are callable in the current agent app.
+7. Stop safely on login/captcha/security/risk/white-skeleton/continuous abnormal states; record session and keyword results instead of retrying aggressively.
+8. After screenshots exist, extract rows visually, then run `visual-ingest` and `visual-export`.
+9. Keep DB/LLM/statistical/final assignment decoupled from the capture layer.
+
+## Chrome Foreground Rule
+
+- Seeing Codex, Cursor, Terminal, or another app in the current screenshot is not a blocker. It usually only means Chrome is not foreground.
+- First try normal visual/system switching: taskbar/Dock click, Alt-Tab on Windows, or Cmd-Tab on macOS.
+- If Chrome is still not visible, run the platform launcher. The launcher must reuse an existing dedicated-profile Chrome window when it is already running; it must not open duplicate collection windows.
+
+Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_taobao_visual_chrome.ps1
+```
+
+macOS:
+
+```bash
+bash scripts/start_taobao_visual_chrome.sh
+```
+
+- Only stop for `chrome_start_failed` after the launcher fails or Chrome still cannot be foregrounded.
+- Once Chrome is foreground, continue from the visible page. Do not treat the previous Codex foreground screenshot as page state.
 
 ## Project Files To Check
 
 - `config/settings.ini`: machine-local secrets and ledger path; ignored by git.
 - `local/midscene-computer.env`: machine-local Midscene VLM key; ignored by git.
+- `scripts/start_taobao_visual_chrome.ps1`: Windows launcher/focus helper for the dedicated Taobao Chrome profile.
+- `scripts/start_taobao_visual_chrome.sh`: macOS launcher/focus helper for the dedicated Taobao Chrome profile.
 - `scripts/start_midscene_computer_mcp.ps1`: Windows stdio launcher for Midscene MCP.
 - `scripts/sync_agent_project_config.ps1`: syncs project MCP/skill into Codex on a new machine.
 - `.cursor/mcp.json`: project-level Cursor MCP declaration.

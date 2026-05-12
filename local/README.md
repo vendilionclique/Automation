@@ -11,7 +11,13 @@ local/chrome-taobao-visual-profile
 Start it with:
 
 ```bash
-local/start_taobao_visual_chrome.sh
+bash scripts/start_taobao_visual_chrome.sh
+```
+
+On Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_taobao_visual_chrome.ps1
 ```
 
 Midscene computer MCP is launched through:

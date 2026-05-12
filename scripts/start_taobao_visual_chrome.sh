@@ -2,13 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROFILE_DIR="${ROOT_DIR}/local/chrome-taobao-visual-profile"
+PROFILE_DIR="${TAOBAO_CHROME_PROFILE_DIR:-${ROOT_DIR}/local/chrome-taobao-visual-profile}"
 CHROME_BIN="${CHROME_BIN:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
-WINDOW_X="${WINDOW_X:-0}"
-WINDOW_Y="${WINDOW_Y:-0}"
-WINDOW_WIDTH="${WINDOW_WIDTH:-1600}"
-WINDOW_HEIGHT="${WINDOW_HEIGHT:-1000}"
-START_URL="${START_URL:-https://www.taobao.com/}"
+WINDOW_X="${TAOBAO_WINDOW_X:-0}"
+WINDOW_Y="${TAOBAO_WINDOW_Y:-0}"
+WINDOW_WIDTH="${TAOBAO_WINDOW_WIDTH:-1600}"
+WINDOW_HEIGHT="${TAOBAO_WINDOW_HEIGHT:-1000}"
+START_URL="${TAOBAO_START_URL:-https://www.taobao.com/}"
 
 mkdir -p "${PROFILE_DIR}"
 

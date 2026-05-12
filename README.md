@@ -33,7 +33,13 @@ npm install
 启动专用 Chrome 采集 profile，并人工登录淘宝：
 
 ```bash
-local/start_taobao_visual_chrome.sh
+bash scripts/start_taobao_visual_chrome.sh
+```
+
+Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_taobao_visual_chrome.ps1
 ```
 
 配置 Midscene computer MCP 的外部 VLM key：
