@@ -211,7 +211,17 @@ Safety boundary:
 Steps:
 1. Confirm Chrome is foreground and on the dedicated profile. If needed, ask a
    human to start local/start_taobao_visual_chrome.sh and log in manually.
-2. Use system screenshot observation to verify the visible page.
+   The startup script should be run once per session; if Chrome is already
+   running with the dedicated profile, reuse that window instead of opening a
+   new tab.
+2. Use system screenshot observation to verify initialization before any
+   keyword work:
+   - Chrome is the visible foreground app.
+   - The page is in the dedicated Taobao collection profile.
+   - The window is large enough for dense listing capture, usually about
+     {cfg["window_width"]}x{cfg["window_height"]}.
+   - The visible page zoom/layout shows multiple product cards per row. If the
+     page is too zoomed in, ask a human to adjust browser zoom before continuing.
 3. Navigate to Taobao home only through normal visible browser controls when
    needed, then focus the visible Taobao search input.
 4. Type the keyword exactly as:
