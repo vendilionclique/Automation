@@ -14,15 +14,43 @@ if (-not (Test-Path -LiteralPath $CodexConfig)) {
 }
 
 $configText = Get-Content -LiteralPath $CodexConfig -Raw -Encoding UTF8
+$MidsceneAllowedTools = @(
+    "computer_list_displays",
+    "ListDisplays",
+    "computer_connect",
+    "computer_disconnect",
+    "take_screenshot",
+    "Tap",
+    "Input",
+    "ClearInput",
+    "KeyboardPress",
+    "Scroll",
+    "MouseMove",
+    "DoubleClick",
+    "RightClick",
+    "DragAndDrop",
+    "act",
+    "assert"
+)
+
+$toolBlocks = ($MidsceneAllowedTools | ForEach-Object {
+@"
+[mcp_servers.midscene-computer.tools.$_]
+approval_mode = "never"
+
+"@
+}) -join ""
+
 $serverBlock = @"
 [mcp_servers.midscene-computer]
 command = "powershell"
 args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$($McpLauncher -replace '\\', '\\')"]
 enabled = true
 
+$toolBlocks
 "@
 
-$pattern = '(?ms)^\[mcp_servers\.midscene-computer\]\r?\n.*?(?=^\[|\z)'
+$pattern = '(?ms)^\[mcp_servers\.midscene-computer\]\r?\n.*?(?=^\[(?!mcp_servers\.midscene-computer(?:\.tools\.)?)|\z)'
 if ($configText -match $pattern) {
     $configText = [regex]::Replace($configText, $pattern, $serverBlock)
 } else {

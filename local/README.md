@@ -38,6 +38,13 @@ To sync the project MCP and project skill into Codex on a new machine:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync_agent_project_config.ps1
 ```
 
+The sync script also pre-approves the Midscene computer tools needed by the
+Taobao visual workflow in `~/.codex/config.toml` with
+`approval_mode = "never"`. This keeps cron-launched sessions from pausing on
+every `Tap`, `Input`, `Scroll`, or screenshot action. The approval is scoped to
+the Midscene computer MCP action surface; it does not add DOM, HTML, network,
+cookie, storage, or CDP extraction tools.
+
 For external VLM grounding, copy:
 
 ```bash

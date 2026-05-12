@@ -24,6 +24,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync_agent_project_c
 python harness.py setup
 ```
 
-For Codex, the sync script writes the `midscene-computer` MCP server into `~/.codex/config.toml` and copies the project skill into `~/.codex/skills/taobao-visual-collection`.
+For Codex, the sync script writes the `midscene-computer` MCP server into
+`~/.codex/config.toml`, marks the Taobao visual workflow's Midscene computer
+tools as `approval_mode = "never"` for unattended cron/session runs, and copies
+the project skill into `~/.codex/skills/taobao-visual-collection`.
+
+The pre-approved Midscene tool set is limited to the visual workflow surface:
+display listing/connection, system screenshots, coordinate mouse actions,
+keyboard input, scroll, assertion, and disconnect. It does not grant DOM, HTML,
+network, cookie, storage, or CDP extraction capabilities.
 
 For Cursor, open the repository and use the tracked `.cursor/mcp.json`. If Cursor does not expand `${workspaceFolder}` in MCP args on a specific version, replace that one arg with the absolute path to `scripts\start_midscene_computer_mcp.ps1`.
