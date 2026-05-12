@@ -77,7 +77,7 @@ def main():
     if result.get("success"):
         print(f"总牌名数: {result['total_cards']}")
         print(f"statistical_candidate 牌名数: {result['eligible_cards']}")
-        print(f"open_url_fallback 牌名数: {result.get('fallback_cards', 0)}")
+        print(f"with_keywords_fallback 牌名数: {result.get('fallback_cards', 0)}")
         print(f"输出文件: {result['output_file']}")
     else:
         print(f"处理失败: {result.get('error', '未知错误')}")

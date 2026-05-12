@@ -23,7 +23,9 @@ def _find_existing_col(df, candidates):
 
 def _normalize_mode(value):
     mode = str(value or "").strip().lower()
-    if mode in {"statistical", "open_url", "skip"}:
+    if mode == "open_url":
+        return "with_keywords"
+    if mode in {"statistical", "with_keywords", "skip"}:
         return mode
     return ""
 
@@ -99,6 +101,9 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
     output_price_col = config.get(
         "PRODUCT_ROUTING", "output_price_column", fallback="准确淘宝价"
     ).strip()
+    capture_time_output_col = config.get(
+        "PRODUCT_ROUTING", "capture_time_output_column", fallback="淘宝采集时间"
+    ).strip()
 
     raw_df = pd.read_excel(raw_input_file, engine="openpyxl")
     eval_df = pd.read_excel(statistical_eval_file, engine="openpyxl", sheet_name="all_cards")
@@ -113,6 +118,8 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
         return {"success": False, "error": "原始输入表缺少牌名列"}
     if output_price_col not in raw_df.columns:
         return {"success": False, "error": f"原始输入表缺少回填列: {output_price_col}"}
+    if capture_time_output_col and capture_time_output_col not in raw_df.columns:
+        raw_df[capture_time_output_col] = ""
     if "card_name" not in eval_df.columns:
         return {"success": False, "error": "统计评估文件缺少 card_name 列"}
 
@@ -126,6 +133,10 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
     assigned_df[output_price_col] = assigned_df[output_price_col].where(
         assigned_df[output_price_col].notna(), ""
     )
+    if capture_time_output_col:
+        assigned_df[capture_time_output_col] = assigned_df[capture_time_output_col].where(
+            assigned_df[capture_time_output_col].notna(), ""
+        )
 
     audit_cols = {
         "preferred_mode_normalized": [],
@@ -145,7 +156,7 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
         "skip": 0,
         "statistical_assigned": 0,
         "statistical_blocked_pending": 0,
-        "open_url_pending": 0,
+        "with_keywords_pending": 0,
         "mode_missing_or_unknown": 0,
     }
 
@@ -157,6 +168,7 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
         card_name = str(row.get(source_card_name_col, "") or "").strip()
         eval_row = eval_map.get(card_name)
         assigned_price = ""
+        assigned_capture_time = ""
         effective_mode = ""
         status = ""
         reason = ""
@@ -173,10 +185,10 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
             summary["skip"] += 1
         elif mode == "statistical":
             if eval_row is None:
-                effective_mode = "open_url_fallback_pending"
-                status = "statistical_eval_missing_pending_open_url"
+                effective_mode = "with_keywords_fallback_pending"
+                status = "statistical_eval_missing_pending_with_keywords"
                 reason = "未找到该牌名的统计评估结果"
-                source = "pending_open_url"
+                source = "pending_with_keywords"
                 summary["statistical_blocked_pending"] += 1
             else:
                 target_value = _safe_float(eval_row.get("target_value"))
@@ -184,23 +196,26 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
                 secondary_reason = str(eval_row.get("secondary_reason", "") or "").strip()
                 if bool(eval_row.get("eligible_final")) and target_value is not None:
                     assigned_price = target_value
+                    assigned_capture_time = str(
+                        eval_row.get("capture_time_for_assignment", "") or ""
+                    ).strip()
                     effective_mode = "statistical"
                     status = "statistical_assigned"
                     reason = "统计评估通过，按 target_value 回填"
                     source = "statistical_target_value"
                     summary["statistical_assigned"] += 1
                 else:
-                    effective_mode = "open_url_fallback_pending"
-                    status = "statistical_blocked_pending_open_url"
-                    reason = "统计评估未通过，需升级为 open_url"
-                    source = "pending_open_url"
+                    effective_mode = "with_keywords_fallback_pending"
+                    status = "statistical_blocked_pending_with_keywords"
+                    reason = "统计评估未通过，后续可考虑使用“万智牌 中文牌名 关键词”重新采集"
+                    source = "pending_with_keywords"
                     summary["statistical_blocked_pending"] += 1
-        elif mode == "open_url":
-            effective_mode = "open_url"
-            status = "open_url_pending"
-            reason = "preferred_mode=open_url，等待后续 URL/SKU 赋值模块"
-            source = "pending_open_url"
-            summary["open_url_pending"] += 1
+        elif mode == "with_keywords":
+            effective_mode = "with_keywords"
+            status = "with_keywords_pending"
+            reason = "preferred_mode=with_keywords，等待后续带额外关键词的统计采集/赋值模块"
+            source = "pending_with_keywords"
+            summary["with_keywords_pending"] += 1
         else:
             effective_mode = ""
             status = "mode_missing_or_unknown"
@@ -221,10 +236,13 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
             audit_cols["source_product_id"].append(row.get(source_product_id_col, ""))
 
         assigned_df.at[row.name, output_price_col] = assigned_price
+        if capture_time_output_col:
+            assigned_df.at[row.name, capture_time_output_col] = assigned_capture_time
 
         exported = row.to_dict()
         exported.update({
             output_price_col: assigned_price,
+            capture_time_output_col: assigned_capture_time if capture_time_output_col else "",
             "preferred_mode_normalized": mode,
             "effective_mode": effective_mode,
             "assignment_status": status,
@@ -239,9 +257,9 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
             exported["source_product_id"] = row.get(source_product_id_col, "")
 
         if status in {
-            "open_url_pending",
-            "statistical_blocked_pending_open_url",
-            "statistical_eval_missing_pending_open_url",
+            "with_keywords_pending",
+            "statistical_blocked_pending_with_keywords",
+            "statistical_eval_missing_pending_with_keywords",
             "mode_missing_or_unknown",
         }:
             pending_rows.append(exported)
@@ -267,11 +285,11 @@ def assign_final_values(raw_input_file=None, statistical_eval_file=None, output_
         summary_df.to_excel(writer, sheet_name="摘要", index=False)
 
     log.info(
-        "最终赋值 v1 完成: skip=%s, statistical_assigned=%s, blocked_pending=%s, open_url_pending=%s, unknown=%s, 输出=%s",
+        "最终赋值 v1 完成: skip=%s, statistical_assigned=%s, blocked_pending=%s, with_keywords_pending=%s, unknown=%s, 输出=%s",
         summary["skip"],
         summary["statistical_assigned"],
         summary["statistical_blocked_pending"],
-        summary["open_url_pending"],
+        summary["with_keywords_pending"],
         summary["mode_missing_or_unknown"],
         output_file,
     )

@@ -8,6 +8,7 @@ read DOM, or contact Taobao.
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from modules.visual_capture import maybe_delete_screenshot
@@ -16,6 +17,7 @@ from modules.utils import ensure_dir
 
 REQUIRED_COLUMNS = [
     "搜索关键词",
+    "采集时间",
     "商品名称",
     "现价",
     "店铺名称",
@@ -35,6 +37,9 @@ class IngestResult:
     rows_written: int
     raw_jsonl: str
     raw_excel: str
+    rows_received: int = 0
+    duplicates_removed: int = 0
+    rows_dropped_by_limit: int = 0
     screenshot_path: str = ""
     screenshot_deleted: bool = False
     error: Optional[str] = None
@@ -46,6 +51,9 @@ class IngestResult:
             "rows_written": self.rows_written,
             "raw_jsonl": self.raw_jsonl,
             "raw_excel": self.raw_excel,
+            "rows_received": self.rows_received,
+            "duplicates_removed": self.duplicates_removed,
+            "rows_dropped_by_limit": self.rows_dropped_by_limit,
             "screenshot_path": self.screenshot_path,
             "screenshot_deleted": self.screenshot_deleted,
             "error": self.error,
@@ -72,11 +80,14 @@ def normalize_rows(
     rows: Iterable[Dict[str, Any]],
     keyword: str,
     screenshot_path: str = "",
+    captured_at: str = "",
 ) -> List[Dict[str, Any]]:
     normalized = []
+    captured_at = captured_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     for row in rows:
         item = {col: row.get(col, "") for col in REQUIRED_COLUMNS}
         item["搜索关键词"] = item["搜索关键词"] or keyword
+        item["采集时间"] = _normalize_capture_time(item["采集时间"] or captured_at)
         item["截图文件"] = item["截图文件"] or screenshot_path
         item["商品名称"] = str(item["商品名称"] or "").strip()
         item["店铺名称"] = str(item["店铺名称"] or "").strip()
@@ -99,29 +110,60 @@ def ingest_rows(
     screenshot_path: str = "",
     confidence_threshold: float = 0.80,
     retain_screenshot: Optional[bool] = None,
+    target_limit: int = 0,
+    dedupe: bool = True,
 ) -> IngestResult:
     ensure_dir(task_dir)
     raw_jsonl = os.path.join(task_dir, "raw_rows.jsonl")
     raw_excel = os.path.join(task_dir, "raw_results.xlsx")
 
     normalized = normalize_rows(rows, keyword=keyword, screenshot_path=screenshot_path)
+    rows_received = len(normalized)
+    existing_rows = _load_existing_rows(raw_jsonl)
+    existing_keys = {_dedupe_key(row) for row in existing_rows} if dedupe else set()
+    existing_for_keyword = [
+        row for row in existing_rows
+        if str(row.get("搜索关键词", "") or "").strip() == str(keyword or "").strip()
+    ]
+    deduped = []
+    duplicates_removed = 0
+    for row in normalized:
+        key = _dedupe_key(row)
+        if dedupe and key in existing_keys:
+            duplicates_removed += 1
+            continue
+        if dedupe:
+            existing_keys.add(key)
+        deduped.append(row)
+
+    rows_dropped_by_limit = 0
+    if target_limit and target_limit > 0:
+        remaining = max(0, int(target_limit) - len(existing_for_keyword))
+        if len(deduped) > remaining:
+            rows_dropped_by_limit = len(deduped) - remaining
+            deduped = deduped[:remaining]
+
     missing_required = [
-        row for row in normalized
+        row for row in deduped
         if not row["商品名称"] or row["现价"] in ("", None)
     ]
-    low_conf = [row for row in normalized if float(row.get("识别置信度") or 0) < confidence_threshold]
+    low_conf = [row for row in deduped if float(row.get("识别置信度") or 0) < confidence_threshold]
 
     status = "extracted"
     ok = True
-    if not normalized:
-        status = "needs_review"
-        ok = False
+    if not deduped:
+        if rows_received > 0 and existing_for_keyword:
+            status = "extracted"
+            ok = True
+        else:
+            status = "needs_review"
+            ok = False
     elif missing_required or low_conf:
         status = "needs_review"
         ok = False
 
     with open(raw_jsonl, "a", encoding="utf-8") as f:
-        for row in normalized:
+        for row in deduped:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     export_jsonl_to_excel(raw_jsonl, raw_excel)
@@ -135,9 +177,12 @@ def ingest_rows(
     return IngestResult(
         ok=ok,
         status=status,
-        rows_written=len(normalized),
+        rows_written=len(deduped),
         raw_jsonl=raw_jsonl,
         raw_excel=raw_excel,
+        rows_received=rows_received,
+        duplicates_removed=duplicates_removed,
+        rows_dropped_by_limit=rows_dropped_by_limit,
         screenshot_path=screenshot_path,
         screenshot_deleted=screenshot_deleted,
         error=None if ok else "empty_rows_or_low_confidence_or_missing_required_fields",
@@ -175,3 +220,48 @@ def _clean_price(value):
 
     m = re.search(r"\d+(?:\.\d+)?", text)
     return m.group(0) if m else text
+
+
+def _normalize_capture_time(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        import pandas as pd
+
+        parsed = pd.to_datetime(text, errors="coerce")
+        if not pd.isna(parsed):
+            return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    return text
+
+
+def _load_existing_rows(raw_jsonl: str) -> List[Dict[str, Any]]:
+    rows = []
+    if not os.path.exists(raw_jsonl):
+        return rows
+    with open(raw_jsonl, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    return rows
+
+
+def _dedupe_key(row: Dict[str, Any]) -> str:
+    def clean(value):
+        return " ".join(str(value or "").strip().lower().split())
+
+    return "|".join(
+        [
+            clean(row.get("搜索关键词")),
+            clean(row.get("商品名称")),
+            clean(row.get("现价")),
+            clean(row.get("店铺名称")),
+        ]
+    )

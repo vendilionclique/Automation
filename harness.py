@@ -35,7 +35,6 @@ def cmd_setup(args):
             ("configparser", "configparser"),
             ("Pillow", "PIL"),
             ("pyperclip", "pyperclip"),
-            ("browser-use", "browser_use"),
         ]
         missing = []
         for name, mod in required:
@@ -62,12 +61,14 @@ def cmd_setup(args):
             "modules/filter.py",
             "modules/checkpoint.py",
             "modules/utils.py",
-            "modules/browser_use_driver.py",
+            "modules/page_sampling.py",
             "modules/midscene_computer_driver.py",
             "modules/page_state.py",
             "modules/visual_capture.py",
             "modules/vision_extract.py",
             "modules/visual_pipeline.py",
+            "modules/visual_scheduler.py",
+            "modules/session_capsule.py",
         ]
         for fp in required_files:
             if os.path.exists(fp):
@@ -97,6 +98,19 @@ def cmd_setup(args):
                     print(f"[FAIL] {args.config} 缺少 [{section}] {key}")
                     return False
 
+        optional_config = {
+            "SCHEDULER": ["daily_keyword_budget", "daily_session_count", "capture_freshness_days"],
+            "VISUAL_BEHAVIOR": ["micro_pause_short", "inter_keyword_pause_min", "inter_keyword_pause_max"],
+            "PAGE_SAMPLING": ["target_listings_per_keyword", "max_tiles_per_keyword", "retain_screenshots"],
+        }
+        for section, keys in optional_config.items():
+            if not cfg.has_section(section):
+                print(f"[WARN] {args.config} 缺少 [{section}]，将使用代码默认值；建议从 settings.example.ini 同步")
+                continue
+            for key in keys:
+                if not cfg.has_option(section, key):
+                    print(f"[WARN] {args.config} 缺少 [{section}] {key}，将使用代码默认值")
+
         provider = cfg.get("VISUAL_CAPTURE", "provider", fallback="midscene_computer").strip()
         print(f"[OK] visual provider: {provider or 'midscene_computer'}")
         if (provider or "midscene_computer").replace("-", "_") == "midscene_computer":
@@ -112,26 +126,6 @@ def cmd_setup(args):
             else:
                 print(f"[WARN] Midscene local env 未创建: {env_file}")
                 print("       拿到外部 VLM key 后，复制 local/midscene-computer.env.example 并填写本机 env。")
-
-        executable = cfg.get("BROWSER_USE", "chrome_executable_path", fallback="").strip()
-        if executable:
-            executable = os.path.expanduser(os.path.expandvars(executable))
-            if os.path.exists(executable):
-                print(f"[OK] Chrome executable: {executable}")
-            else:
-                print(f"[WARN] Chrome executable 不存在: {executable}")
-
-        profile_dir = cfg.get("BROWSER_USE", "chrome_user_data_dir", fallback="").strip()
-        if not profile_dir:
-            print(f"[WARN] {args.config} 未配置 [BROWSER_USE] chrome_user_data_dir")
-            print("       如需复用旧 browser-use/CDP 路线，请配置 Chrome user data dir/profile。")
-            return True
-        profile_dir = os.path.expanduser(profile_dir)
-        if not os.path.exists(profile_dir):
-            print(f"[WARN] Chrome profile 目录不存在: {profile_dir}")
-            print("       请先创建/选择 Chrome profile 并人工登录淘宝。")
-        else:
-            print(f"[OK] Chrome profile dir: {profile_dir}")
         return True
 
     print("=" * 60)
@@ -194,7 +188,6 @@ def cmd_visual_one(args):
         config_file=args.config,
         limit=1,
         manual_state=args.state,
-        execute_browser_use=args.agent_execute,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -207,17 +200,163 @@ def cmd_visual_run(args):
         config_file=args.config,
         limit=args.limit,
         manual_state=args.state,
-        execute_browser_use=args.agent_execute,
+        session_index=args.session,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_plan_day(args):
+    from modules.visual_scheduler import plan_daily_collection
+
+    result = plan_daily_collection(
+        raw_input_file=args.raw_input,
+        config_file=args.config,
+        plan_id=args.plan_id,
+        random_sample=args.random_sample,
+        random_seed=args.random_seed,
+        session_count=args.session_count,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_session_run(args):
+    from modules.visual_pipeline import run_visual_collection
+
+    result = run_visual_collection(
+        args.plan_id,
+        config_file=args.config,
+        limit=args.limit,
+        manual_state=args.state,
+        session_index=args.session,
+        force_lease=args.force_lease,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_session_capsule(args):
+    from modules.session_capsule import build_session_capsule
+
+    result = build_session_capsule(
+        args.plan_id,
+        args.session,
+        config_file=args.config,
+        limit=args.limit,
+        manual_state=args.state,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_session_lease(args):
+    from modules.session_capsule import (
+        acquire_session_lease,
+        complete_session_lease,
+        heartbeat_session_lease,
+        inspect_session_lease,
+    )
+
+    if args.action == "inspect":
+        result = inspect_session_lease(args.plan_id, args.session)
+    elif args.action == "acquire":
+        result = acquire_session_lease(
+            args.plan_id,
+            args.session,
+            owner=args.owner,
+            ttl_minutes=args.ttl_minutes,
+            force=args.force,
+        )
+    elif args.action == "heartbeat":
+        result = heartbeat_session_lease(
+            args.plan_id,
+            args.session,
+            ttl_minutes=args.ttl_minutes,
+        )
+    else:
+        result = complete_session_lease(
+            args.plan_id,
+            args.session,
+            status=args.status,
+        )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_scheduler_status(args):
+    from modules.visual_scheduler import scheduler_status
+
+    result = scheduler_status(args.plan_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_auto_tick(args):
+    from modules.visual_scheduler import auto_tick_daily_collection
+
+    result = auto_tick_daily_collection(
+        raw_input_file=args.raw_input,
+        config_file=args.config,
+        plan_id=args.plan_id,
+        session_index=args.session,
+        limit=args.limit,
+        random_sample=args.random_sample,
+        random_seed=args.random_seed,
+        session_count=args.session_count,
+        prepare_requests=args.prepare_requests,
+        force_lease=args.force_lease,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_log_tile(args):
+    from modules.page_sampling import write_tile_summary
+    from modules.visual_pipeline import task_dir_for_run
+
+    task_dir = os.path.abspath(args.task_dir) if args.task_dir else task_dir_for_run(args.run_id)
+    path = write_tile_summary(
+        task_dir=task_dir,
+        run_id=args.run_id,
+        keyword=args.keyword,
+        tile_id=args.tile_id,
+        scroll_distance_px=args.scroll_distance_px,
+        rough_state=args.rough_state or "",
+        image_path=os.path.abspath(args.image) if args.image else "",
+        image_retained=args.image_retained,
+        rows_extracted=args.rows_extracted,
+        new_rows_after_dedupe=args.new_rows_after_dedupe,
+        stop_reason=args.stop_reason or "",
+        notes=args.notes or "",
+    )
+    print(json.dumps({"ok": True, "tile_summary": path}, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_log_event(args):
+    from modules.page_sampling import write_task_event
+    from modules.visual_pipeline import task_dir_for_run
+
+    task_dir = os.path.abspath(args.task_dir) if args.task_dir else task_dir_for_run(args.run_id)
+    path = write_task_event(
+        task_dir=task_dir,
+        event=args.event,
+        level=args.level,
+        run_id=args.run_id,
+        session_index=args.session,
+        keyword=args.keyword or "",
+        notes=args.notes or "",
+    )
+    print(json.dumps({"ok": True, "task_events": path}, ensure_ascii=False, indent=2))
 
 
 def cmd_visual_ingest(args):
     from modules.vision_extract import ingest_rows, load_rows
     from modules.visual_pipeline import update_manifest_after_ingest
+    from modules.page_sampling import page_sampling_config_from_settings, should_retain_screenshot
+    from modules.utils import ConfigManager
 
     rows = load_rows(rows_json=args.rows_json, rows_file=args.rows_file)
+    sampling_config = page_sampling_config_from_settings(ConfigManager(args.config))
     retain = True if args.retain_screenshot else None
+    if retain is None:
+        retain = should_retain_screenshot(
+            sampling_config.retain_screenshots,
+            failure_reason=args.failure_reason or "",
+        )
     result = ingest_rows(
         task_dir=os.path.abspath(args.task_dir),
         keyword=args.keyword,
@@ -225,16 +364,24 @@ def cmd_visual_ingest(args):
         screenshot_path=os.path.abspath(args.screenshot) if args.screenshot else "",
         confidence_threshold=args.confidence_threshold,
         retain_screenshot=retain,
+        target_limit=sampling_config.target_listings_per_keyword,
+        dedupe=True,
     )
+    payload = result.to_dict()
+    payload["screenshot_retained"] = bool(
+        retain and result.screenshot_path and os.path.exists(result.screenshot_path)
+    )
+    payload["screenshot_retention_policy"] = sampling_config.retain_screenshots
+    payload["failure_reason"] = args.failure_reason or ""
     run_id = args.run_id
     if not run_id:
         task_dir = os.path.abspath(args.task_dir)
         run_id = os.path.basename(task_dir.rstrip(os.sep))
     try:
-        update_manifest_after_ingest(run_id, args.keyword, result.to_dict())
+        update_manifest_after_ingest(run_id, args.keyword, payload)
     except Exception:
         pass
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def cmd_visual_export(args):
@@ -278,13 +425,83 @@ def main():
     visual_one = sub.add_parser("visual-one", help="准备单关键词视觉采集任务")
     visual_one.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
     visual_one.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
-    visual_one.add_argument("--agent-execute", action="store_true", help="[legacy fallback] 项目内直接运行 browser-use Agent；需要 provider=browser_use 和额外 LLM API key")
 
     visual_run = sub.add_parser("visual-run", help="为已准备 run_id 生成视觉采集请求")
     visual_run.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
     visual_run.add_argument("--limit", type=int, help="最多处理多少个 pending 关键词")
+    visual_run.add_argument("--session", type=int, help="仅处理 daily plan 中指定 session 的关键词")
     visual_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
-    visual_run.add_argument("--agent-execute", action="store_true", help="[legacy fallback] 项目内直接运行 browser-use Agent；需要 provider=browser_use 和额外 LLM API key")
+
+    plan_day = sub.add_parser("visual-plan-day", help="从全量输入台账生成当天分段采集计划")
+    plan_day.add_argument("--raw-input", required=True, help="原始输入台账 Excel")
+    plan_day.add_argument("--plan-id", help="可选：指定 data/tasks/<plan_id>，默认使用时间戳")
+    plan_day.add_argument("--random-sample", type=int, help="从候选牌名中随机抽样 N 个关键词")
+    plan_day.add_argument("--random-seed", type=int, help="随机抽样 seed，便于复现")
+    plan_day.add_argument("--session-count", type=int, help="覆盖配置中的 daily_session_count")
+
+    session_run = sub.add_parser("visual-session-run", help="为 daily plan 的某个 session 生成视觉采集请求")
+    session_run.add_argument("plan_id", help="visual-plan-day 生成的 plan_id")
+    session_run.add_argument("--session", type=int, required=True, help="要运行的 session 编号（从 1 开始）")
+    session_run.add_argument("--limit", type=int, help="最多处理多少个 pending 关键词")
+    session_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
+    session_run.add_argument("--force-lease", action="store_true", help="覆盖已有 active lease（仅确认旧进程已死时使用）")
+
+    session_capsule = sub.add_parser("visual-session-capsule", help="为 daily plan 的某个 session 生成短线程上下文 capsule")
+    session_capsule.add_argument("plan_id", help="visual-plan-day 生成的 plan_id")
+    session_capsule.add_argument("--session", type=int, required=True, help="要准备的 session 编号（从 1 开始）")
+    session_capsule.add_argument("--limit", type=int, help="最多纳入多少个 runnable 关键词")
+    session_capsule.add_argument("--state", help="手动覆盖页面状态提示")
+
+    session_lease = sub.add_parser("visual-session-lease", help="检查或维护 session lease/watchdog 状态")
+    session_lease.add_argument("plan_id", help="visual-plan-day 生成的 plan_id")
+    session_lease.add_argument("--session", type=int, required=True, help="session 编号（从 1 开始）")
+    session_lease.add_argument(
+        "--action",
+        default="inspect",
+        choices=["inspect", "acquire", "heartbeat", "complete"],
+        help="lease 操作",
+    )
+    session_lease.add_argument("--owner", default="codex", help="acquire 时写入的 owner")
+    session_lease.add_argument("--ttl-minutes", type=int, default=240, help="active lease 过期分钟数")
+    session_lease.add_argument("--status", default="completed", help="complete 时写入的状态")
+    session_lease.add_argument("--force", action="store_true", help="acquire 时覆盖未过期 active lease")
+
+    scheduler_status = sub.add_parser("visual-scheduler-status", help="查看 daily plan 的 session/状态摘要")
+    scheduler_status.add_argument("plan_id", help="visual-plan-day 生成的 plan_id")
+
+    auto_tick = sub.add_parser("visual-auto-tick", help="自动创建/复用今日 plan，并选择当前应运行的 session")
+    auto_tick.add_argument("--raw-input", help="整本原始输入台账；缺省读 config [PRODUCT_ROUTING] raw_input_file")
+    auto_tick.add_argument("--plan-id", help="可选：覆盖自动 daily_YYYYMMDD plan_id")
+    auto_tick.add_argument("--session", type=int, help="可选：强制指定 session；缺省按当前时间和状态选择")
+    auto_tick.add_argument("--limit", type=int, help="最多纳入多少个 runnable 关键词")
+    auto_tick.add_argument("--random-sample", type=int, help="首次创建 plan 时从候选牌名中随机抽样 N 个关键词")
+    auto_tick.add_argument("--random-seed", type=int, help="随机抽样 seed，便于复现")
+    auto_tick.add_argument("--session-count", type=int, help="首次创建 plan 时覆盖 session 数")
+    auto_tick.add_argument("--prepare-requests", action="store_true", help="同时生成该 session 的 Midscene 请求")
+    auto_tick.add_argument("--force-lease", action="store_true", help="prepare-requests 时覆盖已有 active lease")
+
+    log_tile = sub.add_parser("visual-log-tile", help="追加 viewport tile 轻量摘要")
+    log_tile.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
+    log_tile.add_argument("--task-dir", help="可选：显式任务目录")
+    log_tile.add_argument("--keyword", required=True, help="tile 对应搜索关键词")
+    log_tile.add_argument("--tile-id", required=True, help="tile_00 / tile_01 ...")
+    log_tile.add_argument("--scroll-distance-px", type=int, default=0, help="本 tile 前的滚动距离")
+    log_tile.add_argument("--rough-state", help="粗页面状态，如 visible_ready/captcha_required")
+    log_tile.add_argument("--image", help="tile 截图路径；成功后可能被删除")
+    log_tile.add_argument("--image-retained", action="store_true", help="该 tile 截图是否长期保留")
+    log_tile.add_argument("--rows-extracted", type=int, default=0, help="该 tile 或批次识别出的行数")
+    log_tile.add_argument("--new-rows-after-dedupe", type=int, default=0, help="去重后新增行数")
+    log_tile.add_argument("--stop-reason", help="早停或停止原因")
+    log_tile.add_argument("--notes", help="备注")
+
+    log_event = sub.add_parser("visual-log-event", help="追加 task 级结构化事件")
+    log_event.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
+    log_event.add_argument("--task-dir", help="可选：显式任务目录")
+    log_event.add_argument("--event", required=True, help="事件名")
+    log_event.add_argument("--level", default="info", choices=["debug", "info", "warning", "error"])
+    log_event.add_argument("--session", type=int, help="session 编号")
+    log_event.add_argument("--keyword", help="相关关键词")
+    log_event.add_argument("--notes", help="备注")
 
     ingest = sub.add_parser("visual-ingest", help="Codex 识别后写入结构化视觉结果")
     ingest.add_argument("task_dir", help="任务目录，如 data/tasks/xxx")
@@ -294,6 +511,7 @@ def main():
     ingest.add_argument("--rows-file", help="识别结果 JSON 文件")
     ingest.add_argument("--run-id", help="可选：显式指定 run_id；默认取 task_dir 末级目录")
     ingest.add_argument("--confidence-threshold", type=float, default=0.80, help="低于该置信度标记 needs_review")
+    ingest.add_argument("--failure-reason", help="异常原因；只有人工介入级别会按策略保留截图")
     ingest.add_argument("--retain-screenshot", action="store_true", default=False, help="即使识别成功也保留原始截图")
 
     export = sub.add_parser("visual-export", help="将 raw_rows.jsonl 导出为 raw_results.xlsx")
@@ -311,6 +529,22 @@ def main():
         cmd_visual_one(args)
     elif args.cmd == "visual-run":
         cmd_visual_run(args)
+    elif args.cmd == "visual-plan-day":
+        cmd_visual_plan_day(args)
+    elif args.cmd == "visual-session-run":
+        cmd_visual_session_run(args)
+    elif args.cmd == "visual-session-capsule":
+        cmd_visual_session_capsule(args)
+    elif args.cmd == "visual-session-lease":
+        cmd_visual_session_lease(args)
+    elif args.cmd == "visual-scheduler-status":
+        cmd_visual_scheduler_status(args)
+    elif args.cmd == "visual-auto-tick":
+        cmd_visual_auto_tick(args)
+    elif args.cmd == "visual-log-tile":
+        cmd_visual_log_tile(args)
+    elif args.cmd == "visual-log-event":
+        cmd_visual_log_event(args)
     elif args.cmd == "visual-ingest":
         cmd_visual_ingest(args)
     elif args.cmd == "visual-export":

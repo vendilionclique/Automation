@@ -151,8 +151,8 @@ def main():
     if not args.excel and not args.keyword:
         parser.print_help()
         print("\n示例:")
-        print("  python main.py -e cards.xlsx")
-        print("  python main.py -k 中止")
+        print("  python3 main.py -e cards.xlsx")
+        print("  python3 main.py -k 中止")
         return
 
     if args.resume:

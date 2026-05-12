@@ -14,13 +14,6 @@ Start it with:
 local/start_taobao_visual_chrome.sh
 ```
 
-The script does not enable Chrome remote debugging by default. For legacy
-browser-use/CDP reproduction only, run it with:
-
-```bash
-ENABLE_REMOTE_DEBUGGING=true local/start_taobao_visual_chrome.sh
-```
-
 Midscene computer MCP is launched through:
 
 ```bash

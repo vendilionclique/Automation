@@ -131,7 +131,7 @@ def build_html_report(stat_eval_path: str) -> str:
 
     rs = all_cards.get("routing_suggestion", pd.Series(dtype=str)).astype(str)
     ok = int((rs == "statistical_candidate").sum())
-    bad = int((rs == "open_url_fallback").sum())
+    bad = int((rs == "with_keywords_fallback").sum())
 
     # 简化表列
     simple_cols = [
@@ -148,7 +148,7 @@ def build_html_report(stat_eval_path: str) -> str:
     simple_df = all_cards[present].copy()
     if "routing_suggestion" in simple_df.columns:
         simple_df["_sort"] = simple_df["routing_suggestion"].map(
-            {"open_url_fallback": 0, "statistical_candidate": 1}
+            {"with_keywords_fallback": 0, "statistical_candidate": 1}
         ).fillna(2)
         simple_df = simple_df.sort_values("_sort").drop(columns=["_sort"])
 

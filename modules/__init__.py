@@ -19,7 +19,7 @@ except Exception:  # pylint: disable=broad-except
     pass
 
 try:
-    from .filter import filter_exported_results, merge_filtered_results
+    from .filter import filter_exported_results
 except Exception:  # pylint: disable=broad-except
     pass
 

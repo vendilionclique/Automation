@@ -323,7 +323,7 @@ class MTGDatabase:
 
     def lookup_products_by_ids(self, product_ids: List[str]) -> Dict[str, Dict]:
         """
-        按 productId 批量查询产品与系列特征，供 open_url 阶段做 URL 关联。
+        按 productId 批量查询产品与系列特征，供远期带关键词采集路由参考。
         返回: { "123": {product fields...}, ... }
         """
         result: Dict[str, Dict] = {}

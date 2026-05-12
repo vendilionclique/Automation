@@ -6,16 +6,22 @@ import os
 from datetime import datetime
 from typing import Dict, Optional
 
-from modules.browser_use_driver import (
-    browser_use_config_from_settings,
-    run_browser_use_capture,
-    write_browser_use_request,
-)
 from modules.midscene_computer_driver import (
     midscene_computer_config_from_settings,
     write_midscene_computer_request,
 )
+from modules.page_sampling import (
+    page_sampling_config_from_settings,
+    write_task_event,
+    write_tile_summary,
+)
 from modules.session_state import initial_session_state, session_policy_from_settings
+from modules.session_capsule import (
+    acquire_session_lease,
+    build_session_capsule,
+    complete_session_lease,
+    heartbeat_session_lease,
+)
 from modules.utils import ConfigManager, ensure_dir, get_project_root
 from modules.visual_capture import (
     CaptureRecord,
@@ -24,7 +30,6 @@ from modules.visual_capture import (
     write_json,
 )
 from modules.vision_extract import export_jsonl_to_excel
-from modules.vision_extract import ingest_rows
 
 
 def task_dir_for_run(run_id: str) -> str:
@@ -51,8 +56,7 @@ def save_visual_manifest(run_id: str, manifest: Dict) -> str:
 
 
 def prepare_single_keyword_run(keyword: str, config_file: str = "config/settings.ini") -> Dict:
-    config = ConfigManager(config_file)
-    provider = _collection_provider(config)
+    ConfigManager(config_file)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_dir = task_dir_for_run(run_id)
     evidence_dir = keyword_evidence_dir(task_dir, keyword)
@@ -61,7 +65,7 @@ def prepare_single_keyword_run(keyword: str, config_file: str = "config/settings
         "run_id": run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source": {"keyword": keyword, "config": os.path.abspath(config_file)},
-        "workflow": f"{provider}_visual_capture",
+        "workflow": "midscene_computer_visual_capture",
         "keywords": [keyword],
         "records": [
             {
@@ -89,161 +93,159 @@ def run_visual_collection(
     config_file: str = "config/settings.ini",
     limit: Optional[int] = None,
     manual_state: Optional[str] = None,
-    execute_browser_use: bool = False,
+    session_index: Optional[int] = None,
+    force_lease: bool = False,
 ) -> Dict:
     config = ConfigManager(config_file)
-    provider = _collection_provider(config)
-    browser_use_config = browser_use_config_from_settings(config)
     midscene_config = midscene_computer_config_from_settings(config)
+    sampling_config = page_sampling_config_from_settings(config)
     policy = session_policy_from_settings(config)
     manifest = load_visual_manifest(run_id)
     manifest.setdefault("session", initial_session_state(policy))
     task_dir = task_dir_for_run(run_id)
+    capsule = None
+    lease_acquired = False
+    if session_index is not None:
+        capsule = build_session_capsule(
+            run_id,
+            session_index,
+            config_file=config_file,
+            limit=limit,
+            manual_state=manual_state,
+        )
+        acquire_session_lease(
+            run_id,
+            session_index,
+            owner="visual_pipeline",
+            ttl_minutes=max(60, policy.cooldown_minutes * 4),
+            force=force_lease,
+        )
+        lease_acquired = True
 
     processed = 0
     results = []
-    for record in manifest.get("records", []):
-        if limit is not None and processed >= limit:
-            break
-        if record.get("status") not in (
-            "pending",
-            "cooldown",
-            "failed",
-            "needs_codex_browser_use",
-            "needs_browser_use_agent",
-            "needs_midscene_computer",
-        ):
-            continue
+    run_status = "requests_prepared"
+    try:
+        for record in manifest.get("records", []):
+            if limit is not None and processed >= limit:
+                break
+            if session_index is not None:
+                record_session = record.get("extra", {}).get("daily_session_index")
+                if int(record_session or 0) != int(session_index):
+                    continue
+            if record.get("status") not in (
+                "pending",
+                "cooldown",
+                "failed",
+                "needs_midscene_computer",
+            ):
+                continue
 
-        keyword = record["keyword"]
-        record["status"] = "needs_browser_use_agent" if provider == "browser_use" else "needs_midscene_computer"
-        record["started_at"] = record.get("started_at") or datetime.now().isoformat(timespec="seconds")
-        record["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        record["last_action"] = f"{provider}_request_prepared"
-        save_visual_manifest(run_id, manifest)
-
-        evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
-        if provider == "browser_use":
-            request = write_browser_use_request(
+            keyword = record["keyword"]
+            record_session = record.get("extra", {}).get("daily_session_index")
+            write_task_event(
+                task_dir,
+                event="keyword_request_started",
                 run_id=run_id,
+                session_index=record_session,
                 keyword=keyword,
-                evidence_dir=evidence_dir,
-                config=browser_use_config,
-                manual_state=manual_state,
+                provider="midscene_computer",
             )
-            request_kind = "browser_use"
-            request_key = "browser_use_request"
-            instructions_key = "browser_use_instructions"
-            target = request.url
-        else:
+            record["status"] = "needs_midscene_computer"
+            record["started_at"] = record.get("started_at") or datetime.now().isoformat(timespec="seconds")
+            record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            record["last_action"] = "midscene_computer_request_prepared"
+            save_visual_manifest(run_id, manifest)
+
+            evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
             request = write_midscene_computer_request(
                 run_id=run_id,
                 keyword=keyword,
                 evidence_dir=evidence_dir,
                 config=midscene_config,
+                sampling_config=sampling_config,
                 manual_state=manual_state,
             )
-            request_kind = "midscene_computer"
-            request_key = "midscene_computer_request"
-            instructions_key = "midscene_computer_instructions"
             target = request.start_url
 
-        record["status"] = request.status
-        record["failure_reason"] = None
-        record["evidence_dir"] = evidence_dir
-        record["last_action"] = f"{request_kind}_request_prepared"
-        record["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        record.setdefault("extra", {})
-        record["extra"][request_key] = request.request_path
-        record["extra"][instructions_key] = request.instruction_path
-        record["extra"]["target_url"] = target
-        record["extra"]["expected_screenshot"] = request.screenshot_path
-
-        result_payload = {
-            "keyword": keyword,
-            "status": request.status,
-            "request": request.request_path,
-            "instructions": request.instruction_path,
-            "target_url": target,
-            "provider": request_kind,
-        }
-
-        session = manifest.setdefault("session", initial_session_state(policy))
-        if execute_browser_use and provider != "browser_use":
-            record["status"] = "needs_midscene_computer"
-            record["failure_reason"] = "agent_execute_is_only_available_for_legacy_browser_use"
+            record["status"] = request.status
+            record["failure_reason"] = None
+            record["evidence_dir"] = evidence_dir
             record["last_action"] = "midscene_computer_request_prepared"
-            session["status"] = "awaiting_midscene_computer"
-            result_payload["warning"] = record["failure_reason"]
-        elif execute_browser_use:
-            run_result = run_browser_use_capture(
-                run_id=run_id,
-                keyword=keyword,
-                evidence_dir=evidence_dir,
-                config=browser_use_config,
-                manual_state=manual_state,
-            )
-            write_json(os.path.join(evidence_dir, "browser_use_run_result.json"), run_result.to_dict())
-            record["extra"]["browser_use_run_result"] = run_result.to_dict()
-            record["extra"]["last_screenshot"] = run_result.screenshot_path
-            record["extra"]["browser_use_history"] = run_result.history_path
-
-            capture = CaptureRecord(
-                run_id=run_id,
-                keyword=keyword,
-                evidence_dir=evidence_dir,
-                screenshot_path=run_result.screenshot_path,
-                status=run_result.status,
-                page_state={
-                    "status": run_result.page_state,
-                    "reason": run_result.error or "browser_use_agent_result",
-                    "rows_returned": len(run_result.rows),
-                },
-                retained=True,
-                notes="real_browser_use",
-            )
-            write_capture_manifest(capture)
-
-            if run_result.rows:
-                ingest_result = ingest_rows(
-                    task_dir=task_dir,
-                    keyword=keyword,
-                    rows=run_result.rows,
-                    screenshot_path=run_result.screenshot_path,
-                    confidence_threshold=browser_use_config.confidence_threshold,
-                    retain_screenshot=browser_use_config.screenshot_retention,
-                )
-                record["extra"]["ingest_result"] = ingest_result.to_dict()
-                record["status"] = "extracted" if ingest_result.ok else "needs_review"
-                record["failure_reason"] = None if ingest_result.ok else ingest_result.error
-                if ingest_result.ok:
-                    record["finished_at"] = datetime.now().isoformat(timespec="seconds")
-            else:
-                record["status"] = run_result.status
-                record["failure_reason"] = run_result.error
-
-            record["last_action"] = "browser_use_agent_executed"
             record["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            session["status"] = "healthy" if record["status"] == "extracted" else "needs_review"
-            result_payload["browser_use_result"] = run_result.to_dict()
-        else:
-            session["status"] = f"awaiting_{request_kind}"
+            record.setdefault("extra", {})
+            record["extra"]["midscene_computer_request"] = request.request_path
+            record["extra"]["midscene_computer_instructions"] = request.instruction_path
+            record["extra"]["target_url"] = target
+            record["extra"]["expected_screenshot"] = request.screenshot_path
+            record["extra"]["sampling"] = sampling_config.to_dict()
 
-        session["updated_at"] = datetime.now().isoformat(timespec="seconds")
-        save_visual_manifest(run_id, manifest)
-        results.append(result_payload)
-        processed += 1
+            result_payload = {
+                "keyword": keyword,
+                "status": request.status,
+                "request": request.request_path,
+                "instructions": request.instruction_path,
+                "target_url": target,
+                "provider": "midscene_computer",
+            }
+
+            session = manifest.setdefault("session", initial_session_state(policy))
+            session["status"] = "awaiting_midscene_computer"
+            session["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            save_visual_manifest(run_id, manifest)
+            write_task_event(
+                task_dir,
+                event="keyword_request_prepared",
+                run_id=run_id,
+                session_index=record_session,
+                keyword=keyword,
+                status=record["status"],
+                request_path=request.request_path,
+                instructions_path=request.instruction_path,
+            )
+            results.append(result_payload)
+            processed += 1
+            if session_index is not None:
+                heartbeat_session_lease(
+                    run_id,
+                    session_index,
+                    ttl_minutes=max(60, policy.cooldown_minutes * 4),
+                )
+    except Exception:
+        run_status = "failed"
+        raise
+    finally:
+        if lease_acquired:
+            complete_session_lease(
+                run_id,
+                session_index,
+                status=run_status,
+                summary={
+                    "processed": processed,
+                    "result_count": len(results),
+                    "results": results,
+                },
+            )
 
     summary_path = write_json(
         os.path.join(task_dir, "visual_run_summary.json"),
         {
             "run_id": run_id,
             "processed": processed,
+            "session_index": session_index,
+            "session_capsule": capsule,
             "results": results,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         },
     )
-    return {"run_id": run_id, "processed": processed, "summary": summary_path, "results": results}
+    return {
+        "run_id": run_id,
+        "processed": processed,
+        "session_index": session_index,
+        "session_capsule": capsule,
+        "summary": summary_path,
+        "results": results,
+    }
 
 
 def export_raw_rows(run_id: str) -> Dict:
@@ -256,6 +258,7 @@ def export_raw_rows(run_id: str) -> Dict:
 
 def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict) -> str:
     manifest = load_visual_manifest(run_id)
+    task_dir = task_dir_for_run(run_id)
     now = datetime.now().isoformat(timespec="seconds")
     updated_record = False
     for record in manifest.get("records", []):
@@ -268,14 +271,45 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
         record["updated_at"] = now
         record.setdefault("extra", {})
         record["extra"]["ingest_result"] = ingest_result
+        record_session = record.get("extra", {}).get("daily_session_index")
         if ingest_result.get("ok"):
             record["finished_at"] = now
         screenshot_path = ingest_result.get("screenshot_path") or record.get("extra", {}).get("expected_screenshot", "")
+        retained = bool(ingest_result.get("screenshot_retained", False))
+        write_task_event(
+            task_dir,
+            event="visual_rows_ingested",
+            level="info" if ingest_result.get("ok") else "warning",
+            run_id=run_id,
+            session_index=record_session,
+            keyword=keyword,
+            status=record["status"],
+            rows_written=ingest_result.get("rows_written", 0),
+            screenshot_path=screenshot_path,
+            screenshot_retained=retained,
+            rows_received=ingest_result.get("rows_received", ingest_result.get("rows_written", 0)),
+            duplicates_removed=ingest_result.get("duplicates_removed", 0),
+            rows_dropped_by_limit=ingest_result.get("rows_dropped_by_limit", 0),
+            error=ingest_result.get("error"),
+        )
+        write_tile_summary(
+            task_dir,
+            run_id=run_id,
+            keyword=keyword,
+            tile_id="batch_ingest",
+            rough_state=record["status"],
+            image_path=screenshot_path,
+            image_retained=retained,
+            rows_extracted=int(ingest_result.get("rows_received", ingest_result.get("rows_written", 0)) or 0),
+            new_rows_after_dedupe=int(ingest_result.get("rows_written", 0) or 0),
+            stop_reason="ingest_ok" if ingest_result.get("ok") else "ingest_needs_review",
+            notes="batch_tiles_or_single_screenshot_ingested",
+        )
         if screenshot_path:
             capture = CaptureRecord(
                 run_id=run_id,
                 keyword=keyword,
-                evidence_dir=record.get("evidence_dir") or keyword_evidence_dir(task_dir_for_run(run_id), keyword),
+                evidence_dir=record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword),
                 screenshot_path=screenshot_path,
                 status=record["status"],
                 page_state={
@@ -283,7 +317,7 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
                     "reason": "codex_visual_mcp_ingested_rows",
                     "rows_written": ingest_result.get("rows_written", 0),
                 },
-                retained=True,
+                retained=retained,
                 notes="codex_visual_mcp",
             )
             write_capture_manifest(capture)
@@ -293,13 +327,3 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
         session["status"] = "healthy" if ingest_result.get("ok") else "needs_review"
         session["updated_at"] = now
     return save_visual_manifest(run_id, manifest)
-
-
-def _collection_provider(config: ConfigManager) -> str:
-    provider = config.get("VISUAL_CAPTURE", "provider", fallback="midscene_computer")
-    provider = str(provider or "").strip().lower().replace("-", "_")
-    if provider in ("midscene", "midscene_computer", "computer"):
-        return "midscene_computer"
-    if provider in ("browser_use", "browseruse", "browser_use_legacy"):
-        return "browser_use"
-    raise ValueError(f"不支持的视觉采集 provider: {provider}")

@@ -4,10 +4,7 @@
 """
 import os
 import sys
-import time
 import logging
-from datetime import datetime
-from functools import wraps
 import configparser
 
 
@@ -56,64 +53,6 @@ def setup_logging(log_file=None, level=logging.INFO):
     return logger
 
 
-def retry(max_attempts=3, delay=1, backoff=2, exceptions=(Exception,)):
-    """
-    重试装饰器
-
-    Args:
-        max_attempts: 最大重试次数
-        delay: 初始延迟时间（秒）
-        backoff: 延迟倍数
-        exceptions: 需要重试的异常类型
-
-    Returns:
-        decorator: 装饰器函数
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            current_delay = delay
-            last_exception = None
-
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except exceptions as e:
-                    last_exception = e
-                    if attempt < max_attempts - 1:
-                        print(f"操作失败，{current_delay}秒后重试 ({attempt + 1}/{max_attempts})...")
-                        time.sleep(current_delay)
-                        current_delay *= backoff
-                    else:
-                        print(f"操作失败，已达到最大重试次数")
-
-            raise last_exception
-
-        return wrapper
-    return decorator
-
-
-def measure_time(func):
-    """
-    测量函数执行时间的装饰器
-
-    Args:
-        func: 要测量的函数
-
-    Returns:
-        wrapper: 包装函数
-    """
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        end_time = time.time()
-        execution_time = end_time - start_time
-        print(f"{func.__name__} 执行时间: {execution_time:.2f} 秒")
-        return result
-    return wrapper
-
-
 def load_config(config_file):
     """
     加载配置文件
@@ -149,58 +88,6 @@ def save_config(config, config_file):
         return False
 
 
-def load_keywords(keywords_file):
-    """
-    加载关键词列表
-
-    Args:
-        keywords_file: 关键词文件路径
-
-    Returns:
-        list: 关键词列表
-    """
-    keywords = []
-
-    try:
-        with open(keywords_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                # 跳过空行和注释行（以#开头的行）
-                if line and not line.startswith('#'):
-                    keywords.append(line)
-
-        print(f"成功加载 {len(keywords)} 个关键词")
-        return keywords
-
-    except Exception as e:
-        print(f"加载关键词文件失败: {e}")
-        return []
-
-
-def save_keywords(keywords, keywords_file):
-    """
-    保存关键词列表
-
-    Args:
-        keywords: 关键词列表
-        keywords_file: 关键词文件路径
-
-    Returns:
-        bool: 是否保存成功
-    """
-    try:
-        with open(keywords_file, 'w', encoding='utf-8') as f:
-            for keyword in keywords:
-                f.write(keyword + '\n')
-
-        print(f"成功保存 {len(keywords)} 个关键词到 {keywords_file}")
-        return True
-
-    except Exception as e:
-        print(f"保存关键词文件失败: {e}")
-        return False
-
-
 def get_project_root():
     """
     获取项目根目录
@@ -226,62 +113,6 @@ def ensure_dir(directory):
         os.makedirs(directory, exist_ok=True)
 
 
-def get_timestamp():
-    """
-    获取当前时间戳字符串
-
-    Returns:
-        str: 时间戳字符串
-    """
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-
-def format_duration(seconds):
-    """
-    格式化时间持续时间
-
-    Args:
-        seconds: 秒数
-
-    Returns:
-        str: 格式化的时间字符串
-    """
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-
-    if hours > 0:
-        return f"{hours}小时{minutes}分钟{secs}秒"
-    elif minutes > 0:
-        return f"{minutes}分钟{secs}秒"
-    else:
-        return f"{secs}秒"
-
-
-def validate_keyword(keyword):
-    """
-    验证关键词是否有效
-
-    Args:
-        keyword: 要验证的关键词
-
-    Returns:
-        bool: 关键词是否有效
-    """
-    if not keyword or not isinstance(keyword, str):
-        return False
-
-    keyword = keyword.strip()
-    if len(keyword) == 0:
-        return False
-
-    if len(keyword) > 100:
-        print(f"关键词过长: {keyword}")
-        return False
-
-    return True
-
-
 def sanitize_filename(filename):
     """
     清理文件名，移除非法字符
@@ -301,29 +132,6 @@ def sanitize_filename(filename):
     filename = filename.strip('. ')
 
     return filename if filename else 'unnamed'
-
-
-def get_file_size(filepath):
-    """
-    获取文件大小（人类可读格式）
-
-    Args:
-        filepath: 文件路径
-
-    Returns:
-        str: 文件大小字符串
-    """
-    if not os.path.exists(filepath):
-        return "文件不存在"
-
-    size = os.path.getsize(filepath)
-
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024.0:
-            return f"{size:.2f} {unit}"
-        size /= 1024.0
-
-    return f"{size:.2f} TB"
 
 
 def print_progress(current, total, prefix='', suffix=''):
@@ -393,35 +201,6 @@ class ConfigManager:
             'auto_resume': 'true',
         }
 
-        config['BROWSER_USE'] = {
-            'allowed_domains': 'https://www.taobao.com,https://s.taobao.com,*.taobao.com',
-            'chrome_executable_path': '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-            'chrome_user_data_dir': '',
-            'chrome_profile_directory': 'Default',
-            'headless': 'false',
-            'keep_alive': 'false',
-            'enable_default_extensions': 'false',
-            'window_width': '1600',
-            'window_height': '1000',
-            'max_scrolls_per_keyword': '2',
-            'page_load_wait': '8',
-            'min_rows_per_keyword': '5',
-            'confidence_threshold': '0.80',
-            'screenshot_retention': 'true',
-            'max_steps': '20',
-            'use_vision': 'true',
-            'save_history': 'true',
-        }
-
-        config['BROWSER_USE_AGENT'] = {
-            'enabled': 'false',
-            'llm_provider': 'zhipu',
-            'llm_model': 'glm-4.7-flashx',
-            'llm_api_key': '',
-            'llm_api_key_env': 'ZHIPU_API_KEY',
-            'llm_base_url': 'https://open.bigmodel.cn/api/paas/v4',
-        }
-
         config['SESSION'] = {
             'daily_keyword_budget': '20',
             'hourly_keyword_budget': '5',
@@ -430,6 +209,37 @@ class ConfigManager:
             'pause_on_login_required': 'true',
             'pause_on_captcha_required': 'true',
             'pause_on_white_skeleton': 'true',
+        }
+
+        config['SCHEDULER'] = {
+            'daily_keyword_budget': '120',
+            'daily_session_count': '4',
+            'capture_freshness_days': '30',
+        }
+
+        config['VISUAL_BEHAVIOR'] = {
+            'micro_pause_short': '0.8,3,0.82',
+            'micro_pause_medium': '3,6,0.14',
+            'micro_pause_long': '6,10,0.04',
+            'inter_keyword_pause_min': '120',
+            'inter_keyword_pause_max': '300',
+            'detail_page_peek_probability': '0.08',
+            'cart_or_favorites_peek_probability': '0.03',
+            'allow_cart_or_favorites_peek': 'true',
+            'allow_claim_rewards': 'false',
+        }
+
+        config['PAGE_SAMPLING'] = {
+            'target_listings_per_keyword': '48',
+            'max_tiles_per_keyword': '6',
+            'tile_scroll_viewport_ratio': '0.80',
+            'tile_overlap_ratio': '0.20',
+            'min_new_rows_per_tile': '2',
+            'allow_second_page': 'false',
+            'retain_screenshots': 'human_required_only',
+            'allow_midscene_page_state_probe': 'false',
+            'calibration_top_reserved_ratio': '0.24',
+            'calibration_bottom_reserved_ratio': '0.06',
         }
 
         config['FILTER'] = {
@@ -442,6 +252,14 @@ class ConfigManager:
             'exclude_shop_names': '真橙卡牌',
             'short_name_hard_veto': 'true',
             'short_name_conflict_limit': '200',
+        }
+
+        config['PRODUCT_ROUTING'] = {
+            'raw_input_file': '',
+            'preferred_mode_column': 'preferred_mode',
+            'pricing_mode_column': 'pricing_mode',
+            'output_price_column': '准确淘宝价',
+            'capture_time_output_column': '淘宝采集时间',
         }
 
         config['LOGGING'] = {

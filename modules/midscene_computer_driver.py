@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from modules.page_sampling import PageSamplingConfig, estimate_tile_scroll_distance
 from modules.utils import ensure_dir
 from modules.visual_capture import screenshot_path_for
 
@@ -36,6 +37,15 @@ class MidsceneComputerConfig:
     allow_midscene_act: bool = False
     allow_midscene_query: bool = False
     final_extraction_owner: str = "codex"
+    micro_pause_short: str = "0.8,3,0.82"
+    micro_pause_medium: str = "3,6,0.14"
+    micro_pause_long: str = "6,10,0.04"
+    inter_keyword_pause_min: float = 120.0
+    inter_keyword_pause_max: float = 300.0
+    detail_page_peek_probability: float = 0.08
+    cart_or_favorites_peek_probability: float = 0.03
+    allow_cart_or_favorites_peek: bool = True
+    allow_claim_rewards: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -60,6 +70,7 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
     visual_section = "VISUAL_CAPTURE"
     section = "MIDSCENE_COMPUTER"
     model_section = "MIDSCENE_MODEL"
+    behavior_section = "VISUAL_BEHAVIOR"
     return MidsceneComputerConfig(
         window_width=config.getint(section, "window_width", fallback=1600),
         window_height=config.getint(section, "window_height", fallback=1000),
@@ -79,6 +90,27 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
         allow_midscene_act=config.getboolean(model_section, "allow_midscene_act", fallback=False),
         allow_midscene_query=config.getboolean(model_section, "allow_midscene_query", fallback=False),
         final_extraction_owner=config.get(model_section, "final_extraction_owner", fallback="codex"),
+        micro_pause_short=config.get(behavior_section, "micro_pause_short", fallback="0.8,3,0.82"),
+        micro_pause_medium=config.get(behavior_section, "micro_pause_medium", fallback="3,6,0.14"),
+        micro_pause_long=config.get(behavior_section, "micro_pause_long", fallback="6,10,0.04"),
+        inter_keyword_pause_min=config.getfloat(
+            behavior_section, "inter_keyword_pause_min", fallback=120.0
+        ),
+        inter_keyword_pause_max=config.getfloat(
+            behavior_section, "inter_keyword_pause_max", fallback=300.0
+        ),
+        detail_page_peek_probability=config.getfloat(
+            behavior_section, "detail_page_peek_probability", fallback=0.08
+        ),
+        cart_or_favorites_peek_probability=config.getfloat(
+            behavior_section, "cart_or_favorites_peek_probability", fallback=0.03
+        ),
+        allow_cart_or_favorites_peek=config.getboolean(
+            behavior_section, "allow_cart_or_favorites_peek", fallback=True
+        ),
+        allow_claim_rewards=config.getboolean(
+            behavior_section, "allow_claim_rewards", fallback=False
+        ),
     )
 
 
@@ -87,6 +119,7 @@ def write_midscene_computer_request(
     keyword: str,
     evidence_dir: str,
     config: MidsceneComputerConfig,
+    sampling_config: Optional[PageSamplingConfig] = None,
     manual_state: Optional[str] = None,
 ) -> MidsceneComputerRequest:
     ensure_dir(evidence_dir)
@@ -102,6 +135,11 @@ def write_midscene_computer_request(
         screenshot_path=screenshot_path,
         request_path=request_path,
         instruction_path=instruction_path,
+    )
+    sampling_config = sampling_config or PageSamplingConfig()
+    calibration = estimate_tile_scroll_distance(
+        screen_height=config.window_height,
+        config=sampling_config,
     )
     payload = {
         **request.to_dict(),
@@ -125,6 +163,32 @@ def write_midscene_computer_request(
             "allow_midscene_query": config.allow_midscene_query,
             "final_extraction_owner": config.final_extraction_owner,
         },
+        "visual_behavior": {
+            "micro_pause_distribution": {
+                "short": config.micro_pause_short,
+                "medium": config.micro_pause_medium,
+                "long": config.micro_pause_long,
+            },
+            "inter_keyword_pause_seconds": [
+                config.inter_keyword_pause_min,
+                config.inter_keyword_pause_max,
+            ],
+            "detail_page_peek_probability": config.detail_page_peek_probability,
+            "cart_or_favorites_peek_probability": config.cart_or_favorites_peek_probability,
+            "allow_cart_or_favorites_peek": config.allow_cart_or_favorites_peek,
+            "allow_claim_rewards": config.allow_claim_rewards,
+        },
+        "page_sampling": {
+            **sampling_config.to_dict(),
+            "calibration": calibration,
+            "tile_id_pattern": "tile_00, tile_01, ...",
+            "batch_recognition_owner": "codex",
+            "page_state_probe_owner": (
+                "midscene_operational_probe"
+                if sampling_config.allow_midscene_page_state_probe
+                else "codex_or_manual"
+            ),
+        },
         "forbidden": [
             "browser CDP connection for Taobao mainline collection",
             "DOM/HTML/AX tree/selector map extraction",
@@ -132,8 +196,10 @@ def write_midscene_computer_request(
             "cookies/storage/localStorage/sessionStorage reads",
             "arbitrary JavaScript eval in the page",
             "automatic login, captcha, SMS, or risk-check handling",
+            "cart/favorites/reward operations that change account state",
             "Midscene Web bridge or Chrome extension bridge for Taobao mainline collection",
             "Midscene product extraction as the final source of truth",
+            "second-page navigation unless explicitly enabled in PAGE_SAMPLING",
         ],
         "expected_ingest": {
             "command": (
@@ -143,6 +209,8 @@ def write_midscene_computer_request(
                 f"--screenshot {json.dumps(screenshot_path, ensure_ascii=False)}"
             ),
             "rows_schema": [
+                "搜索关键词",
+                "采集时间",
                 "商品名称",
                 "现价",
                 "店铺名称",
@@ -162,6 +230,9 @@ def write_midscene_computer_request(
 def build_midscene_computer_instructions(payload: Dict[str, Any]) -> str:
     cfg = payload["config"]
     model = payload["model_boundary"]
+    behavior = payload["visual_behavior"]
+    sampling = payload["page_sampling"]
+    calibration = sampling["calibration"]
     prefixes = ", ".join(cfg["screenshot_prefixes"])
     manual = f"\nManual page state hint: {payload['manual_state']}" if payload.get("manual_state") else ""
     return f"""# Midscene Computer Pure-Vision Capture
@@ -196,6 +267,51 @@ Midscene model boundary:
 - allow_midscene_act: {model["allow_midscene_act"]}
 - allow_midscene_query: {model["allow_midscene_query"]}
 
+Natural pacing boundary:
+- Micro pauses are sampled from weighted segments: short={behavior["micro_pause_distribution"]["short"]},
+  medium={behavior["micro_pause_distribution"]["medium"]}, long={behavior["micro_pause_distribution"]["long"]}.
+  Interpret each segment as min_seconds,max_seconds,probability. Most pauses
+  should be short; medium and long pauses should be occasional.
+- Between completed keywords in the same collection session, wait a random
+  {behavior["inter_keyword_pause_seconds"][0]}-{behavior["inter_keyword_pause_seconds"][1]} seconds.
+- Within a keyword, do not add a separate "idle/stay" action; the pauses above
+  are the idle time.
+- Low-side-effect browsing is only allowed between keywords: detail page peek
+  probability {behavior["detail_page_peek_probability"]}; cart/favorites read-only
+  peek probability {behavior["cart_or_favorites_peek_probability"]}.
+- cart/favorites read-only peek enabled: {behavior["allow_cart_or_favorites_peek"]}.
+- reward claiming enabled: {behavior["allow_claim_rewards"]}. Do not claim rewards
+  unless this is explicitly true.
+
+Viewport tile sampling:
+- Use visible system screenshots only. Do not use DOM, CDP, full-page screenshot,
+  page source, storage, network payloads, or JavaScript eval to measure the page.
+- Session calibration is visual/screen-geometry based. Estimated visible product
+  area: y={calibration["content_top_y"]}-{calibration["content_bottom_y"]} on a
+  {calibration["screen_height"]}px-high window; estimated tile scroll distance:
+  {calibration["tile_scroll_distance_px"]}px with about {calibration["tile_overlap_px"]}px overlap.
+- Capture viewport tiles in order: tile_00 for the first visible results screen,
+  then tile_01, tile_02, etc. after each page-level scroll.
+- After each tile capture, append a lightweight tile summary with:
+  `python harness.py visual-log-tile {payload["run_id"]} --keyword {json.dumps(payload["keyword"], ensure_ascii=False)}
+  --tile-id <tile_id> --scroll-distance-px <px> --rough-state <state> --image <path>`.
+- Capture at most {sampling["max_tiles_per_keyword"]} tiles for this keyword and
+  do not stop early just because a listing count appears sufficient in v1.
+  {sampling["target_listings_per_keyword"]} is only an approximate per-keyword
+  output guardrail because Taobao result pages may include ads, reviews, or
+  placeholders and real listing count can vary around the first-page size.
+- Do not navigate to page 2. allow_second_page={sampling["allow_second_page"]}.
+- v1 is batch recognition: collect the tile screenshots first, then Codex reviews
+  the retained visible screenshots as a group, dedupes overlaps, and writes rows.
+- Screenshot retention policy: {sampling["retain_screenshots"]}. Successful
+  tasks should delete screenshots after ingest; retain screenshots only for
+  human-required abnormal states unless a human explicitly asks otherwise.
+- Midscene page-state probe enabled: {sampling["allow_midscene_page_state_probe"]}.
+  If enabled, it may classify only operational states: login, captcha/security
+  verification, white skeleton, empty result, visible listings, or obvious end.
+  It must not output product fields, price trust, statistical decisions, or
+  business routing.
+
 Safety boundary:
 - Do not connect to browser CDP for this Taobao mainline flow.
 - Do not read DOM, HTML, AX tree, selector maps, cookies, storage, network
@@ -203,10 +319,15 @@ Safety boundary:
 - Do not use JavaScript eval in the page.
 - Do not use Midscene Web bridge, Chrome extension bridge, or structural
   aiQuery extraction as the final product data source.
+- Do not navigate to additional pages unless PAGE_SAMPLING explicitly enables it.
 - Prefer single-step Midscene tools (`take_screenshot`, `tap`, `input`,
   `keyboardpress`, `scroll`, `assert`) over long autonomous `act` chains.
 - If login, captcha, SMS, risk verification, pop-up blocking, white skeleton,
   or an unusual account state appears, stop and retain a screenshot.
+- Do not add to cart, favorite/unfavorite, delete cart items, claim rewards,
+  checkout, pay, or modify account state. Cart/favorites pages, if opened by
+  policy, are read-only peeks and must be closed or navigated away from without
+  interacting with account-state controls.
 
 Steps:
 1. Confirm Chrome is foreground and on the dedicated profile. If needed, ask a
@@ -228,10 +349,11 @@ Steps:
    {payload["keyword"]}
    Then trigger the visible search action.
 5. Wait about {cfg["page_load_wait"]} seconds for visible content to settle.
-6. Save the visible results screenshot to the primary screenshot target above.
-7. If visible listings are present, scroll at most {cfg["max_scrolls_per_keyword"]}
-   times with page-level scroll input and save additional screenshots in the
-   same evidence directory.
+6. Save tile_00 using the primary screenshot target above.
+7. If visible listings are present, scroll about {calibration["tile_scroll_distance_px"]}px
+   per tile, preserving overlap. Save tile_01, tile_02, etc. in the same evidence
+   directory until reaching {sampling["max_tiles_per_keyword"]} tiles or an
+   operational stop state.
 8. Codex should identify at least {cfg["min_rows_per_keyword"]} visible product
    rows when possible from visible screenshots, then write rows JSON and
    ingest with harness.py visual-ingest.
@@ -244,6 +366,8 @@ Rows JSON shape:
 {{
   "rows": [
     {{
+      "搜索关键词": "",
+      "采集时间": "",
       "商品名称": "",
       "现价": "",
       "店铺名称": "",

@@ -4,7 +4,7 @@
 当前只落实：
 1. skip -> 原始输入表目标价格列留空
 2. statistical -> 仅消费 statistical_eval 中 eligible_final=true 的牌名级 target_value
-3. blocked / open_url -> 暂不回填，只输出待后续处理清单
+3. blocked / with_keywords -> 暂不回填，只输出待后续处理清单
 """
 import argparse
 import logging
@@ -62,8 +62,8 @@ def main():
     print(f"统计评估文件: {result['statistical_eval_file']}")
     print(f"skip 留空: {result['skip']}")
     print(f"statistical 已回填: {result['statistical_assigned']}")
-    print(f"statistical 升级 open_url 待处理: {result['statistical_blocked_pending']}")
-    print(f"open_url 待处理: {result['open_url_pending']}")
+    print(f"statistical 升级 with_keywords 待处理: {result['statistical_blocked_pending']}")
+    print(f"with_keywords 待处理: {result['with_keywords_pending']}")
     print(f"mode 缺失/未知: {result['mode_missing_or_unknown']}")
     print(f"输出文件: {result['output_file']}")
 

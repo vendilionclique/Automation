@@ -59,6 +59,21 @@ def _find_existing_col(df, candidates):
     return None
 
 
+def _latest_capture_time(samples):
+    values = []
+    for sample in samples or []:
+        value = str(sample.get("capture_time", "") or "").strip()
+        if value:
+            values.append(value)
+    if not values:
+        return ""
+    parsed = pd.to_datetime(values, errors="coerce")
+    valid = parsed[~parsed.isna()]
+    if len(valid) == 0:
+        return sorted(values)[-1]
+    return valid.max().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _extract_card_name_from_row(row):
     kw = str(row.get("搜索关键词", "") or row.get("关键词", "")).strip()
     if kw:
@@ -472,6 +487,7 @@ def evaluate_price_clusters(input_file, output_file=None, logger=None):
     pay_col = _find_existing_col(df, ["付款人数", "pay_count", "成交人数"])
     url_col = _find_existing_col(df, ["商品链接", "商品URL", "url", "link"])
     item_id_col = _find_existing_col(df, ["商品ID", "商品id", "item_id"])
+    capture_time_col = _find_existing_col(df, ["采集时间", "capture_time", "captured_at"])
 
     if price_col is None:
         log.error(f"未找到价格列，现有列: {list(df.columns)}")
@@ -539,6 +555,11 @@ def evaluate_price_clusters(input_file, output_file=None, logger=None):
                     ),
                     "url": (
                         str(row.get(url_col, "")).strip() if url_col else ""
+                    ),
+                    "capture_time": (
+                        str(row.get(capture_time_col, "")).strip()
+                        if capture_time_col
+                        else ""
                     ),
                 }
             )
@@ -639,12 +660,14 @@ def evaluate_price_clusters(input_file, output_file=None, logger=None):
 
         # ---- 计算回填价格（原始 P25，不加权） ----
         target_value = None
+        capture_time_for_assignment = ""
         if has_credible and credible_samples:
             credible_prices = sorted([s["price"] for s in credible_samples])
             target_value = _raw_quantile(credible_prices, eval_cfg["target_quantile"])
+            capture_time_for_assignment = _latest_capture_time(credible_samples)
 
         routing_suggestion = (
-            "statistical_candidate" if has_credible else "open_url_fallback"
+            "statistical_candidate" if has_credible else "with_keywords_fallback"
         )
         if selection_blocked:
             routing_reason = "prefix_pool_rejected_gap"
@@ -739,6 +762,7 @@ def evaluate_price_clusters(input_file, output_file=None, logger=None):
                 "routing_reason": routing_reason,
                 "target_quantile": eval_cfg["target_quantile"],
                 "target_value": target_value,
+                "capture_time_for_assignment": capture_time_for_assignment,
                 "eligible_final": has_credible,
                 "risk_status": "pass" if has_credible else "blocked",
                 "secondary_reason": secondary_reason,
@@ -779,13 +803,13 @@ def evaluate_price_clusters(input_file, output_file=None, logger=None):
         else 0
     )
     fallback_count = (
-        int((result_df["routing_suggestion"] == "open_url_fallback").sum())
+        int((result_df["routing_suggestion"] == "with_keywords_fallback").sum())
         if not result_df.empty
         else 0
     )
 
     log.info(
-        "货盘诊断完成: 共 %s 个牌名，statistical_candidate %s，open_url_fallback %s，输出 %s",
+        "货盘诊断完成: 共 %s 个牌名，statistical_candidate %s，with_keywords_fallback %s，输出 %s",
         len(result_df),
         candidate_count,
         fallback_count,
