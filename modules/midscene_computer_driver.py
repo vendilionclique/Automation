@@ -18,6 +18,25 @@ from modules.visual_capture import screenshot_path_for
 
 TAOBAO_HOME = "https://www.taobao.com/"
 
+OPERATIONAL_STATES = [
+    "visible_results",
+    "popup_closeable",
+    "empty_result",
+    "login_required",
+    "captcha_or_risk",
+    "white_skeleton",
+    "page_not_loaded",
+    "unknown",
+]
+
+HARD_STOP_STATES = [
+    "login_required",
+    "captcha_or_risk",
+    "white_skeleton",
+    "page_not_loaded",
+    "unknown",
+]
+
 
 @dataclass
 class MidsceneComputerConfig:
@@ -25,6 +44,9 @@ class MidsceneComputerConfig:
     window_height: int = 1000
     max_scrolls_per_keyword: int = 2
     page_load_wait: float = 8.0
+    session_keyword_limit: int = 3
+    keyword_timeout_seconds: int = 180
+    consecutive_abnormal_stop: int = 2
     min_rows_per_keyword: int = 5
     confidence_threshold: float = 0.80
     screenshot_retention: bool = True
@@ -76,6 +98,11 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
         window_height=config.getint(section, "window_height", fallback=1000),
         max_scrolls_per_keyword=config.getint(section, "max_scrolls_per_keyword", fallback=2),
         page_load_wait=config.getfloat(section, "page_load_wait", fallback=8.0),
+        session_keyword_limit=max(1, config.getint(section, "session_keyword_limit", fallback=3)),
+        keyword_timeout_seconds=max(30, config.getint(section, "keyword_timeout_seconds", fallback=180)),
+        consecutive_abnormal_stop=max(
+            1, config.getint(section, "consecutive_abnormal_stop", fallback=2)
+        ),
         min_rows_per_keyword=config.getint(section, "min_rows_per_keyword", fallback=5),
         confidence_threshold=config.getfloat(visual_section, "confidence_threshold", fallback=0.80),
         screenshot_retention=config.getboolean(visual_section, "screenshot_retention", fallback=True),
@@ -225,6 +252,226 @@ def write_midscene_computer_request(
     _write_json(request_path, payload)
     _write_text(instruction_path, build_midscene_computer_instructions(payload))
     return request
+
+
+def write_midscene_session_worker_contract(
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+    session_dir: str,
+    records: List[Dict[str, Any]],
+    config: MidsceneComputerConfig,
+    sampling_config: Optional[PageSamplingConfig] = None,
+    manual_state: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Write the bounded small-session worker contract for Midscene computer."""
+    ensure_dir(session_dir)
+    sampling_config = sampling_config or PageSamplingConfig()
+    calibration = estimate_tile_scroll_distance(
+        screen_height=config.window_height,
+        config=sampling_config,
+    )
+    contract_path = os.path.join(session_dir, "midscene_session_worker_request.json")
+    instructions_path = os.path.join(session_dir, "midscene_session_worker_instructions.md")
+    result_path = os.path.join(session_dir, "session_worker_result.json")
+    keyword_tasks = []
+    for index, record in enumerate(records, start=1):
+        keyword = record.get("keyword", "")
+        evidence_dir = record.get("evidence_dir") or os.path.join(
+            task_dir, "evidence", _safe_keyword_dir(keyword)
+        )
+        ensure_dir(evidence_dir)
+        keyword_tasks.append(
+            {
+                "index": index,
+                "keyword": keyword,
+                "status": record.get("status", ""),
+                "evidence_dir": evidence_dir,
+                "keyword_result_path": os.path.join(evidence_dir, "keyword_result.json"),
+                "primary_screenshot_path": screenshot_path_for(evidence_dir, keyword),
+                "tile_path_pattern": os.path.join(evidence_dir, "tile_<NN>.png"),
+                "midscene_computer_request": record.get("extra", {}).get(
+                    "midscene_computer_request", ""
+                ),
+                "expected_screenshot": record.get("extra", {}).get("expected_screenshot", ""),
+            }
+        )
+
+    payload = {
+        "schema": "taobao_midscene_session_worker_v1",
+        "run_id": run_id,
+        "session_index": int(session_index),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "task_dir": task_dir,
+        "session_dir": session_dir,
+        "manual_state": manual_state or "",
+        "start_url": TAOBAO_HOME,
+        "worker_role": "bounded_keyword_capture_worker",
+        "session_result_path": result_path,
+        "instructions_path": instructions_path,
+        "keyword_count": len(keyword_tasks),
+        "keyword_limit": len(keyword_tasks),
+        "configured_keyword_limit": config.session_keyword_limit,
+        "keyword_tasks": keyword_tasks,
+        "operational_states": OPERATIONAL_STATES,
+        "hard_stop_states": HARD_STOP_STATES,
+        "hard_stop_policy": {
+            "stop_immediately_on": [
+                "login_required",
+                "captcha_or_risk",
+                "account_state_changed_or_unusual",
+            ],
+            "stop_after_consecutive_abnormal": config.consecutive_abnormal_stop,
+            "timeout_per_keyword_seconds": config.keyword_timeout_seconds,
+            "retain_abnormal_screenshots": True,
+        },
+        "action_boundary": {
+            "autonomy": "small_session_only",
+            "input": "system screenshots only",
+            "actions": ["coordinate click", "keyboard input", "keyboard shortcut", "page-level scroll"],
+            "allowed_act_scope": "complete bounded keyword capture tasks in this session only",
+            "forbidden_strategy_scope": "no daily planning, no cross-session routing, no final exception strategy",
+            "product_rows_source": "Codex-reviewed visible screenshots only",
+        },
+        "model_boundary": {
+            "midscene_vlm_role": "visual grounding and coarse operational state only",
+            "allow_midscene_act": config.allow_midscene_act,
+            "allow_midscene_query": config.allow_midscene_query,
+            "final_extraction_owner": config.final_extraction_owner,
+            "forbidden_outputs": [
+                "final product rows",
+                "price trust decisions",
+                "business filtering",
+                "statistical assignment",
+                "cross-session recovery strategy",
+            ],
+        },
+        "page_sampling": {
+            **sampling_config.to_dict(),
+            "calibration": calibration,
+            "tile_id_pattern": "tile_00, tile_01, ...",
+            "tile_summary_command": (
+                "python harness.py visual-log-tile {run_id} --keyword <keyword> "
+                "--tile-id <tile_id> --scroll-distance-px <px> "
+                "--rough-state <state> --image <path>"
+            ),
+        },
+        "expected_outputs": {
+            "session_worker_result": result_path,
+            "keyword_result": {
+                "path": "<evidence_dir>/keyword_result.json",
+                "schema": {
+                    "keyword": "",
+                    "status": "",
+                    "rough_state": "",
+                    "screenshots": [],
+                    "abnormal_screenshot": "",
+                    "elapsed_seconds": 0,
+                    "stop_reason": "",
+                    "notes": "",
+                },
+            },
+            "event_logs": [
+                os.path.join(task_dir, "task_events.jsonl"),
+                os.path.join(task_dir, "tile_summary.jsonl"),
+            ],
+        },
+    }
+    _write_json(contract_path, payload)
+    _write_text(instructions_path, build_midscene_session_worker_instructions(payload))
+    return {
+        "ok": True,
+        "contract": contract_path,
+        "instructions": instructions_path,
+        "result": result_path,
+        "keyword_count": len(keyword_tasks),
+    }
+
+
+def build_midscene_session_worker_instructions(payload: Dict[str, Any]) -> str:
+    states = ", ".join(payload["operational_states"])
+    hard_stops = ", ".join(payload["hard_stop_states"])
+    keywords = "\n".join(
+        f"- {item['index']}. {item['keyword']} -> {item['evidence_dir']}"
+        for item in payload["keyword_tasks"]
+    )
+    return f"""# Midscene Small Session Worker
+
+Run ID: {payload["run_id"]}
+Session: {payload["session_index"]}
+Task dir: {payload["task_dir"]}
+Worker result: {payload["session_result_path"]}
+
+You are the bounded Midscene computer worker for this small session. Complete
+only the keyword capture tasks listed below, then stop. Do not create new daily
+plans, choose new keywords, retry future sessions, or decide final exception
+strategy.
+
+Keywords:
+{keywords or "- none"}
+
+Allowed autonomy:
+- You may use bounded `act` or equivalent continuous visual actions to complete
+  this small session.
+- For each keyword, search Taobao through the visible foreground Chrome window,
+  wait for visible content to settle, classify only the coarse operational state,
+  save viewport tile screenshots, and write keyword_result.json.
+- Continue to the next keyword only after the previous keyword result and tile
+  summaries are written.
+
+State boundary:
+- Allowed operational states: {states}.
+- Hard stop states: {hard_stops}.
+- Stop immediately on login, captcha, security/risk verification, or unusual
+  account state. Stop after {payload["hard_stop_policy"]["stop_after_consecutive_abnormal"]}
+  consecutive abnormal keyword states. Per-keyword timeout is
+  {payload["hard_stop_policy"]["timeout_per_keyword_seconds"]} seconds.
+- If a hard stop occurs, retain the abnormal screenshot, write
+  session_worker_result.json with status `needs_review`, and stop the session.
+
+Data boundary:
+- Use system screenshots only. Do not read DOM, HTML, AX tree, selector maps,
+  cookies, storage, network payloads, page source, or JavaScript-evaluated data.
+- Do not output final product rows, price trust decisions, business filtering,
+  statistical assignment, or recovery strategy. Codex will review screenshots
+  and run visual-ingest later.
+- Do not add to cart, favorite/unfavorite, claim rewards, checkout, pay, or
+  otherwise change account state.
+
+Tile capture:
+- Max tiles per keyword: {payload["page_sampling"]["max_tiles_per_keyword"]}.
+- Estimated scroll distance per tile:
+  {payload["page_sampling"]["calibration"]["tile_scroll_distance_px"]} px.
+- After each tile, append the tile summary using:
+  `{payload["page_sampling"]["tile_summary_command"]}`.
+
+Expected keyword_result.json shape:
+```json
+{{
+  "keyword": "",
+  "status": "captured | needs_review | failed | skipped",
+  "rough_state": "",
+  "screenshots": [],
+  "abnormal_screenshot": "",
+  "elapsed_seconds": 0,
+  "stop_reason": "",
+  "notes": ""
+}}
+```
+
+Expected session_worker_result.json shape:
+```json
+{{
+  "run_id": "{payload["run_id"]}",
+  "session_index": {payload["session_index"]},
+  "status": "completed | needs_review | failed",
+  "processed_keywords": 0,
+  "stop_reason": "",
+  "keyword_results": [],
+  "notes": ""
+}}
+```
+"""
 
 
 def build_midscene_computer_instructions(payload: Dict[str, Any]) -> str:
@@ -385,6 +632,16 @@ Rows JSON shape:
 
 def _split_csv(value: str) -> List[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _safe_keyword_dir(value: str) -> str:
+    keep = []
+    for ch in str(value):
+        if ch.isalnum() or ch in ("-", "_"):
+            keep.append(ch)
+        elif ch.isspace():
+            keep.append("_")
+    return ("".join(keep).strip("_") or "keyword")[:80]
 
 
 def _write_json(path: str, payload: Dict[str, Any]) -> str:

@@ -20,6 +20,18 @@ Midscene computer MCP is launched through:
 local/start_midscene_computer_mcp.sh
 ```
 
+On Windows, use the tracked project launcher instead:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_midscene_computer_mcp.ps1
+```
+
+To sync the project MCP and project skill into Codex on a new machine:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync_agent_project_config.ps1
+```
+
 For external VLM grounding, copy:
 
 ```bash

@@ -102,7 +102,9 @@ def build_session_capsule(
             ],
         },
         "expected_outputs": {
-            "midscene_requests": "Each runnable keyword gets evidence/*/midscene_computer_request.json.",
+            "midscene_session_worker": "visual-session-run writes sessions/session_NN/midscene_session_worker_request.json for bounded small-session execution.",
+            "midscene_requests": "Each runnable keyword also keeps evidence/*/midscene_computer_request.json for compatibility and per-keyword recovery.",
+            "worker_result": "Midscene writes session_worker_result.json plus each evidence/*/keyword_result.json after screenshot capture.",
             "rows": "After screenshot review, write rows JSON and run harness.py visual-ingest.",
             "events": "Append structured session events to this session events.jsonl and task_events.jsonl.",
             "summary": summary_path,
@@ -294,6 +296,10 @@ Read the local files named above, then run this bounded session:
 
 Operational rules:
 - Codex is a short-lived executor for this session. Durable state is in files.
+- visual-session-run prepares a bounded Midscene small-session worker contract.
+  Midscene may continuously capture the selected keywords inside that contract,
+  but it does not own daily scheduling, future retries, or final exception
+  strategy.
 - Use one visual recognition context per keyword. A keyword's viewport tiles can
   be reviewed together; do not split every tile into its own context by default.
 - If login, captcha, security verification, white skeleton, repeated abnormal

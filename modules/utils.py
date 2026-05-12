@@ -201,6 +201,35 @@ class ConfigManager:
             'auto_resume': 'true',
         }
 
+        config['VISUAL_CAPTURE'] = {
+            'provider': 'midscene_computer',
+            'confidence_threshold': '0.80',
+            'screenshot_retention': 'false',
+        }
+
+        config['MIDSCENE_COMPUTER'] = {
+            'window_width': '1600',
+            'window_height': '1000',
+            'max_scrolls_per_keyword': '2',
+            'page_load_wait': '8',
+            'session_keyword_limit': '3',
+            'keyword_timeout_seconds': '180',
+            'consecutive_abnormal_stop': '2',
+            'min_rows_per_keyword': '5',
+            'screenshot_prefixes': 'initial,results,scroll_1',
+        }
+
+        config['MIDSCENE_MODEL'] = {
+            'enabled': 'false',
+            'model_name': '',
+            'model_family': '',
+            'base_url': '',
+            'api_key_env': 'MIDSCENE_MODEL_API_KEY',
+            'allow_midscene_act': 'true',
+            'allow_midscene_query': 'false',
+            'final_extraction_owner': 'codex',
+        }
+
         config['SESSION'] = {
             'daily_keyword_budget': '20',
             'hourly_keyword_budget': '5',
@@ -237,7 +266,7 @@ class ConfigManager:
             'min_new_rows_per_tile': '2',
             'allow_second_page': 'false',
             'retain_screenshots': 'human_required_only',
-            'allow_midscene_page_state_probe': 'false',
+            'allow_midscene_page_state_probe': 'true',
             'calibration_top_reserved_ratio': '0.24',
             'calibration_bottom_reserved_ratio': '0.06',
         }

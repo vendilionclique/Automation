@@ -70,6 +70,7 @@ sessions/
 
 # Sensitive local configuration
 config/settings.ini
+config/settings.ini.bak_*
 config/keywords.txt
 
 # Local browser and session data

@@ -9,6 +9,7 @@ from typing import Dict, Optional
 from modules.midscene_computer_driver import (
     midscene_computer_config_from_settings,
     write_midscene_computer_request,
+    write_midscene_session_worker_contract,
 )
 from modules.page_sampling import (
     page_sampling_config_from_settings,
@@ -21,6 +22,7 @@ from modules.session_capsule import (
     build_session_capsule,
     complete_session_lease,
     heartbeat_session_lease,
+    session_dir_for,
 )
 from modules.utils import ConfigManager, ensure_dir, get_project_root
 from modules.visual_capture import (
@@ -103,6 +105,9 @@ def run_visual_collection(
     manifest = load_visual_manifest(run_id)
     manifest.setdefault("session", initial_session_state(policy))
     task_dir = task_dir_for_run(run_id)
+    effective_limit = limit
+    if session_index is not None and effective_limit is None:
+        effective_limit = midscene_config.session_keyword_limit
     capsule = None
     lease_acquired = False
     if session_index is not None:
@@ -110,7 +115,7 @@ def run_visual_collection(
             run_id,
             session_index,
             config_file=config_file,
-            limit=limit,
+            limit=effective_limit,
             manual_state=manual_state,
         )
         acquire_session_lease(
@@ -124,10 +129,12 @@ def run_visual_collection(
 
     processed = 0
     results = []
+    session_records = []
+    worker_contract = None
     run_status = "requests_prepared"
     try:
         for record in manifest.get("records", []):
-            if limit is not None and processed >= limit:
+            if effective_limit is not None and processed >= effective_limit:
                 break
             if session_index is not None:
                 record_session = record.get("extra", {}).get("daily_session_index")
@@ -204,6 +211,7 @@ def run_visual_collection(
                 instructions_path=request.instruction_path,
             )
             results.append(result_payload)
+            session_records.append(record)
             processed += 1
             if session_index is not None:
                 heartbeat_session_lease(
@@ -215,6 +223,39 @@ def run_visual_collection(
         run_status = "failed"
         raise
     finally:
+        if session_index is not None and session_records:
+            session_dir = session_dir_for(run_id, session_index)
+            worker_contract = write_midscene_session_worker_contract(
+                run_id=run_id,
+                session_index=session_index,
+                task_dir=task_dir,
+                session_dir=session_dir,
+                records=session_records,
+                config=midscene_config,
+                sampling_config=sampling_config,
+                manual_state=manual_state,
+            )
+            manifest.setdefault("session", initial_session_state(policy))
+            manifest["session"]["worker_contract"] = worker_contract
+            manifest["session"]["status"] = "awaiting_midscene_session_worker"
+            manifest["session"]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            for record in session_records:
+                record.setdefault("extra", {})
+                record["extra"]["midscene_session_worker_contract"] = worker_contract["contract"]
+                record["extra"]["midscene_session_worker_result"] = worker_contract["result"]
+                record["last_action"] = "midscene_session_worker_contract_prepared"
+                record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            save_visual_manifest(run_id, manifest)
+            write_task_event(
+                task_dir,
+                event="midscene_session_worker_contract_prepared",
+                run_id=run_id,
+                session_index=session_index,
+                contract_path=worker_contract["contract"],
+                instructions_path=worker_contract["instructions"],
+                result_path=worker_contract["result"],
+                keyword_count=worker_contract["keyword_count"],
+            )
         if lease_acquired:
             complete_session_lease(
                 run_id,
@@ -224,6 +265,7 @@ def run_visual_collection(
                     "processed": processed,
                     "result_count": len(results),
                     "results": results,
+                    "worker_contract": worker_contract,
                 },
             )
 
@@ -233,7 +275,9 @@ def run_visual_collection(
             "run_id": run_id,
             "processed": processed,
             "session_index": session_index,
+            "limit": effective_limit,
             "session_capsule": capsule,
+            "worker_contract": worker_contract,
             "results": results,
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         },
@@ -242,7 +286,9 @@ def run_visual_collection(
         "run_id": run_id,
         "processed": processed,
         "session_index": session_index,
+        "limit": effective_limit,
         "session_capsule": capsule,
+        "worker_contract": worker_contract,
         "summary": summary_path,
         "results": results,
     }
@@ -254,6 +300,104 @@ def export_raw_rows(run_id: str) -> Dict:
     raw_excel = os.path.join(task_dir, "raw_results.xlsx")
     export_jsonl_to_excel(raw_jsonl, raw_excel)
     return {"run_id": run_id, "raw_jsonl": raw_jsonl, "raw_excel": raw_excel}
+
+
+def sync_midscene_worker_results(run_id: str, session_index: int) -> Dict:
+    task_dir = task_dir_for_run(run_id)
+    manifest = load_visual_manifest(run_id)
+    session_dir = session_dir_for(run_id, session_index)
+    worker_result_path = os.path.join(session_dir, "session_worker_result.json")
+    worker_result = _load_json_if_exists(worker_result_path)
+    updated = 0
+    missing = 0
+    results = []
+
+    for record in manifest.get("records", []):
+        record_session = record.get("extra", {}).get("daily_session_index")
+        if int(record_session or 0) != int(session_index):
+            continue
+        keyword = record.get("keyword", "")
+        evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
+        keyword_result_path = os.path.join(evidence_dir, "keyword_result.json")
+        keyword_result = _load_json_if_exists(keyword_result_path)
+        if not keyword_result:
+            missing += 1
+            continue
+
+        status = str(keyword_result.get("status") or "").strip().lower()
+        rough_state = str(keyword_result.get("rough_state") or "").strip()
+        if status in {"captured", "completed", "success"}:
+            record["status"] = "captured"
+            record["failure_reason"] = None
+        elif status in {"needs_review", "review"}:
+            record["status"] = "needs_review"
+            record["failure_reason"] = keyword_result.get("stop_reason") or rough_state or "needs_review"
+        elif status in {"skipped"}:
+            record["status"] = "skipped"
+            record["failure_reason"] = keyword_result.get("stop_reason") or "skipped"
+        else:
+            record["status"] = "failed"
+            record["failure_reason"] = keyword_result.get("stop_reason") or rough_state or "worker_failed"
+
+        record["last_action"] = "midscene_worker_result_synced"
+        record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        record.setdefault("extra", {})
+        record["extra"]["keyword_result"] = keyword_result_path
+        record["extra"]["worker_status"] = status
+        record["extra"]["rough_state"] = rough_state
+        record["extra"]["screenshots"] = keyword_result.get("screenshots", [])
+        updated += 1
+        results.append(
+            {
+                "keyword": keyword,
+                "status": record["status"],
+                "rough_state": rough_state,
+                "keyword_result": keyword_result_path,
+            }
+        )
+        write_task_event(
+            task_dir,
+            event="midscene_worker_result_synced",
+            level="info" if record["status"] == "captured" else "warning",
+            run_id=run_id,
+            session_index=session_index,
+            keyword=keyword,
+            status=record["status"],
+            rough_state=rough_state,
+            keyword_result_path=keyword_result_path,
+            stop_reason=keyword_result.get("stop_reason", ""),
+        )
+
+    session = manifest.setdefault("session", {})
+    session["worker_result"] = worker_result_path
+    session["worker_status"] = worker_result.get("status", "") if worker_result else ""
+    session["status"] = "worker_results_synced"
+    session["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    manifest_path = save_visual_manifest(run_id, manifest)
+    summary_path = write_json(
+        os.path.join(session_dir, "worker_sync_summary.json"),
+        {
+            "run_id": run_id,
+            "session_index": session_index,
+            "worker_result": worker_result_path,
+            "worker_result_exists": bool(worker_result),
+            "updated": updated,
+            "missing": missing,
+            "results": results,
+            "manifest": manifest_path,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "session_index": session_index,
+        "updated": updated,
+        "missing": missing,
+        "worker_result_exists": bool(worker_result),
+        "summary": summary_path,
+        "results": results,
+    }
 
 
 def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict) -> str:
@@ -327,3 +471,10 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
         session["status"] = "healthy" if ingest_result.get("ok") else "needs_review"
         session["updated_at"] = now
     return save_visual_manifest(run_id, manifest)
+
+
+def _load_json_if_exists(path: str) -> Dict:
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)

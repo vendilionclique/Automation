@@ -1,0 +1,18 @@
+{
+  "name": "midscene-computer",
+  "transport": "stdio",
+  "command": "powershell",
+  "args": [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "scripts/start_midscene_computer_mcp.ps1"
+  ],
+  "env_file": "local/midscene-computer.env",
+  "notes": [
+    "Project-level source of truth for agent apps that can import MCP server definitions.",
+    "Do not commit local/midscene-computer.env; each machine supplies its own VLM key.",
+    "The MCP server uses system screenshots and system mouse/keyboard/scroll actions only."
+  ]
+}

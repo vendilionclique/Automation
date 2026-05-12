@@ -86,7 +86,14 @@ def cmd_setup(args):
         cfg.read(args.config, encoding="utf-8")
         required_config = {
             "VISUAL_CAPTURE": ["provider", "confidence_threshold", "screenshot_retention"],
-            "MIDSCENE_COMPUTER": ["max_scrolls_per_keyword", "min_rows_per_keyword", "page_load_wait"],
+            "MIDSCENE_COMPUTER": [
+                "max_scrolls_per_keyword",
+                "min_rows_per_keyword",
+                "page_load_wait",
+                "session_keyword_limit",
+                "keyword_timeout_seconds",
+                "consecutive_abnormal_stop",
+            ],
             "SESSION": ["daily_keyword_budget", "hourly_keyword_budget", "max_consecutive_abnormal"],
         }
         for section, keys in required_config.items():
@@ -230,6 +237,13 @@ def cmd_visual_session_run(args):
         session_index=args.session,
         force_lease=args.force_lease,
     )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_sync_worker(args):
+    from modules.visual_pipeline import sync_midscene_worker_results
+
+    result = sync_midscene_worker_results(args.plan_id, args.session)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -446,6 +460,10 @@ def main():
     session_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
     session_run.add_argument("--force-lease", action="store_true", help="覆盖已有 active lease（仅确认旧进程已死时使用）")
 
+    sync_worker = sub.add_parser("visual-sync-worker", help="Sync Midscene small-session worker output into visual_tasks.json")
+    sync_worker.add_argument("plan_id", help="visual-plan-day 生成的 plan_id")
+    sync_worker.add_argument("--session", type=int, required=True, help="session 编号（从 1 开始）")
+
     session_capsule = sub.add_parser("visual-session-capsule", help="为 daily plan 的某个 session 生成短线程上下文 capsule")
     session_capsule.add_argument("plan_id", help="visual-plan-day 生成的 plan_id")
     session_capsule.add_argument("--session", type=int, required=True, help="要准备的 session 编号（从 1 开始）")
@@ -533,6 +551,8 @@ def main():
         cmd_visual_plan_day(args)
     elif args.cmd == "visual-session-run":
         cmd_visual_session_run(args)
+    elif args.cmd == "visual-sync-worker":
+        cmd_visual_sync_worker(args)
     elif args.cmd == "visual-session-capsule":
         cmd_visual_session_capsule(args)
     elif args.cmd == "visual-session-lease":

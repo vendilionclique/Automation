@@ -62,6 +62,7 @@ Codex App 的 MCP server 使用 `local/start_midscene_computer_mcp.sh` 启动，
 .venv/bin/python harness.py visual-scheduler-status <plan_id>
 .venv/bin/python harness.py visual-session-capsule <plan_id> --session 1
 .venv/bin/python harness.py visual-session-run <plan_id> --session 1
+.venv/bin/python harness.py visual-sync-worker <plan_id> --session 1
 .venv/bin/python harness.py visual-session-lease <plan_id> --session 1 --action inspect
 ```
 
@@ -129,6 +130,11 @@ npm run midscene:computer:help
 - 输出：系统鼠标、键盘、滚轮。
 - 不连接浏览器 CDP，不读 DOM/HTML/network/cookies/storage。
 - Codex 仍是长期任务入口和调度 agent；Midscene 的外部 VLM 只做局部视觉定位/操作。
+- `visual-session-run` now also writes a bounded small-session worker contract:
+  `sessions/session_NN/midscene_session_worker_request.json`. Midscene may
+  continuously capture the selected keywords inside that contract, but Codex
+  still owns daily planning, abnormal-state strategy, screenshot review,
+  `visual-ingest`, filtering, and downstream assignment.
 - 商品字段最终以保留截图为证据，由 Codex 复核后进入 `visual-ingest`。
 - Midscene 请求会包含自然节奏边界：短操作分段随机暂停、关键词间分钟级长暂停，以及只读低副作用动作限制。
 - Midscene 请求会包含 viewport tile 采样边界：系统截图分片、视觉/屏幕几何滚动估算、最多 tile 数、禁止翻页和截图保留策略。
@@ -147,6 +153,7 @@ npm run midscene:computer:help
 .venv/bin/python harness.py visual-plan-day --raw-input cards.xlsx
 .venv/bin/python harness.py visual-session-capsule <plan_id> --session 1
 .venv/bin/python harness.py visual-session-run <plan_id> --session 1
+.venv/bin/python harness.py visual-sync-worker <plan_id> --session 1
 .venv/bin/python harness.py visual-session-lease <plan_id> --session 1 --action inspect
 .venv/bin/python harness.py visual-scheduler-status <plan_id>
 .venv/bin/python harness.py visual-log-tile <run_id> --keyword "万智牌 中止" --tile-id tile_00
