@@ -1,10 +1,9 @@
 """
 Capture worker for Taobao visual collection contracts.
 
-Simulation mode validates the contract and writes standard worker artifacts
-without touching Taobao. Real mode uses only the Midscene computer MCP over
-stdio: system screenshots in, system mouse/keyboard/scroll actions out. It does
-not read browser DOM, HTML, network, storage, cookies, CDP, or page source.
+The worker executes a bounded session contract through the Midscene computer MCP
+over stdio: system screenshots in, system mouse/keyboard/scroll actions out. It
+does not read browser DOM, HTML, network, storage, cookies, CDP, or page source.
 """
 import base64
 import json
@@ -25,22 +24,18 @@ from modules.visual_control import write_worker_runtime
 MCP_REQUIRED_TOOLS = {
     "computer_connect",
     "take_screenshot",
-    "Input",
-    "KeyboardPress",
-    "Scroll",
+    "act",
 }
-MCP_OPTIONAL_TOOLS = {"act"}
+MCP_OPTIONAL_TOOLS = {"assert"}
 REAL_NOT_AVAILABLE_STATUS = "real_not_available"
 
 
-def run_capture_worker(contract_path: str, simulate: bool = True) -> Dict[str, Any]:
-    """Run the capture-worker framework against a contract JSON file.
+def run_capture_worker(contract_path: str) -> Dict[str, Any]:
+    """Run the capture worker against a contract JSON file.
 
-    In simulate mode, each keyword is marked skipped with a simulated stop
-    reason. In real mode, the worker tries to execute the contract through the
-    local Midscene computer MCP stdio launcher. If that environment is not
-    available, it writes explicit real_not_available results instead of
-    pretending a capture occurred.
+    The worker tries to execute the contract through the local Midscene computer
+    MCP stdio launcher. If that environment is not available, it writes explicit
+    real_not_available results instead of pretending a capture occurred.
     """
     started = time.monotonic()
     contract = _read_json(contract_path)
@@ -61,7 +56,6 @@ def run_capture_worker(contract_path: str, simulate: bool = True) -> Dict[str, A
         "capture",
         "running",
         contract_path=contract_path,
-        simulate=simulate,
         worker_role="visual_capture_worker",
         schema="taobao_visual_capture_worker_v1",
         started_at=now,
@@ -72,45 +66,21 @@ def run_capture_worker(contract_path: str, simulate: bool = True) -> Dict[str, A
         run_id=run_id,
         session_index=session_index,
         contract_path=contract_path,
-        simulate=simulate,
         keyword_count=len(keyword_tasks),
     )
 
-    if simulate:
-        keyword_results: List[Dict[str, Any]] = []
-        for fallback_index, task in enumerate(keyword_tasks, start=1):
-            result = _write_keyword_result(
-                task=task,
-                run_id=run_id,
-                session_index=session_index,
-                task_dir=task_dir,
-                fallback_index=fallback_index,
-                mode="simulated",
-                status="skipped",
-                rough_state="simulated",
-                stop_reason="simulated_framework_only",
-                notes="Simulated framework result; no real Taobao/Midscene action was performed.",
-            )
-            keyword_results.append(result)
-        session_status = "simulated"
-        stop_reason = "simulated_framework_only"
-        notes = (
-            "Framework-only capture worker. No Midscene, browser, DOM, CDP, "
-            "network, storage, or Taobao actions were performed."
-        )
-    else:
-        real_result = _run_real_capture_contract(
-            contract=contract,
-            contract_path=contract_path,
-            run_id=run_id,
-            session_index=session_index,
-            task_dir=task_dir,
-            keyword_tasks=keyword_tasks,
-        )
-        keyword_results = real_result["keyword_results"]
-        session_status = real_result["status"]
-        stop_reason = real_result["stop_reason"]
-        notes = real_result["notes"]
+    real_result = _run_real_capture_contract(
+        contract=contract,
+        contract_path=contract_path,
+        run_id=run_id,
+        session_index=session_index,
+        task_dir=task_dir,
+        keyword_tasks=keyword_tasks,
+    )
+    keyword_results = real_result["keyword_results"]
+    session_status = real_result["status"]
+    stop_reason = real_result["stop_reason"]
+    notes = real_result["notes"]
 
     elapsed_seconds = round(time.monotonic() - started, 3)
     session_result = {
@@ -131,7 +101,7 @@ def run_capture_worker(contract_path: str, simulate: bool = True) -> Dict[str, A
     write_task_event(
         task_dir,
         event="visual_capture_worker_finished",
-        level="info" if session_status in {"simulated", "captured"} else "warning",
+        level="info" if session_status == "captured" else "warning",
         run_id=run_id,
         session_index=session_index,
         status=session_status,
@@ -145,7 +115,6 @@ def run_capture_worker(contract_path: str, simulate: bool = True) -> Dict[str, A
         "capture",
         session_status,
         contract_path=contract_path,
-        simulate=simulate,
         session_result_path=session_result_path,
         processed_keywords=len(keyword_results),
         stop_reason=stop_reason,
@@ -280,32 +249,13 @@ def _capture_keyword_with_mcp(
     allow_act = bool((contract.get("model_boundary") or {}).get("allow_midscene_act", True))
 
     try:
-        if allow_act and "act" in tools:
-            _call_act_if_available(
-                client,
-                (
-                    "Use only visible screen operations. Bring the existing Chrome window "
-                    "with the dedicated Taobao profile to the foreground if needed. If Chrome "
-                    "is unavailable, login/captcha/security verification is visible, or an "
-                    "automation permission panel appears, stop without clicking through it."
-                ),
-            )
-            _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_foreground_act")
-        client.call_tool(
-            "Input",
-            {
-                "value": keyword,
-                "mode": "replace",
-                "locate": {
-                    "prompt": "the visible Taobao search input box",
-                    "cacheable": False,
-                    "deepLocate": True,
-                },
-            },
+        if not allow_act:
+            raise RuntimeError("midscene_act_disabled_for_real_capture")
+        _call_act(
+            client,
+            _keyword_search_prompt(keyword=keyword, scroll_distance=scroll_distance),
         )
-        _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_keyword_input")
-        client.call_tool("KeyboardPress", {"keyName": "Enter"})
-        _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_search_submit")
+        _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_keyword_search_act")
         time.sleep(page_load_wait)
 
         for tile_index in range(max_tiles):
@@ -333,15 +283,15 @@ def _capture_keyword_with_mcp(
             )
             if tile_index < max_tiles - 1:
                 _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"before_scroll_{tile_index + 1}")
-                client.call_tool(
-                    "Scroll",
-                    {
-                        "scrollType": "singleAction",
-                        "direction": "down",
-                        "distance": scroll_distance,
-                    },
+                _call_act(
+                    client,
+                    _next_tile_prompt(
+                        keyword=keyword,
+                        tile_index=tile_index + 1,
+                        scroll_distance=scroll_distance,
+                    ),
                 )
-                _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_{tile_index + 1}")
+                _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_act_{tile_index + 1}")
 
         elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
@@ -545,7 +495,7 @@ def _write_keyword_result(
     write_task_event(
         task_dir,
         event="visual_capture_keyword_result_written",
-        level="info" if status in {"captured", "skipped"} else "warning",
+        level="info" if status == "captured" else "warning",
         run_id=run_id,
         session_index=session_index,
         keyword=keyword,
@@ -699,13 +649,40 @@ class MidsceneStdioClient:
         return "\n".join(items[-8:])
 
 
-def _call_act_if_available(client: MidsceneStdioClient, prompt: str) -> None:
-    try:
-        client.call_tool("act", {"prompt": prompt})
-    except Exception:
-        # act is only a foreground helper. Keyword capture can still proceed via
-        # explicit Input/KeyboardPress/Scroll tools if Chrome is already visible.
-        return
+def _call_act(client: MidsceneStdioClient, prompt: str) -> None:
+    client.call_tool("act", {"prompt": prompt})
+
+
+def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
+    return (
+        "You are the bounded Taobao capture worker for one keyword. Use only "
+        "visible-screen reasoning and system mouse/keyboard actions. Do not read "
+        "DOM, HTML, network, cookies, storage, selector maps, page source, or JS "
+        "evaluated data. Bring the existing Chrome window with the dedicated "
+        "Taobao profile to the foreground if needed. If Codex, Terminal, Cursor, "
+        "or another app is visible, switch to Chrome first and do not type the "
+        "keyword into that app. If Chrome/Taobao is unavailable, or login, "
+        "captcha, security verification, risk warning, unusual account state, "
+        "or an automation permission panel is visible, stop and report failure. "
+        "From the visible Taobao search box, search exactly this keyword: "
+        f"{keyword!r}. Wait until visible search results settle. Leave the page "
+        "positioned at the first results viewport. Do not output product rows. "
+        f"Later tile captures will use about {scroll_distance} px between viewports."
+    )
+
+
+def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> str:
+    return (
+        "You are continuing the bounded Taobao capture session using only "
+        "visible-screen reasoning and system mouse/keyboard/scroll actions. The "
+        f"current keyword is {keyword!r}. If login, captcha, security/risk, "
+        "unusual account state, white skeleton, or a permission panel is visible, "
+        "stop and report failure. Otherwise move to the next visible results "
+        f"viewport for tile_{tile_index:02d}; use a normal page-level downward "
+        f"scroll of about {scroll_distance} px if appropriate, then wait for "
+        "visible content to settle. Do not output product rows and do not change "
+        "account state."
+    )
 
 
 def _first_image(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:

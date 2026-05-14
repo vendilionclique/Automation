@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"
 CODEX_CONFIG="${CODEX_HOME}/config.toml"
-SKILL_SOURCE="${ROOT_DIR}/.agents/skills/taobao-visual-collection"
-SKILL_TARGET="${CODEX_HOME}/skills/taobao-visual-collection"
 MCP_LAUNCHER="${ROOT_DIR}/local/start_midscene_computer_mcp.sh"
 LOCAL_ENV="${ROOT_DIR}/local/midscene-computer.env"
 
@@ -121,12 +119,6 @@ config_path.write_text(text, encoding="utf-8")
 PY
 fi
 
-if [[ -d "${SKILL_SOURCE}" ]]; then
-  mkdir -p "$(dirname "${SKILL_TARGET}")"
-  rm -rf "${SKILL_TARGET}"
-  cp -R "${SKILL_SOURCE}" "${SKILL_TARGET}"
-fi
-
 if [[ ! -f "${LOCAL_ENV}" ]]; then
   mkdir -p "$(dirname "${LOCAL_ENV}")"
   cat > "${LOCAL_ENV}" <<EOF
@@ -144,5 +136,5 @@ fi
 echo "Codex MCP configured: ${CODEX_CONFIG}"
 echo "Codex cron profile configured: taobao_visual_cron"
 echo "Codex extract profile configured: taobao_visual_extract"
-echo "Codex project skill synced: ${SKILL_TARGET}"
+echo "Project skill remains repo-local: ${ROOT_DIR}/.agents/skills/taobao-visual-collection"
 echo "Midscene env file: ${LOCAL_ENV}"

@@ -3,8 +3,6 @@ $ErrorActionPreference = "Stop"
 $RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
 $CodexConfig = Join-Path $CodexHome "config.toml"
-$SkillSource = Join-Path $RootDir ".agents\skills\taobao-visual-collection"
-$SkillTarget = Join-Path $CodexHome "skills\taobao-visual-collection"
 $McpLauncher = Join-Path $RootDir "scripts\start_midscene_computer_mcp.ps1"
 $LocalEnv = Join-Path $RootDir "local\midscene-computer.env"
 
@@ -119,19 +117,6 @@ if ($env:CODEX_SET_DEFAULT_TAOBAO_VISUAL_CRON) {
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($CodexConfig, $configText, $utf8NoBom)
 
-if (Test-Path -LiteralPath $SkillSource) {
-    New-Item -ItemType Directory -Force -Path (Split-Path $SkillTarget) | Out-Null
-    if (Test-Path -LiteralPath $SkillTarget) {
-        $resolvedCodexSkills = [System.IO.Path]::GetFullPath((Join-Path $CodexHome "skills"))
-        $resolvedSkillTarget = [System.IO.Path]::GetFullPath($SkillTarget)
-        if (-not $resolvedSkillTarget.StartsWith($resolvedCodexSkills, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to remove unexpected skill target: $resolvedSkillTarget"
-        }
-        Remove-Item -LiteralPath $SkillTarget -Recurse -Force
-    }
-    Copy-Item -LiteralPath $SkillSource -Destination $SkillTarget -Recurse -Force
-}
-
 if (-not (Test-Path -LiteralPath $LocalEnv)) {
     New-Item -ItemType Directory -Force -Path (Split-Path $LocalEnv) | Out-Null
     $runDir = (Join-Path $RootDir "local\midscene-run") -replace '\\', '/'
@@ -150,6 +135,6 @@ export MIDSCENE_REPORT_QUIET="true"
 Write-Host "Codex MCP configured: $CodexConfig"
 Write-Host "Codex cron profile configured: taobao_visual_cron"
 Write-Host "Codex extract profile configured: taobao_visual_extract"
-Write-Host "Codex project skill synced: $SkillTarget"
+Write-Host "Project skill remains repo-local: $(Join-Path $RootDir '.agents\skills\taobao-visual-collection')"
 Write-Host "Midscene env file: $LocalEnv"
 Write-Host "Cursor project MCP config is tracked at .cursor/mcp.json"

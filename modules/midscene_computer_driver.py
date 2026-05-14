@@ -56,7 +56,7 @@ class MidsceneComputerConfig:
     model_family: str = ""
     model_base_url: str = ""
     model_api_key_env: str = "MIDSCENE_MODEL_API_KEY"
-    allow_midscene_act: bool = False
+    allow_midscene_act: bool = True
     allow_midscene_query: bool = False
     final_extraction_owner: str = "codex"
     micro_pause_short: str = "0.8,3,0.82"
@@ -114,7 +114,7 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
         model_family=config.get(model_section, "model_family", fallback=""),
         model_base_url=config.get(model_section, "base_url", fallback=""),
         model_api_key_env=config.get(model_section, "api_key_env", fallback="MIDSCENE_MODEL_API_KEY"),
-        allow_midscene_act=config.getboolean(model_section, "allow_midscene_act", fallback=False),
+        allow_midscene_act=config.getboolean(model_section, "allow_midscene_act", fallback=True),
         allow_midscene_query=config.getboolean(model_section, "allow_midscene_query", fallback=False),
         final_extraction_owner=config.get(model_section, "final_extraction_owner", fallback="codex"),
         micro_pause_short=config.get(behavior_section, "micro_pause_short", fallback="0.8,3,0.82"),
@@ -516,7 +516,7 @@ Expected session_worker_result.json shape:
 {{
   "run_id": "{payload["run_id"]}",
   "session_index": {payload["session_index"]},
-  "status": "captured | simulated | needs_review | failed | real_not_available",
+  "status": "captured | needs_review | failed | real_not_available",
   "processed_keywords": 0,
   "stop_reason": "",
   "keyword_results": [],
@@ -628,8 +628,9 @@ Safety boundary:
 - Do not use Midscene Web bridge, Chrome extension bridge, or structural
   aiQuery extraction as the final product data source.
 - Do not navigate to additional pages unless PAGE_SAMPLING explicitly enables it.
-- Prefer single-step Midscene tools (`take_screenshot`, `tap`, `input`,
-  `keyboardpress`, `scroll`, `assert`) over long autonomous `act` chains.
+- For session capture, prefer bounded Midscene `act` tasks that reason from the
+  visible screen before acting. Do not let Python blindly type or scroll without
+  Midscene first establishing the visible context.
 - If login, captcha, SMS, risk verification, pop-up blocking, white skeleton,
   or an unusual account state appears, stop and retain a screenshot.
 - Do not add to cart, favorite/unfavorite, delete cart items, claim rewards,

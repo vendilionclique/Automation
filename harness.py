@@ -373,7 +373,7 @@ def cmd_visual_control(args):
 def cmd_visual_capture_worker(args):
     from modules.visual_capture_worker import run_capture_worker
 
-    result = run_capture_worker(args.contract, simulate=not args.no_simulate)
+    result = run_capture_worker(args.contract)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -613,9 +613,8 @@ def main():
     control.add_argument("--reason", help="控制动作原因")
     control.add_argument("--cooldown-minutes", type=int, default=60, help="cooldown 持续分钟数")
 
-    capture_worker = sub.add_parser("visual-capture-worker", help="采集 worker：读取 session contract，模拟或通过 Midscene computer MCP 真实采集")
+    capture_worker = sub.add_parser("visual-capture-worker", help="采集 worker：读取 session contract，通过 Midscene computer MCP 真实采集")
     capture_worker.add_argument("--contract", required=True, help="midscene_session_worker_request.json 路径")
-    capture_worker.add_argument("--no-simulate", action="store_true", help="关闭模拟模式；通过 Midscene computer MCP 执行，环境不可用时写 real_not_available")
 
     codex_extract_prepare = sub.add_parser(
         "visual-codex-extract-prepare",

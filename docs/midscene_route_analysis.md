@@ -116,15 +116,15 @@ Codex 负责：
 当前落地为混合架构：
 
 - Codex 仍是长期任务入口、调度 agent、异常裁判、证据复核和后处理编排。
-- Midscene computer 作为系统级视觉操作层，可调用外部便宜 VLM 做局部 visual grounding，例如定位淘宝首页搜索框、搜索按钮、可见商品列表区域。
+- Midscene computer 作为系统级视觉操作层，可调用外部便宜 VLM 做 bounded session 内的可见屏幕判断和操作推进，例如前台确认、淘宝搜索框定位、搜索提交、结果页等待和 viewport 滚动。
 - 外部 VLM 的职责只到“看屏幕并辅助操作”为止；商品字段最终仍以保留截图为证据，由 Codex 复核后写入 `visual-ingest`。
 - Midscene MCP 通过 `local/start_midscene_computer_mcp.sh` 启动，读取本机 `local/midscene-computer.env`。真实 key 不进入仓库，也不写入 `~/.codex/config.toml`。
 - 当前本机非敏感模型配置记录为：`MIDSCENE_MODEL_NAME=glm-5v-turbo`、`MIDSCENE_MODEL_FAMILY=glm-v`、`MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`。
 
 边界策略：
 
-- 优先使用单步 MCP 工具：`take_screenshot`、`tap`、`input`、`keyboardpress`、`scroll`、`assert`。
-- `act` 只允许短链路动作，不把“完成整个采集任务”交给 Midscene。
+- capture worker 的真实路线必须通过 Midscene computer MCP 执行；环境不可用时写 `real_not_available`，不再保留模拟成功路线。
+- 对 session capture，优先使用 bounded `act`，让 Midscene/外部 VLM 基于当前可见屏幕自主推进本 session 内的搜索、等待、滚动和异常停止；Python 只负责 contract、节奏、截图落盘和结果文件，不盲目 `Input/Enter/Scroll`。
 - 不使用 Midscene Web / Chrome extension bridge 作为淘宝主线。
 - 不让 Midscene 的结构化输出直接成为最终商品数据来源。
 

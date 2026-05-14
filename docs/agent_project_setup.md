@@ -8,8 +8,8 @@ This repository keeps project-specific agent knowledge and Midscene MCP launch d
 - `.agents/mcp/midscene-computer.json`: portable MCP definition for import-capable agents.
 - `.cursor/mcp.json`: Cursor project MCP configuration.
 - `scripts/start_midscene_computer_mcp.ps1`: Windows Midscene computer MCP launcher.
-- `scripts/sync_agent_project_config.sh`: macOS Codex sync for MCP, tool approvals, and project skill.
-- `scripts/sync_agent_project_config.ps1`: Windows Codex sync for MCP, tool approvals, and project skill.
+- `scripts/sync_agent_project_config.sh`: macOS Codex sync for MCP and tool approvals.
+- `scripts/sync_agent_project_config.ps1`: Windows Codex sync for MCP and tool approvals.
 - `scripts/check_taobao_visual_cron_permissions.sh`: macOS cron preflight for process enumeration and screenshot persistence.
 
 ## What Remains Machine-Local
@@ -39,8 +39,13 @@ python harness.py setup
 
 For Codex, the sync scripts write the `midscene-computer` MCP server into
 `~/.codex/config.toml`, mark the Taobao visual workflow's Midscene computer
-tools as `approval_mode = "approve"` for unattended cron/session runs, and copy
-the project skill into `~/.codex/skills/taobao-visual-collection`.
+tools as `approval_mode = "approve"` for unattended cron/session runs, and
+leave the workflow skill repo-local at
+`.agents/skills/taobao-visual-collection/SKILL.md`.
+
+Do not duplicate this Taobao workflow skill into `~/.codex/skills`. The project
+skill is the source of truth; a global copy can drift and cause future sessions
+to follow stale capture-worker rules.
 
 The sync scripts also create a Codex profile named `taobao_visual_cron`:
 
