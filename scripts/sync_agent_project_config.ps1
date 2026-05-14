@@ -82,6 +82,25 @@ if ($configText -match $profilePattern) {
     $configText += "`n" + $profileBlock
 }
 
+$extractProfileBlock = @"
+[profiles.taobao_visual_extract]
+model = "gpt-5.5"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+cwd = "$($RootDir -replace '\\', '\\')"
+
+"@
+
+$extractProfilePattern = '(?ms)^\[profiles\.taobao_visual_extract\]\r?\n.*?(?=^\[|\z)'
+if ($configText -match $extractProfilePattern) {
+    $configText = [regex]::Replace($configText, $extractProfilePattern, $extractProfileBlock)
+} else {
+    if ($configText.Length -gt 0 -and -not $configText.EndsWith("`n")) {
+        $configText += "`n"
+    }
+    $configText += "`n" + $extractProfileBlock
+}
+
 if ($env:CODEX_SET_DEFAULT_TAOBAO_VISUAL_CRON) {
     $defaultLines = [ordered]@{
         "model" = 'model = "gpt-5.5"'
@@ -130,6 +149,7 @@ export MIDSCENE_REPORT_QUIET="true"
 
 Write-Host "Codex MCP configured: $CodexConfig"
 Write-Host "Codex cron profile configured: taobao_visual_cron"
+Write-Host "Codex extract profile configured: taobao_visual_extract"
 Write-Host "Codex project skill synced: $SkillTarget"
 Write-Host "Midscene env file: $LocalEnv"
 Write-Host "Cursor project MCP config is tracked at .cursor/mcp.json"

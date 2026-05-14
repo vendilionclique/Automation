@@ -32,6 +32,7 @@ def cmd_setup(args):
         required = [
             ("pandas", "pandas"),
             ("openpyxl", "openpyxl"),
+            ("requests", "requests"),
             ("configparser", "configparser"),
             ("Pillow", "PIL"),
             ("pyperclip", "pyperclip"),
@@ -67,7 +68,7 @@ def cmd_setup(args):
             "modules/visual_capture.py",
             "modules/visual_capture_worker.py",
             "modules/visual_control.py",
-            "modules/visual_extract_worker.py",
+            "modules/codex_extract.py",
             "modules/vision_extract.py",
             "modules/visual_pipeline.py",
             "modules/visual_scheduler.py",
@@ -112,6 +113,7 @@ def cmd_setup(args):
             "SCHEDULER": ["daily_keyword_budget", "daily_session_count", "capture_freshness_days"],
             "VISUAL_BEHAVIOR": ["micro_pause_short", "inter_keyword_pause_min", "inter_keyword_pause_max"],
             "PAGE_SAMPLING": ["target_listings_per_keyword", "max_tiles_per_keyword", "retain_screenshots"],
+            "CODEX_EXTRACT": ["codex_bin", "profile", "model", "approval_policy"],
         }
         for section, keys in optional_config.items():
             if not cfg.has_section(section):
@@ -375,15 +377,40 @@ def cmd_visual_capture_worker(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def cmd_visual_extract_worker(args):
-    from modules.visual_extract_worker import run_extract_worker
+def cmd_visual_codex_extract_prepare(args):
+    from modules.codex_extract import prepare_codex_extract_requests
 
-    result = run_extract_worker(
+    result = prepare_codex_extract_requests(
         args.plan_id,
         args.session,
         config_file=args.config,
+        limit=args.limit,
+        force=args.force,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_codex_extract_dispatch(args):
+    from modules.codex_extract import dispatch_codex_extract_requests
+
+    result = dispatch_codex_extract_requests(
+        args.plan_id,
+        args.session,
+        config_file=args.config,
+        limit=args.limit,
+        start=args.start,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_apply_extracted_rows(args):
+    from modules.codex_extract import apply_codex_extracted_rows
+
+    result = apply_codex_extracted_rows(
+        args.request,
         rows_file=args.rows_file,
-        simulate_empty=not args.no_simulate_empty,
+        config_file=args.config,
+        retain_screenshots=args.retain_screenshots,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -586,15 +613,35 @@ def main():
     control.add_argument("--reason", help="控制动作原因")
     control.add_argument("--cooldown-minutes", type=int, default=60, help="cooldown 持续分钟数")
 
-    capture_worker = sub.add_parser("visual-capture-worker", help="采集 worker 框架：读取 session contract 并写标准结果")
+    capture_worker = sub.add_parser("visual-capture-worker", help="采集 worker：读取 session contract，模拟或通过 Midscene computer MCP 真实采集")
     capture_worker.add_argument("--contract", required=True, help="midscene_session_worker_request.json 路径")
-    capture_worker.add_argument("--no-simulate", action="store_true", help="关闭模拟模式；v1 会写 failed_recoverable")
+    capture_worker.add_argument("--no-simulate", action="store_true", help="关闭模拟模式；通过 Midscene computer MCP 执行，环境不可用时写 real_not_available")
 
-    extract_worker = sub.add_parser("visual-extract-worker", help="抽取 worker 框架：消费截图结果并复用 ingest/export")
-    extract_worker.add_argument("--plan-id", required=True, help="daily plan id / run_id")
-    extract_worker.add_argument("--session", type=int, required=True, help="session 编号")
-    extract_worker.add_argument("--rows-file", help="可选：用于模拟抽取成功的 rows JSON")
-    extract_worker.add_argument("--no-simulate-empty", action="store_true", help="无 rows-file 时不使用空抽取模拟")
+    codex_extract_prepare = sub.add_parser(
+        "visual-codex-extract-prepare",
+        help="为 captured keyword 生成短命 Codex 抽取 contract",
+    )
+    codex_extract_prepare.add_argument("--plan-id", required=True, help="daily plan id / run_id")
+    codex_extract_prepare.add_argument("--session", type=int, required=True, help="session 编号")
+    codex_extract_prepare.add_argument("--limit", type=int, help="最多生成多少个 keyword contract")
+    codex_extract_prepare.add_argument("--force", action="store_true", help="覆盖已有抽取 contract / apply 结果")
+
+    codex_extract_dispatch = sub.add_parser(
+        "visual-codex-extract-dispatch",
+        help="返回或启动短命 Codex extract worker 命令",
+    )
+    codex_extract_dispatch.add_argument("--plan-id", required=True, help="daily plan id / run_id")
+    codex_extract_dispatch.add_argument("--session", type=int, required=True, help="session 编号")
+    codex_extract_dispatch.add_argument("--limit", type=int, help="最多派发多少个 pending contract")
+    codex_extract_dispatch.add_argument("--start", action="store_true", help="真正启动 codex exec；默认只返回启动建议")
+
+    apply_extracted = sub.add_parser(
+        "visual-apply-extracted-rows",
+        help="确定性应用 Codex extract worker 产出的 rows；不是抽取 worker",
+    )
+    apply_extracted.add_argument("--request", required=True, help="extract_request.json 路径")
+    apply_extracted.add_argument("--rows-file", help="可选：覆盖 request 中的 rows_output")
+    apply_extracted.add_argument("--retain-screenshots", action="store_true", help="即使应用成功也保留截图")
 
     log_tile = sub.add_parser("visual-log-tile", help="追加 viewport tile 轻量摘要")
     log_tile.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
@@ -619,7 +666,7 @@ def main():
     log_event.add_argument("--keyword", help="相关关键词")
     log_event.add_argument("--notes", help="备注")
 
-    ingest = sub.add_parser("visual-ingest", help="Codex 识别后写入结构化视觉结果")
+    ingest = sub.add_parser("visual-ingest", help="底层 rows 写入能力；主线请用 visual-apply-extracted-rows")
     ingest.add_argument("task_dir", help="任务目录，如 data/tasks/xxx")
     ingest.add_argument("--keyword", required=True, help="截图对应搜索关键词")
     ingest.add_argument("--screenshot", help="截图路径；正常高置信识别后可删除")
@@ -665,8 +712,12 @@ def main():
         cmd_visual_control(args)
     elif args.cmd == "visual-capture-worker":
         cmd_visual_capture_worker(args)
-    elif args.cmd == "visual-extract-worker":
-        cmd_visual_extract_worker(args)
+    elif args.cmd == "visual-codex-extract-prepare":
+        cmd_visual_codex_extract_prepare(args)
+    elif args.cmd == "visual-codex-extract-dispatch":
+        cmd_visual_codex_extract_dispatch(args)
+    elif args.cmd == "visual-apply-extracted-rows":
+        cmd_visual_apply_extracted_rows(args)
     elif args.cmd == "visual-log-tile":
         cmd_visual_log_tile(args)
     elif args.cmd == "visual-log-event":

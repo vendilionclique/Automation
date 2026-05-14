@@ -16,7 +16,7 @@ from modules.utils import ensure_dir, get_project_root
 
 
 CONTROL_ACTIONS = {"status", "pause", "resume", "stop", "cooldown", "lock", "unlock"}
-WORKER_KINDS = {"capture", "extract"}
+WORKER_KINDS = {"capture", "codex_extract"}
 
 
 def control_path_for(plan_id: str) -> str:
@@ -173,7 +173,7 @@ def load_worker_runtime(plan_id: str, session_index: int, worker_kind: str) -> D
 def session_runtime_summary(plan_id: str, session_index: int) -> Dict[str, Any]:
     return {
         "capture_worker": load_worker_runtime(plan_id, session_index, "capture"),
-        "extract_worker": load_worker_runtime(plan_id, session_index, "extract"),
+        "codex_extract_worker": load_worker_runtime(plan_id, session_index, "codex_extract"),
     }
 
 

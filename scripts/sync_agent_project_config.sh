@@ -64,6 +64,14 @@ profile_block = (
     f'cwd = "{root_dir}"\n\n'
 )
 
+extract_profile_block = (
+    "[profiles.taobao_visual_extract]\n"
+    'model = "gpt-5.5"\n'
+    'sandbox_mode = "danger-full-access"\n'
+    'approval_policy = "never"\n'
+    f'cwd = "{root_dir}"\n\n'
+)
+
 def upsert_block(src: str, pattern: re.Pattern[str], block: str) -> str:
     if pattern.search(src):
         return pattern.sub(block, src)
@@ -78,8 +86,12 @@ server_pattern = re.compile(
 profile_pattern = re.compile(
     r"(?ms)^\[profiles\.taobao_visual_cron\]\r?\n.*?(?=^\[|\Z)"
 )
+extract_profile_pattern = re.compile(
+    r"(?ms)^\[profiles\.taobao_visual_extract\]\r?\n.*?(?=^\[|\Z)"
+)
 text = upsert_block(text, server_pattern, server_block)
 text = upsert_block(text, profile_pattern, profile_block)
+text = upsert_block(text, extract_profile_pattern, extract_profile_block)
 config_path.write_text(text, encoding="utf-8")
 PY
 
@@ -131,5 +143,6 @@ fi
 
 echo "Codex MCP configured: ${CODEX_CONFIG}"
 echo "Codex cron profile configured: taobao_visual_cron"
+echo "Codex extract profile configured: taobao_visual_extract"
 echo "Codex project skill synced: ${SKILL_TARGET}"
 echo "Midscene env file: ${LOCAL_ENV}"

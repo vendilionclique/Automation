@@ -95,16 +95,33 @@ data/tasks/<plan_id>/sessions/session_01/
 `visual-run` 默认会在 evidence 目录生成 `midscene_computer_request.json`
 和 `codex_midscene_computer_instructions.md`。Codex App 通过
 midscene-computer MCP 使用系统截图、坐标点击、键盘输入和滚动完成采集；
-截图落盘后，再把识别结果写入结构化结果：
+截图落盘后，Codex extract worker 按 keyword 级 contract 看图抽取商品行；
+确定性落盘由 `visual-apply-extracted-rows` 完成：
+
+`visual-capture-worker --contract ...` 默认仍是安全模拟；加
+`--no-simulate` 时会尝试通过本机 `local/start_midscene_computer_mcp.sh`
+连接 Midscene computer MCP 执行 contract，环境不可用时写
+`real_not_available`，不会伪装成已采集。新路线里只有 Codex extract worker
+负责看截图抽取商品行：`visual-codex-extract-prepare` 为 captured keyword
+生成 `extract_request.json` / `extract_prompt.md`，`visual-codex-extract-dispatch`
+返回或用 `codex exec` 启动短命非交互式 worker，worker 写
+`rows_result.json` 后运行 `visual-apply-extracted-rows`。`visual-apply-extracted-rows`
+只是确定性应用已抽取 rows 到 `raw_rows.jsonl` / `raw_results.xlsx`，不是第二种抽取
+worker。
+
+本地 scheduler / launcher 可以启动 `codex exec` 短命 worker，但不能创建 Codex App
+UI 中可见的新聊天会话；需要可见会话和人工追踪时，应由 Codex App automation、
+人工 supervisor 或未来 CC-connect/飞书触发 supervisor 会话。
 
 ```bash
-.venv/bin/python harness.py visual-ingest data/tasks/<run_id> \
-  --keyword "万智牌 中止" \
-  --rows-file rows.json \
-  --screenshot "data/tasks/<run_id>/evidence/万智牌 中止/<screenshot>.png"
+.venv/bin/python harness.py visual-codex-extract-prepare --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-codex-extract-dispatch --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-codex-extract-dispatch --plan-id <plan_id> --session 1 --start
+.venv/bin/python harness.py visual-apply-extracted-rows \
+  --request data/tasks/<plan_id>/sessions/session_01/codex_extract/<keyword>/extract_request.json
 ```
 
-默认截图保留策略是 `human_required_only`：成功任务删除截图；低置信或可自愈异常只写日志；只有登录、验证码、安全验证、疑似风控、连续异常等人工介入级别才保留截图。v1 会按 `PAGE_SAMPLING.max_tiles_per_keyword` 采完整页可见 tiles，不按商品数早停；`visual-ingest` 会对同一任务内重复行做轻量去重，并用 `PAGE_SAMPLING.target_listings_per_keyword` 作为每关键词近似保护上限。
+默认截图保留策略是 `human_required_only`：成功任务删除截图；低置信或可自愈异常只写日志；只有登录、验证码、安全验证、疑似风控、连续异常等人工介入级别才保留截图。v1 会按 `PAGE_SAMPLING.max_tiles_per_keyword` 采完整页可见 tiles，不按商品数早停；`visual-apply-extracted-rows` 会对同一任务内重复行做轻量去重，并用 `PAGE_SAMPLING.target_listings_per_keyword` 作为每关键词近似保护上限。
 
 导出 raw Excel，并可选接入规则过滤：
 
@@ -140,8 +157,9 @@ npm run midscene:computer:help
   `sessions/session_NN/midscene_session_worker_request.json`. Midscene may
   continuously capture the selected keywords inside that contract, but Codex
   still owns daily planning, abnormal-state strategy, screenshot review,
-  `visual-ingest`, filtering, and downstream assignment.
-- 商品字段最终以保留截图为证据，由 Codex 复核后进入 `visual-ingest`。
+  `visual-apply-extracted-rows`, filtering, and downstream assignment.
+- 商品字段最终以保留截图为证据，由短命 Codex extract worker 复核后进入
+  `visual-apply-extracted-rows`。
 - Midscene 请求会包含自然节奏边界：短操作分段随机暂停、关键词间分钟级长暂停，以及只读低副作用动作限制。
 - Midscene 请求会包含 viewport tile 采样边界：系统截图分片、视觉/屏幕几何滚动估算、最多 tile 数、禁止翻页和截图保留策略。
 
@@ -160,11 +178,13 @@ npm run midscene:computer:help
 .venv/bin/python harness.py visual-session-capsule <plan_id> --session 1
 .venv/bin/python harness.py visual-session-run <plan_id> --session 1
 .venv/bin/python harness.py visual-sync-worker <plan_id> --session 1
+.venv/bin/python harness.py visual-codex-extract-prepare --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-codex-extract-dispatch --plan-id <plan_id> --session 1
 .venv/bin/python harness.py visual-session-lease <plan_id> --session 1 --action inspect
 .venv/bin/python harness.py visual-scheduler-status <plan_id>
 .venv/bin/python harness.py visual-log-tile <run_id> --keyword "万智牌 中止" --tile-id tile_00
 .venv/bin/python harness.py visual-log-event <run_id> --event session_started
-.venv/bin/python harness.py visual-ingest data/tasks/<run_id> --keyword "万智牌 中止" --rows-file rows.json
+.venv/bin/python harness.py visual-apply-extracted-rows --request data/tasks/<plan_id>/sessions/session_01/codex_extract/<keyword>/extract_request.json
 .venv/bin/python harness.py visual-export <run_id>
 
 # 后处理
@@ -203,6 +223,7 @@ modules/
   session_state.py       # 账号健康与安全预算状态
   session_capsule.py     # session capsule / lease / 短线程上下文
   visual_scheduler.py    # 全量台账日预算/session 计划
+  codex_extract.py       # Codex extract contract、codex exec 启动建议、确定性 rows apply
   visual_pipeline.py     # 视觉任务运行、ingest、export 编排
 docs/
   midscene_route_analysis.md # Midscene.js 路线审计记录
@@ -227,7 +248,7 @@ Git 只同步代码、配置模板和空目录骨架。以下内容不提交：
 1. 在 Codex App 注册并验证 `midscene-computer` MCP。
 2. 启动专用 Chrome profile，人工登录淘宝，确认系统截图和鼠标键盘权限可用。
 3. 用 Midscene computer 单步完成首页搜索、首屏截图、滚动截图。
-4. 截图落盘后接 `visual-ingest` / `visual-export --filter`。
+4. 截图落盘后接 `visual-codex-extract-prepare` / `visual-codex-extract-dispatch` / `visual-apply-extracted-rows`。
 5. 补异常状态样例：登录弹窗、验证码/安全验证、白框架、空结果。
 
 ## 免责声明

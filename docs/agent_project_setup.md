@@ -51,12 +51,26 @@ sandbox_mode = "danger-full-access"
 approval_policy = "never"
 ```
 
-Run unattended Taobao visual collection with that profile, or with an equivalent
-app-level setting. Ordinary sandboxed execution is not sufficient for this
-workflow on macOS because it can block `pgrep`/`ps` process enumeration and
-`screencapture` evidence persistence. Those failures can make the Chrome
-launcher misread an already-running browser as missing, then attempt to start a
-duplicate profile and surface misleading Chrome crash reports.
+They also create a non-interactive profile named `taobao_visual_extract` for
+short-lived Codex extract workers:
+
+```toml
+[profiles.taobao_visual_extract]
+model = "gpt-5.5"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+```
+
+Both Taobao profiles are configured this way so unattended collection and
+extract workers do not pause on shell, MCP, or related tool approval prompts.
+
+Run unattended Taobao visual collection supervisor/cron sessions with
+`taobao_visual_cron`, or with an equivalent app-level setting. Ordinary
+sandboxed execution is not sufficient for that workflow on macOS because it can
+block `pgrep`/`ps` process enumeration and `screencapture` evidence persistence.
+Those failures can make the Chrome launcher misread an already-running browser
+as missing, then attempt to start a duplicate profile and surface misleading
+Chrome crash reports.
 
 The pre-approved Midscene tool set is limited to the visual workflow surface:
 display listing/connection, system screenshots, coordinate mouse actions,
@@ -64,7 +78,16 @@ keyboard input, scroll, assertion, and disconnect. It does not grant DOM, HTML,
 network, cookie, storage, or CDP extraction capabilities.
 
 Cron automations for this workflow should request the latest GPT-5.5 model by
-default. If a run asks for Midscene MCP tool approval one-by-one, or if shell
+default. Codex extract dispatch may use `codex exec -p taobao_visual_extract`
+to start a bounded worker that reads one keyword-level screenshot contract,
+writes `rows_result.json`, runs `visual-apply-extracted-rows`, and exits. This
+is not a Codex App UI chat session and it will not appear as a visible
+conversation in the app. Python scheduler/launcher code may start that
+short-lived non-interactive worker, but it cannot create Codex App UI-visible
+chat sessions; visible supervisor conversations should be started by the app,
+human operator, or a future CC-connect/Feishu entrypoint.
+
+If a run asks for Midscene MCP tool approval one-by-one, or if shell
 process/screenshot checks fail under ordinary sandboxing, rerun the sync script,
 use the `taobao_visual_cron` profile, and restart Codex if needed before relying
 on unattended collection.
@@ -80,6 +103,10 @@ jobs, or ad hoc `codex exec`. The app automation path gives the user a visible
 automation entry, a dedicated conversation, and status tracking. If the Codex
 automation creation/update tool is unavailable in the current session, report
 that limitation rather than starting an invisible system cron.
+
+That cron rule is about the daily/supervisor entrypoint. It does not forbid the
+local extract dispatcher from using `codex exec` as a leaf worker after capture
+screenshots already exist.
 
 Do not use the separate Computer Use plugin as a fallback inside Taobao visual
 cron. The intended control layer is Midscene computer MCP only. If macOS opens

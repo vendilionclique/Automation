@@ -487,7 +487,18 @@ def _dispatch_advice(plan_id: str, session_index: int) -> Dict[str, Any]:
         "expected_result": result_path,
         "worker_commands": {
             "capture": f"python3 harness.py visual-capture-worker --contract {json.dumps(contract, ensure_ascii=False)}",
-            "extract": f"python3 harness.py visual-extract-worker --plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}",
+            "codex_extract_prepare": (
+                f"python3 harness.py visual-codex-extract-prepare "
+                f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
+            ),
+            "codex_extract_dispatch_advice": (
+                f"python3 harness.py visual-codex-extract-dispatch "
+                f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
+            ),
+            "codex_extract_dispatch_start": (
+                f"python3 harness.py visual-codex-extract-dispatch "
+                f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)} --start"
+            ),
         },
         "suggested_command": (
             f"python3 harness.py visual-sync-worker {plan_id} --session {int(session_index)}"

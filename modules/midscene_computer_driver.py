@@ -228,12 +228,10 @@ def write_midscene_computer_request(
             "Midscene product extraction as the final source of truth",
             "second-page navigation unless explicitly enabled in PAGE_SAMPLING",
         ],
-        "expected_ingest": {
+        "expected_rows_apply": {
             "command": (
-                f"python harness.py visual-ingest {json.dumps(task_dir, ensure_ascii=False)} "
-                f"--keyword {json.dumps(keyword, ensure_ascii=False)} "
-                "--rows-file <rows.json> "
-                f"--screenshot {json.dumps(screenshot_path, ensure_ascii=False)}"
+                "python harness.py visual-codex-extract-prepare --plan-id <plan_id> --session <N> && "
+                "python harness.py visual-codex-extract-dispatch --plan-id <plan_id> --session <N> --start"
             ),
             "rows_schema": [
                 "搜索关键词",
@@ -487,8 +485,8 @@ Data boundary:
   If macOS opens Accessibility/System Settings or an automation permission
   panel, stop as setup drift instead of clicking through it.
 - Do not output final product rows, price trust decisions, business filtering,
-  statistical assignment, or recovery strategy. Codex will review screenshots
-  and run visual-ingest later.
+  statistical assignment, or recovery strategy. Codex extract workers will
+  review screenshots later, then `visual-apply-extracted-rows` will persist rows.
 - Do not add to cart, favorite/unfavorite, claim rewards, checkout, pay, or
   otherwise change account state.
 
@@ -503,7 +501,7 @@ Expected keyword_result.json shape:
 ```json
 {{
   "keyword": "",
-  "status": "captured | needs_review | failed | skipped",
+  "status": "captured | needs_review | failed | skipped | real_not_available",
   "rough_state": "",
   "screenshots": [],
   "abnormal_screenshot": "",
@@ -518,7 +516,7 @@ Expected session_worker_result.json shape:
 {{
   "run_id": "{payload["run_id"]}",
   "session_index": {payload["session_index"]},
-  "status": "completed | needs_review | failed",
+  "status": "captured | simulated | needs_review | failed | real_not_available",
   "processed_keywords": 0,
   "stop_reason": "",
   "keyword_results": [],
@@ -553,15 +551,15 @@ already logged-in Chrome. Midscene computer should only use system screenshots
 for observation and system mouse, keyboard, and scroll events for action.
 
 Architecture:
-- Codex is the long-running task agent: scheduling, checkpointing, abnormal
-  state handling, evidence retention, row extraction/review, ingest, export,
-  filtering, DB/LLM/statistical assignment.
+- Codex supervisor owns scheduling, checkpointing, abnormal state handling,
+  evidence retention, export, filtering, DB/LLM/statistical assignment. Short-
+  lived Codex extract workers own screenshot-to-row recognition.
 - Midscene may use its configured external VLM only for bounded visual
   grounding of UI operations, such as finding the visible Taobao search box or
   search button.
-- Final product rows must be based on visible screenshots and reviewed by
-  Codex before visual-ingest. Midscene VLM output is an operation aid, not the
-  final evidence source.
+- Final product rows must be based on visible screenshots and reviewed by a
+  Codex extract worker before `visual-apply-extracted-rows`. Midscene VLM output
+  is an operation aid, not the final evidence source.
 
 Midscene model boundary:
 - VLM enabled in project config: {model["midscene_vlm_enabled"]}
@@ -672,12 +670,12 @@ Steps:
    per tile, preserving overlap. Save tile_01, tile_02, etc. in the same evidence
    directory until reaching {sampling["max_tiles_per_keyword"]} tiles or an
    operational stop state.
-8. Codex should identify at least {cfg["min_rows_per_keyword"]} visible product
-   rows when possible from visible screenshots, then write rows JSON and
-   ingest with harness.py visual-ingest.
-   Do not pass `--retain-screenshot` for normal successful extraction; the
-   ingest step keeps screenshots only when extraction needs review. Retain
-   abnormal-state screenshots such as login, captcha, risk, or white skeleton.
+8. Codex extract workers should identify at least {cfg["min_rows_per_keyword"]}
+   visible product rows when possible from visible screenshots, write
+   rows_result.json, and let `visual-apply-extracted-rows` persist rows.
+   The apply step deletes successful keyword screenshots only after quality
+   checks pass. Retain abnormal-state screenshots such as login, captcha, risk,
+   or white skeleton.
 
 Rows JSON shape:
 ```json
