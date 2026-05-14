@@ -65,6 +65,9 @@ def cmd_setup(args):
             "modules/midscene_computer_driver.py",
             "modules/page_state.py",
             "modules/visual_capture.py",
+            "modules/visual_capture_worker.py",
+            "modules/visual_control.py",
+            "modules/visual_extract_worker.py",
             "modules/vision_extract.py",
             "modules/visual_pipeline.py",
             "modules/visual_scheduler.py",
@@ -318,6 +321,73 @@ def cmd_visual_auto_tick(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_visual_heartbeat(args):
+    from modules.visual_scheduler import heartbeat_daily_collection
+
+    result = heartbeat_daily_collection(
+        raw_input_file=args.raw_input,
+        config_file=args.config,
+        plan_id=args.plan_id,
+        session_index=args.session,
+        limit=args.limit,
+        mode=args.mode,
+        random_sample=args.random_sample,
+        random_seed=args.random_seed,
+        session_count=args.session_count,
+        force_lease=args.force_lease,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_control(args):
+    from modules.visual_control import apply_control_action, load_control_state, session_runtime_summary
+    from modules.visual_scheduler import scheduler_status
+
+    if args.action == "status":
+        payload = {
+            "ok": True,
+            "plan_id": args.plan_id,
+            "control": load_control_state(args.plan_id),
+        }
+        try:
+            payload["status"] = scheduler_status(args.plan_id)
+        except Exception as exc:
+            payload["status_error"] = str(exc)
+        if args.session is not None:
+            payload["runtime"] = session_runtime_summary(args.plan_id, args.session)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    result = apply_control_action(
+        args.plan_id,
+        args.action,
+        session_index=args.session,
+        reason=args.reason or "",
+        cooldown_minutes=args.cooldown_minutes,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_capture_worker(args):
+    from modules.visual_capture_worker import run_capture_worker
+
+    result = run_capture_worker(args.contract, simulate=not args.no_simulate)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_extract_worker(args):
+    from modules.visual_extract_worker import run_extract_worker
+
+    result = run_extract_worker(
+        args.plan_id,
+        args.session,
+        config_file=args.config,
+        rows_file=args.rows_file,
+        simulate_empty=not args.no_simulate_empty,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def cmd_visual_log_tile(args):
     from modules.page_sampling import write_tile_summary
     from modules.visual_pipeline import task_dir_for_run
@@ -498,6 +568,34 @@ def main():
     auto_tick.add_argument("--prepare-requests", action="store_true", help="同时生成该 session 的 Midscene 请求")
     auto_tick.add_argument("--force-lease", action="store_true", help="prepare-requests 时覆盖已有 active lease")
 
+    heartbeat = sub.add_parser("visual-heartbeat", help="短命心跳：同步状态、准备 session worker contract、返回 worker 命令")
+    heartbeat.add_argument("--raw-input", help="整本原始输入台账；缺省读 config [PRODUCT_ROUTING] raw_input_file")
+    heartbeat.add_argument("--plan-id", help="可选：覆盖自动 daily_YYYYMMDD plan_id")
+    heartbeat.add_argument("--session", type=int, help="可选：强制指定 session；缺省按当前时间和状态选择")
+    heartbeat.add_argument("--limit", type=int, help="最多纳入多少个 runnable 关键词")
+    heartbeat.add_argument("--mode", default="all", choices=["sync", "prepare", "dispatch", "all"], help="心跳执行阶段")
+    heartbeat.add_argument("--random-sample", type=int, help="首次创建 plan 时从候选牌名中随机抽样 N 个关键词")
+    heartbeat.add_argument("--random-seed", type=int, help="随机抽样 seed，便于复现")
+    heartbeat.add_argument("--session-count", type=int, help="首次创建 plan 时覆盖 session 数")
+    heartbeat.add_argument("--force-lease", action="store_true", help="准备请求时覆盖已有 active lease")
+
+    control = sub.add_parser("visual-control", help="Codex/人工 supervisor 控制面")
+    control.add_argument("action", choices=["status", "pause", "resume", "stop", "cooldown", "lock", "unlock"])
+    control.add_argument("--plan-id", required=True, help="daily plan id / run_id")
+    control.add_argument("--session", type=int, help="可选：只作用于指定 session")
+    control.add_argument("--reason", help="控制动作原因")
+    control.add_argument("--cooldown-minutes", type=int, default=60, help="cooldown 持续分钟数")
+
+    capture_worker = sub.add_parser("visual-capture-worker", help="采集 worker 框架：读取 session contract 并写标准结果")
+    capture_worker.add_argument("--contract", required=True, help="midscene_session_worker_request.json 路径")
+    capture_worker.add_argument("--no-simulate", action="store_true", help="关闭模拟模式；v1 会写 failed_recoverable")
+
+    extract_worker = sub.add_parser("visual-extract-worker", help="抽取 worker 框架：消费截图结果并复用 ingest/export")
+    extract_worker.add_argument("--plan-id", required=True, help="daily plan id / run_id")
+    extract_worker.add_argument("--session", type=int, required=True, help="session 编号")
+    extract_worker.add_argument("--rows-file", help="可选：用于模拟抽取成功的 rows JSON")
+    extract_worker.add_argument("--no-simulate-empty", action="store_true", help="无 rows-file 时不使用空抽取模拟")
+
     log_tile = sub.add_parser("visual-log-tile", help="追加 viewport tile 轻量摘要")
     log_tile.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
     log_tile.add_argument("--task-dir", help="可选：显式任务目录")
@@ -561,6 +659,14 @@ def main():
         cmd_visual_scheduler_status(args)
     elif args.cmd == "visual-auto-tick":
         cmd_visual_auto_tick(args)
+    elif args.cmd == "visual-heartbeat":
+        cmd_visual_heartbeat(args)
+    elif args.cmd == "visual-control":
+        cmd_visual_control(args)
+    elif args.cmd == "visual-capture-worker":
+        cmd_visual_capture_worker(args)
+    elif args.cmd == "visual-extract-worker":
+        cmd_visual_extract_worker(args)
     elif args.cmd == "visual-log-tile":
         cmd_visual_log_tile(args)
     elif args.cmd == "visual-log-event":

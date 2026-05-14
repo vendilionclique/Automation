@@ -76,6 +76,14 @@ if ($existing.Count -gt 0) {
     exit 0
 }
 
+$anyChrome = @(Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
+if ($anyChrome.Count -gt 0) {
+    $focused = Focus-Chrome -ProcessIds ($anyChrome | ForEach-Object { [int]$_.Id })
+    Write-Host "Google Chrome is already running. Foreground focus attempted: $focused"
+    Write-Host "Reuse the visible logged-in Chrome window; not starting a duplicate profile."
+    exit 0
+}
+
 $chrome = Get-ChromePath
 $args = @(
     "--user-data-dir=$resolvedProfile",

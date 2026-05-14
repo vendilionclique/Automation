@@ -264,7 +264,7 @@ def write_midscene_session_worker_contract(
     sampling_config: Optional[PageSamplingConfig] = None,
     manual_state: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Write the bounded small-session worker contract for Midscene computer."""
+    """Write the bounded small-session capture-worker contract."""
     ensure_dir(session_dir)
     sampling_config = sampling_config or PageSamplingConfig()
     calibration = estimate_tile_scroll_distance(
@@ -281,24 +281,50 @@ def write_midscene_session_worker_contract(
             task_dir, "evidence", _safe_keyword_dir(keyword)
         )
         ensure_dir(evidence_dir)
+        extra = record.get("extra", {})
+        task_id = (
+            record.get("task_id")
+            or extra.get("task_id")
+            or f"{run_id}-s{int(session_index):02d}-k{index:03d}"
+        )
+        keyword_result_path = os.path.join(evidence_dir, "keyword_result.json")
+        primary_screenshot_path = screenshot_path_for(evidence_dir, keyword)
+        abnormal_screenshot_path = os.path.join(evidence_dir, "abnormal_state.png")
+        capture_plan = {
+            "start_url": TAOBAO_HOME,
+            "entry_mode": "taobao_home_visible_search_box",
+            "max_tiles_per_keyword": sampling_config.max_tiles_per_keyword,
+            "target_listings_per_keyword": sampling_config.target_listings_per_keyword,
+            "tile_scroll_distance_px": calibration["tile_scroll_distance_px"],
+            "tile_id_pattern": "tile_00, tile_01, ...",
+            "tile_path_pattern": os.path.join(evidence_dir, "tile_<NN>.png"),
+            "primary_screenshot_path": primary_screenshot_path,
+            "abnormal_screenshot_path": abnormal_screenshot_path,
+            "timeout_seconds": config.keyword_timeout_seconds,
+        }
         keyword_tasks.append(
             {
+                "task_id": task_id,
+                "keyword_index": index,
+                "capture_plan": capture_plan,
+                "result_path": keyword_result_path,
+                "abnormal_screenshot_path": abnormal_screenshot_path,
+                # Compatibility fields consumed by existing sync/review code.
                 "index": index,
                 "keyword": keyword,
                 "status": record.get("status", ""),
                 "evidence_dir": evidence_dir,
-                "keyword_result_path": os.path.join(evidence_dir, "keyword_result.json"),
-                "primary_screenshot_path": screenshot_path_for(evidence_dir, keyword),
+                "keyword_result_path": keyword_result_path,
+                "primary_screenshot_path": primary_screenshot_path,
                 "tile_path_pattern": os.path.join(evidence_dir, "tile_<NN>.png"),
-                "midscene_computer_request": record.get("extra", {}).get(
-                    "midscene_computer_request", ""
-                ),
-                "expected_screenshot": record.get("extra", {}).get("expected_screenshot", ""),
+                "midscene_computer_request": extra.get("midscene_computer_request", ""),
+                "expected_screenshot": extra.get("expected_screenshot", ""),
             }
         )
 
     payload = {
-        "schema": "taobao_midscene_session_worker_v1",
+        "schema": "taobao_visual_capture_worker_v1",
+        "compatible_with": ["taobao_midscene_session_worker_v1"],
         "run_id": run_id,
         "session_index": int(session_index),
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -306,7 +332,7 @@ def write_midscene_session_worker_contract(
         "session_dir": session_dir,
         "manual_state": manual_state or "",
         "start_url": TAOBAO_HOME,
-        "worker_role": "bounded_keyword_capture_worker",
+        "worker_role": "visual_capture_worker",
         "session_result_path": result_path,
         "instructions_path": instructions_path,
         "keyword_count": len(keyword_tasks),
@@ -350,6 +376,7 @@ def write_midscene_session_worker_contract(
             **sampling_config.to_dict(),
             "calibration": calibration,
             "tile_id_pattern": "tile_00, tile_01, ...",
+            "screenshot_capture_command": "/usr/sbin/screencapture -x -D 1 <path>",
             "tile_summary_command": (
                 "python harness.py visual-log-tile {run_id} --keyword <keyword> "
                 "--tile-id <tile_id> --scroll-distance-px <px> "
@@ -407,15 +434,22 @@ only the keyword capture tasks listed below, then stop. Do not create new daily
 plans, choose new keywords, retry future sessions, or decide final exception
 strategy.
 
+Communication rule:
+- Communicate progress, blockers, final summaries, and inbox item copy to the
+  user in Chinese by default. Keep machine-readable JSON keys and status values
+  exactly as specified below.
+
 Chrome foreground rule:
 - If the current screenshot shows Codex, Cursor, Terminal, or another app, do
   not classify that as Taobao/Chrome failure. It usually only means Chrome is
   not foreground.
 - First try to bring Chrome forward visually: taskbar/Dock click, Alt-Tab on
-  Windows, or Cmd-Tab on macOS.
-- If Chrome is not visible after switching, run the platform launcher from the
-  repository root. It reuses the dedicated-profile Chrome if already running and
-  starts it only when needed:
+  Windows, or Cmd-Tab on macOS. A human clicking Codex to check progress is not
+  Chrome instability.
+- If Chrome is not visible after visual switching, run the platform launcher
+  from the repository root. It reuses any already running logged-in Chrome
+  window and must not start a duplicate collection window/profile merely
+  because Codex was foreground:
   - Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start_taobao_visual_chrome.ps1`
   - macOS: `bash scripts/start_taobao_visual_chrome.sh`
 - After the launcher, take a fresh system screenshot and continue from the
@@ -449,6 +483,9 @@ State boundary:
 Data boundary:
 - Use system screenshots only. Do not read DOM, HTML, AX tree, selector maps,
   cookies, storage, network payloads, page source, or JavaScript-evaluated data.
+- Do not fall back to separate Computer Use tools/plugins for Taobao collection.
+  If macOS opens Accessibility/System Settings or an automation permission
+  panel, stop as setup drift instead of clicking through it.
 - Do not output final product rows, price trust decisions, business filtering,
   statistical assignment, or recovery strategy. Codex will review screenshots
   and run visual-ingest later.
@@ -510,9 +547,10 @@ Suggested screenshot prefixes: {prefixes}{manual}
 Use the midscene-computer MCP server from Codex App. The browser must already be
 the visible, foreground Chrome window using the dedicated Taobao collection
 profile. If another app is foreground, bring Chrome forward or run the project
-launcher before deciding page state. Midscene computer should only use system
-screenshots for observation and system mouse, keyboard, and scroll events for
-action.
+launcher before deciding page state. Do not start a second Chrome profile or
+declare Chrome unavailable when the screenshot simply shows Codex in front of an
+already logged-in Chrome. Midscene computer should only use system screenshots
+for observation and system mouse, keyboard, and scroll events for action.
 
 Architecture:
 - Codex is the long-running task agent: scheduling, checkpointing, abnormal
@@ -558,6 +596,9 @@ Viewport tile sampling:
   {calibration["tile_scroll_distance_px"]}px with about {calibration["tile_overlap_px"]}px overlap.
 - Capture viewport tiles in order: tile_00 for the first visible results screen,
   then tile_01, tile_02, etc. after each page-level scroll.
+- On macOS, persist each visible viewport tile with:
+  `/usr/sbin/screencapture -x -D 1 <path>`.
+  Do not use bare `screencapture` without the absolute path and display id.
 - After each tile capture, append a lightweight tile summary with:
   `python harness.py visual-log-tile {payload["run_id"]} --keyword {json.dumps(payload["keyword"], ensure_ascii=False)}
   --tile-id <tile_id> --scroll-distance-px <px> --rough-state <state> --image <path>`.
@@ -580,6 +621,9 @@ Viewport tile sampling:
 
 Safety boundary:
 - Do not connect to browser CDP for this Taobao mainline flow.
+- Do not use the separate Computer Use plugin/tool fallback for Taobao
+  collection. If Accessibility/System Settings or a GUI automation permission
+  prompt appears, stop and report setup drift.
 - Do not read DOM, HTML, AX tree, selector maps, cookies, storage, network
   payloads, or page source.
 - Do not use JavaScript eval in the page.
@@ -599,15 +643,16 @@ Steps:
 1. Confirm Chrome is foreground and on the dedicated profile. If the screenshot
    shows Codex, Cursor, Terminal, or another app, this is not a blocker; switch
    to Chrome first with taskbar/Dock click, Alt-Tab on Windows, or Cmd-Tab on
-   macOS. If Chrome is not visible, run the platform launcher from the
-   repository root:
+   macOS. Do not treat a human opening Codex to check progress as Chrome
+   instability. If Chrome is not visible after visual switching, run the
+   platform launcher from the repository root:
    - Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start_taobao_visual_chrome.ps1`
    - macOS: `bash scripts/start_taobao_visual_chrome.sh`
-   These launchers reuse the dedicated-profile Chrome if it is already running
-   and start it only when needed. After running the launcher, take a fresh
-   system screenshot and continue from the visible Chrome window. Ask a human
-   only for login/captcha/security verification or if Chrome still cannot be
-   foregrounded.
+   These launchers first focus any running logged-in Chrome and avoid starting a
+   duplicate profile/window. They only start the dedicated profile when no
+   Chrome process is running. After running the launcher, take a fresh system
+   screenshot and continue from the visible Chrome window. Ask a human only for
+   login/captcha/security verification or if Chrome still cannot be foregrounded.
 2. Use system screenshot observation to verify initialization before any
    keyword work:
    - Chrome is the visible foreground app.

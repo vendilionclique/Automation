@@ -16,9 +16,15 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from modules.input_reader import build_search_keywords
-from modules.session_capsule import RUNNABLE_STATUSES, build_session_capsule
+from modules.session_capsule import RUNNABLE_STATUSES, build_session_capsule, session_dir_for
 from modules.task_state import TaskRecord
 from modules.utils import ConfigManager, ensure_dir, get_project_root
+from modules.visual_control import (
+    control_blocks_dispatch,
+    load_control_state,
+    session_runtime_summary,
+    write_worker_runtime,
+)
 
 
 @dataclass
@@ -279,6 +285,281 @@ def auto_tick_daily_collection(
         result["request_result"] = request_result
         result["status"] = scheduler_status(plan_id)
     return result
+
+
+def heartbeat_daily_collection(
+    raw_input_file: Optional[str] = None,
+    config_file: str = "config/settings.ini",
+    plan_id: Optional[str] = None,
+    session_index: Optional[int] = None,
+    limit: Optional[int] = None,
+    random_sample: Optional[int] = None,
+    random_seed: Optional[int] = None,
+    session_count: Optional[int] = None,
+    mode: str = "all",
+    manual_state: Optional[str] = None,
+    force_lease: bool = False,
+) -> Dict[str, Any]:
+    """
+    Short-lived scheduler heartbeat for daily visual collection.
+
+    The heartbeat owns only control-plane decisions. It may sync existing worker
+    output and prepare Midscene contracts, but it never opens Chrome, touches
+    Taobao, or starts a background capture process.
+    """
+    mode = str(mode or "all").strip().lower()
+    if mode not in {"sync", "prepare", "dispatch", "all"}:
+        raise ValueError(f"不支持 heartbeat mode: {mode}")
+
+    plan_id = plan_id or _today_plan_id()
+    control = load_control_state(plan_id)
+    plan_block = control_blocks_dispatch(control)
+    if plan_block.get("blocked"):
+        return _heartbeat_paused(plan_id, session_index, control, plan_block)
+
+    result: Dict[str, Any] = {
+        "ok": True,
+        "action": "noop",
+        "mode": mode,
+        "plan_id": plan_id,
+        "session_index": session_index,
+        "control": control,
+        "sync": [],
+        "prepare": None,
+        "dispatch": None,
+        "status": _status_if_plan_exists(plan_id),
+    }
+
+    if mode in {"sync", "all"}:
+        result["sync"] = _sync_existing_worker_results(plan_id, session_index)
+        if result["sync"]:
+            result["action"] = "synced"
+
+    if mode in {"prepare", "all"}:
+        tick = auto_tick_daily_collection(
+            raw_input_file=raw_input_file,
+            config_file=config_file,
+            plan_id=plan_id,
+            session_index=session_index,
+            limit=limit,
+            random_sample=random_sample,
+            random_seed=random_seed,
+            session_count=session_count,
+            prepare_requests=False,
+            force_lease=force_lease,
+        )
+        result["prepare"] = tick
+        result["session_index"] = tick.get("session_index") or session_index
+        result["status"] = tick.get("status") or _status_if_plan_exists(plan_id)
+        if tick.get("action") == "noop":
+            result["action"] = result["action"] if result["action"] != "noop" else "noop"
+            result["reason"] = tick.get("reason", "")
+        else:
+            chosen = int(tick.get("session_index") or 0)
+            session_block = control_blocks_dispatch(control, chosen)
+            if session_block.get("blocked"):
+                return _heartbeat_paused(plan_id, chosen, control, session_block)
+
+            from modules.visual_pipeline import run_visual_collection
+
+            request_result = run_visual_collection(
+                plan_id,
+                config_file=config_file,
+                limit=limit,
+                manual_state=manual_state,
+                session_index=chosen,
+                force_lease=force_lease,
+            )
+            tick["request_result"] = request_result
+            tick["action"] = "requests_prepared"
+            result["action"] = "prepared"
+            result["prepare"] = tick
+            result["status"] = scheduler_status(plan_id)
+            _write_heartbeat_runtime(plan_id, chosen, "prepared", result)
+
+    if mode in {"dispatch", "all"}:
+        dispatch_session = int(result.get("session_index") or session_index or 0)
+        if dispatch_session <= 0 and mode == "dispatch":
+            dispatch_session = _dispatch_session_from_existing_contracts(plan_id)
+            result["session_index"] = dispatch_session or result.get("session_index")
+        if dispatch_session > 0:
+            session_block = control_blocks_dispatch(control, dispatch_session)
+            if session_block.get("blocked"):
+                return _heartbeat_paused(plan_id, dispatch_session, control, session_block)
+            dispatch = _dispatch_advice(plan_id, dispatch_session)
+            result["dispatch"] = dispatch
+            if dispatch.get("contract_exists"):
+                result["action"] = "dispatch_advised"
+                _write_heartbeat_runtime(plan_id, dispatch_session, "dispatch_advised", result)
+            elif result["action"] == "noop":
+                result["reason"] = "no_prepared_contract"
+
+    if result.get("session_index"):
+        result["runtime"] = session_runtime_summary(plan_id, int(result["session_index"]))
+    result["status"] = _status_if_plan_exists(plan_id)
+    return result
+
+
+def _heartbeat_paused(
+    plan_id: str,
+    session_index: Optional[int],
+    control: Dict[str, Any],
+    block: Dict[str, Any],
+) -> Dict[str, Any]:
+    if session_index is not None:
+        _write_heartbeat_runtime(
+            plan_id,
+            int(session_index),
+            "paused",
+            {"block": block, "control": control},
+        )
+    return {
+        "ok": True,
+        "action": "paused",
+        "plan_id": plan_id,
+        "session_index": session_index,
+        "reason": block.get("reason", "control_blocked"),
+        "control": control,
+        "block": block,
+        "status": _status_if_plan_exists(plan_id),
+    }
+
+
+def _sync_existing_worker_results(
+    plan_id: str,
+    session_index: Optional[int],
+) -> List[Dict[str, Any]]:
+    from modules.visual_pipeline import sync_midscene_worker_results
+
+    synced = []
+    for idx in _sync_candidate_sessions(plan_id, session_index):
+        worker_result = _session_worker_result_path(plan_id, idx)
+        if not os.path.exists(worker_result):
+            continue
+        sync_result = sync_midscene_worker_results(plan_id, idx)
+        sync_result["worker_result"] = worker_result
+        synced.append(sync_result)
+        _write_heartbeat_runtime(
+            plan_id,
+            idx,
+            "synced",
+            {"sync_result": sync_result},
+        )
+    return synced
+
+
+def _sync_candidate_sessions(plan_id: str, session_index: Optional[int]) -> List[int]:
+    if session_index is not None:
+        return [int(session_index)]
+    status = _status_if_plan_exists(plan_id)
+    session_keys = status.get("by_session", {}).keys()
+    indices = []
+    for key in session_keys:
+        try:
+            indices.append(int(key))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(indices))
+
+
+def _dispatch_session_from_existing_contracts(plan_id: str) -> int:
+    for idx in _sync_candidate_sessions(plan_id, None):
+        if os.path.exists(_session_contract_path(plan_id, idx)):
+            return idx
+    return 0
+
+
+def _dispatch_advice(plan_id: str, session_index: int) -> Dict[str, Any]:
+    contract = _session_contract_path(plan_id, session_index)
+    instructions = os.path.join(
+        session_dir_for(plan_id, session_index),
+        "midscene_session_worker_instructions.md",
+    )
+    result_path = _session_worker_result_path(plan_id, session_index)
+    return {
+        "ok": True,
+        "plan_id": plan_id,
+        "session_index": int(session_index),
+        "contract": contract,
+        "contract_exists": os.path.exists(contract),
+        "instructions": instructions,
+        "instructions_exists": os.path.exists(instructions),
+        "expected_result": result_path,
+        "worker_commands": {
+            "capture": f"python3 harness.py visual-capture-worker --contract {json.dumps(contract, ensure_ascii=False)}",
+            "extract": f"python3 harness.py visual-extract-worker --plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}",
+        },
+        "suggested_command": (
+            f"python3 harness.py visual-sync-worker {plan_id} --session {int(session_index)}"
+        ),
+        "notes": (
+            "v1 heartbeat does not start a background worker. Hand the contract "
+            "to the bounded Midscene computer worker, then run the suggested "
+            "sync command after session_worker_result.json exists."
+        ),
+    }
+
+
+def _session_contract_path(plan_id: str, session_index: int) -> str:
+    return os.path.join(
+        session_dir_for(plan_id, session_index),
+        "midscene_session_worker_request.json",
+    )
+
+
+def _session_worker_result_path(plan_id: str, session_index: int) -> str:
+    return os.path.join(session_dir_for(plan_id, session_index), "session_worker_result.json")
+
+
+def _write_heartbeat_runtime(
+    plan_id: str,
+    session_index: int,
+    status: str,
+    payload: Dict[str, Any],
+) -> None:
+    compact_payload = {
+        "action": payload.get("action", status),
+        "mode": payload.get("mode", ""),
+        "reason": payload.get("reason", ""),
+        "plan_id": payload.get("plan_id", plan_id),
+        "session_index": payload.get("session_index", session_index),
+    }
+    if payload.get("sync_result") is not None:
+        compact_payload["sync_result"] = payload.get("sync_result")
+    if payload.get("sync") is not None:
+        compact_payload["sync_count"] = len(payload.get("sync") or [])
+    if payload.get("dispatch") is not None:
+        dispatch = payload.get("dispatch") or {}
+        compact_payload["dispatch"] = {
+            "contract": dispatch.get("contract", ""),
+            "contract_exists": dispatch.get("contract_exists", False),
+            "expected_result": dispatch.get("expected_result", ""),
+        }
+    write_worker_runtime(
+        plan_id,
+        session_index,
+        "capture",
+        status,
+        heartbeat=True,
+        heartbeat_action=compact_payload["action"],
+        heartbeat_payload=compact_payload,
+    )
+
+
+def _status_if_plan_exists(plan_id: str) -> Dict[str, Any]:
+    try:
+        return scheduler_status(plan_id)
+    except FileNotFoundError:
+        return {
+            "plan_id": plan_id,
+            "selected_count": 0,
+            "daily_keyword_budget": 0,
+            "daily_session_count": 0,
+            "by_status": {},
+            "by_session": {},
+            "task_dir": os.path.join(get_project_root(), "data", "tasks", plan_id),
+            "exists": False,
+        }
 
 
 def _select_candidates(

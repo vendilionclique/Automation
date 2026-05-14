@@ -15,20 +15,20 @@ if (-not (Test-Path -LiteralPath $CodexConfig)) {
 
 $configText = Get-Content -LiteralPath $CodexConfig -Raw -Encoding UTF8
 $MidsceneAllowedTools = @(
-    "computer_list_displays",
     "ListDisplays",
     "computer_connect",
     "computer_disconnect",
+    "computer_list_displays",
     "take_screenshot",
     "Tap",
-    "Input",
-    "ClearInput",
-    "KeyboardPress",
-    "Scroll",
-    "MouseMove",
     "DoubleClick",
     "RightClick",
+    "MouseMove",
+    "Input",
+    "Scroll",
+    "KeyboardPress",
     "DragAndDrop",
+    "ClearInput",
     "act",
     "assert"
 )
@@ -36,7 +36,7 @@ $MidsceneAllowedTools = @(
 $toolBlocks = ($MidsceneAllowedTools | ForEach-Object {
 @"
 [mcp_servers.midscene-computer.tools.$_]
-approval_mode = "never"
+approval_mode = "approve"
 
 "@
 }) -join ""
@@ -46,6 +46,9 @@ $serverBlock = @"
 command = "powershell"
 args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$($McpLauncher -replace '\\', '\\')"]
 enabled = true
+startup_timeout_sec = 30
+tool_timeout_sec = 180
+default_tools_approval_mode = "approve"
 
 $toolBlocks
 "@
@@ -58,6 +61,41 @@ if ($configText -match $pattern) {
         $configText += "`n"
     }
     $configText += "`n" + $serverBlock
+}
+
+$profileBlock = @"
+[profiles.taobao_visual_cron]
+model = "gpt-5.5"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+cwd = "$($RootDir -replace '\\', '\\')"
+
+"@
+
+$profilePattern = '(?ms)^\[profiles\.taobao_visual_cron\]\r?\n.*?(?=^\[|\z)'
+if ($configText -match $profilePattern) {
+    $configText = [regex]::Replace($configText, $profilePattern, $profileBlock)
+} else {
+    if ($configText.Length -gt 0 -and -not $configText.EndsWith("`n")) {
+        $configText += "`n"
+    }
+    $configText += "`n" + $profileBlock
+}
+
+if ($env:CODEX_SET_DEFAULT_TAOBAO_VISUAL_CRON) {
+    $defaultLines = [ordered]@{
+        "model" = 'model = "gpt-5.5"'
+        "sandbox_mode" = 'sandbox_mode = "danger-full-access"'
+        "approval_policy" = 'approval_policy = "never"'
+    }
+    foreach ($entry in $defaultLines.GetEnumerator()) {
+        $keyPattern = "(?m)^$([regex]::Escape($entry.Key))\s*=.*$"
+        if ($configText -match $keyPattern) {
+            $configText = [regex]::Replace($configText, $keyPattern, $entry.Value, 1)
+        } else {
+            $configText = $entry.Value + "`n" + $configText
+        }
+    }
 }
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($CodexConfig, $configText, $utf8NoBom)
@@ -91,6 +129,7 @@ export MIDSCENE_REPORT_QUIET="true"
 }
 
 Write-Host "Codex MCP configured: $CodexConfig"
+Write-Host "Codex cron profile configured: taobao_visual_cron"
 Write-Host "Codex project skill synced: $SkillTarget"
 Write-Host "Midscene env file: $LocalEnv"
 Write-Host "Cursor project MCP config is tracked at .cursor/mcp.json"

@@ -11,14 +11,26 @@ WINDOW_HEIGHT="${TAOBAO_WINDOW_HEIGHT:-1000}"
 START_URL="${TAOBAO_START_URL:-https://www.taobao.com/}"
 
 mkdir -p "${PROFILE_DIR}"
+PROFILE_DIR="$(cd "${PROFILE_DIR}" && pwd)"
+
+focus_chrome() {
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e 'tell application "Google Chrome" to activate' >/dev/null 2>&1 || true
+  fi
+}
 
 if pgrep -f -- "--user-data-dir=${PROFILE_DIR}" >/dev/null; then
   echo "Taobao visual Chrome is already running with profile:"
   echo "  ${PROFILE_DIR}"
-  if command -v osascript >/dev/null 2>&1; then
-    osascript -e 'tell application "Google Chrome" to activate' >/dev/null 2>&1 || true
-  fi
+  focus_chrome
   echo "Foreground focus attempted. Reuse the existing Chrome window."
+  exit 0
+fi
+
+if pgrep -x "Google Chrome" >/dev/null; then
+  focus_chrome
+  echo "Google Chrome is already running. Foreground focus attempted."
+  echo "Reuse the visible logged-in Chrome window; not starting a duplicate profile."
   exit 0
 fi
 
@@ -36,8 +48,6 @@ args=(
 
 "${CHROME_BIN}" "${args[@]}" &
 sleep 2
-if command -v osascript >/dev/null 2>&1; then
-  osascript -e 'tell application "Google Chrome" to activate' >/dev/null 2>&1 || true
-fi
+focus_chrome
 echo "Started Taobao visual Chrome with profile:"
 echo "  ${PROFILE_DIR}"
