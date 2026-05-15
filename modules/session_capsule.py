@@ -296,6 +296,14 @@ Read the local files named above, then run this bounded session:
 
 Operational rules:
 - Codex is a short-lived executor for this session. Durable state is in files.
+- For large project development, use a subagent team by default. The main agent
+  coordinates, reviews, integrates, and reports; bounded implementation,
+  exploration, and test-fix work should go to worker/explorer subagents when
+  available.
+- If context is running low or compaction appears unreliable, save progress into
+  this capsule, summary.json, events.jsonl, task_events.jsonl, control.json, or
+  visual_tasks.json before continuing in a fresh thread. The fresh thread must
+  read AGENTS.md and these files instead of relying on old chat history.
 - visual-session-run prepares a bounded Midscene small-session worker contract.
   Midscene may continuously capture the selected keywords inside that contract,
   but it does not own daily scheduling, future retries, or final exception

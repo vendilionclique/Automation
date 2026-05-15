@@ -25,9 +25,11 @@ MCP_REQUIRED_TOOLS = {
     "computer_connect",
     "take_screenshot",
     "act",
+    "Scroll",
 }
 MCP_OPTIONAL_TOOLS = {"assert"}
 REAL_NOT_AVAILABLE_STATUS = "real_not_available"
+VLM_RESOURCE_UNAVAILABLE_REASON = "vlm_resource_unavailable"
 
 
 def run_capture_worker(contract_path: str) -> Dict[str, Any]:
@@ -283,15 +285,14 @@ def _capture_keyword_with_mcp(
             )
             if tile_index < max_tiles - 1:
                 _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"before_scroll_{tile_index + 1}")
-                _call_act(
+                _scroll_to_next_tile(
                     client,
-                    _next_tile_prompt(
-                        keyword=keyword,
-                        tile_index=tile_index + 1,
-                        scroll_distance=scroll_distance,
-                    ),
+                    scroll_distance=scroll_distance,
+                    allow_act=allow_act,
+                    keyword=keyword,
+                    tile_index=tile_index + 1,
                 )
-                _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_act_{tile_index + 1}")
+                _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_{tile_index + 1}")
 
         elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
@@ -305,6 +306,25 @@ def _capture_keyword_with_mcp(
             rough_state="visible_results_unverified",
             stop_reason="captured",
             notes="Captured viewport tiles through Midscene computer MCP; product extraction is deferred.",
+            screenshots=screenshots,
+            elapsed_seconds=elapsed,
+        )
+    except VlmResourceUnavailableError as exc:
+        elapsed = round(time.monotonic() - started, 3)
+        return _write_keyword_result(
+            task=task,
+            run_id=run_id,
+            session_index=session_index,
+            task_dir=task_dir,
+            fallback_index=fallback_index,
+            mode="real",
+            status="needs_review",
+            rough_state=VLM_RESOURCE_UNAVAILABLE_REASON,
+            stop_reason=VLM_RESOURCE_UNAVAILABLE_REASON,
+            notes=(
+                "Midscene VLM resource package is unavailable; stopping this "
+                f"session without retry or fallback: {exc}"
+            ),
             screenshots=screenshots,
             elapsed_seconds=elapsed,
         )
@@ -485,6 +505,7 @@ def _write_keyword_result(
         or "",
         "elapsed_seconds": elapsed_seconds,
         "stop_reason": stop_reason,
+        "failure_reason": stop_reason if status != "captured" else "",
         "notes": notes,
         "capture_plan": capture_plan,
         "result_path": result_path,
@@ -515,6 +536,7 @@ def _write_keyword_result(
         "mode": mode,
         "result_path": result_path,
         "stop_reason": stop_reason,
+        "failure_reason": stop_reason if status != "captured" else "",
     }
 
 
@@ -650,7 +672,77 @@ class MidsceneStdioClient:
 
 
 def _call_act(client: MidsceneStdioClient, prompt: str) -> None:
-    client.call_tool("act", {"prompt": prompt})
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            client.call_tool("act", {"prompt": prompt})
+            return
+        except Exception as exc:
+            if _is_vlm_resource_unavailable_error(exc):
+                raise VlmResourceUnavailableError(str(exc)) from exc
+            if attempt >= attempts or not _retryable_act_error(exc):
+                raise
+            time.sleep(8 * attempt)
+
+
+def _retryable_act_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    retryable_markers = [
+        "429",
+        "rate limit",
+        "too many requests",
+        "failed to call ai model service",
+    ]
+    return any(marker in text for marker in retryable_markers)
+
+
+class VlmResourceUnavailableError(RuntimeError):
+    """Raised when the VLM account has no usable resource package."""
+
+
+def _is_vlm_resource_unavailable_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    markers = [
+        "余额不足或无可用资源包",
+        "无可用资源包",
+        "code: 1113",
+        "code 1113",
+        '"code":1113',
+        '"code": 1113',
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _scroll_to_next_tile(
+    client: MidsceneStdioClient,
+    scroll_distance: int,
+    allow_act: bool,
+    keyword: str,
+    tile_index: int,
+) -> None:
+    try:
+        client.call_tool(
+            "Scroll",
+            {
+                "direction": "down",
+                "distance": scroll_distance,
+                "scrollType": "singleAction",
+            },
+        )
+        return
+    except Exception as exc:
+        if _is_vlm_resource_unavailable_error(exc):
+            raise VlmResourceUnavailableError(str(exc)) from exc
+        if not allow_act:
+            raise RuntimeError(f"midscene_scroll_tool_failed: {exc}") from exc
+    _call_act(
+        client,
+        _next_tile_prompt(
+            keyword=keyword,
+            tile_index=tile_index,
+            scroll_distance=scroll_distance,
+        ),
+    )
 
 
 def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:

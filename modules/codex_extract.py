@@ -167,11 +167,16 @@ def dispatch_codex_extract_requests(
     for request_path in requests:
         state_path = os.path.join(os.path.dirname(request_path), "launch_state.json")
         state = _load_json_if_exists(state_path)
+        stale_state = _mark_stale_launch_if_dead(state_path, state)
+        if stale_state:
+            state = stale_state
         if _launch_active(state):
             launched.append({"request": request_path, "status": "already_running", "state": state})
             continue
         command = _launch_command(request_path, extract_cfg)
         item = {"request": request_path, "command": command, "status": "advised"}
+        if state.get("status") == "stale":
+            item["previous_launch_state"] = state
         if start:
             item.update(_start_codex_worker(request_path, command))
         launched.append(item)
@@ -183,6 +188,7 @@ def dispatch_codex_extract_requests(
         "count": len(launched),
         "active_workers": active_workers,
         "max_parallel": int(extract_cfg["max_parallel"]),
+        "effective_extract_config": _effective_extract_config(extract_cfg),
         "workers": launched,
     }
     write_worker_runtime(
@@ -194,6 +200,7 @@ def dispatch_codex_extract_requests(
         active_workers=active_workers,
         max_parallel=int(extract_cfg["max_parallel"]),
         dispatched=len(launched),
+        effective_extract_config=_effective_extract_config(extract_cfg),
     )
     return summary
 
@@ -289,6 +296,7 @@ def _pending_requests(plan_id: str, session_index: int) -> List[str]:
         apply_result = _load_json_if_exists(apply_path)
         if apply_result.get("ok"):
             continue
+        _mark_stale_launch_if_dead(os.path.join(dirpath, "launch_state.json"))
         requests.append(request_path)
     return sorted(requests)
 
@@ -298,14 +306,19 @@ def _start_codex_worker(request_path: str, command: List[str]) -> Dict[str, Any]
     stdout_path = os.path.join(contract_dir, "codex_worker.stdout.jsonl")
     stderr_path = os.path.join(contract_dir, "codex_worker.stderr.log")
     state_path = os.path.join(contract_dir, "launch_state.json")
-    with open(stdout_path, "ab") as stdout, open(stderr_path, "ab") as stderr:
+    prompt = _read_text(str(_load_json(request_path).get("prompt") or ""))
+    with open(stdout_path, "wb") as stdout, open(stderr_path, "wb") as stderr:
         proc = subprocess.Popen(
             command,
             cwd=get_project_root(),
+            stdin=subprocess.PIPE,
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
         )
+        if proc.stdin:
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
     state = {
         "status": "running",
         "pid": proc.pid,
@@ -322,7 +335,6 @@ def _start_codex_worker(request_path: str, command: List[str]) -> Dict[str, Any]
 
 def _launch_command(request_path: str, extract_cfg: Dict[str, Any]) -> List[str]:
     request = _load_json(request_path)
-    prompt_path = str(request.get("prompt") or "")
     screenshots = [path for path in request.get("screenshots", []) if os.path.exists(str(path))]
     command = [extract_cfg["codex_bin"], "exec", "-C", get_project_root()]
     if extract_cfg.get("profile"):
@@ -331,15 +343,20 @@ def _launch_command(request_path: str, extract_cfg: Dict[str, Any]) -> List[str]
         command.extend(["-m", extract_cfg["model"]])
     if extract_cfg.get("sandbox"):
         command.extend(["-s", extract_cfg["sandbox"]])
+        command.extend(["-c", _toml_string_override("sandbox_mode", extract_cfg["sandbox"])])
     if extract_cfg.get("approval_policy"):
-        command.extend(["-a", extract_cfg["approval_policy"]])
+        command.extend(["-c", _toml_string_override("approval_policy", extract_cfg["approval_policy"])])
+    for override in extract_cfg.get("config_overrides") or []:
+        command.extend(["-c", override])
+    if extract_cfg.get("ignore_rules"):
+        command.append("--ignore-rules")
     if extract_cfg.get("json"):
         command.append("--json")
     if extract_cfg.get("ephemeral"):
         command.append("--ephemeral")
     for image in screenshots:
         command.extend(["-i", image])
-    command.append(_read_text(prompt_path))
+    command.append("-")
     return command
 
 
@@ -353,6 +370,8 @@ def _codex_extract_config(config: ConfigManager) -> Dict[str, Any]:
         "approval_policy": config.get(section, "approval_policy", fallback="never").strip(),
         "json": config.getboolean(section, "json_events", fallback=True),
         "ephemeral": config.getboolean(section, "ephemeral", fallback=True),
+        "ignore_rules": config.getboolean(section, "ignore_rules", fallback=True),
+        "config_overrides": _split_config_overrides(config.get(section, "config_overrides", fallback="")),
         "max_parallel": max(1, config.getint(section, "max_parallel", fallback=1)),
     }
 
@@ -368,7 +387,7 @@ def _build_extract_prompt(request: Dict[str, Any]) -> str:
     screenshots = "\n".join(f"- {path}" for path in request.get("screenshots", []))
     return f"""# Codex Extract Worker
 
-You are a short-lived Codex extract worker for Taobao MTG visible-price evidence.
+You are a short-lived extract worker. Do not read AGENTS.md, skills, README, project docs, or repository rules. The instructions in this prompt are complete for this task.
 
 Request JSON: {request_path_label(request)}
 Plan/session: {request["plan_id"]} / {request["session_index"]}
@@ -378,11 +397,13 @@ Rows output: {rows_output}
 Screenshots attached to this run are the only source of product data:
 {screenshots}
 
-Rules:
+Boundaries:
 - Extract product rows only from visible screenshot pixels.
 - Do not open or control Chrome.
 - Do not read DOM, HTML, AX tree, selector maps, cookies, storage, network payloads, page source, or JavaScript-evaluated page data.
 - Do not perform business filtering; just transcribe visible product rows.
+
+Extraction rules:
 - Use one row per visible product card with a visible title and price.
 - If a field is not visible, leave it empty.
 - Price must be numeric text only; for a visible price range, use the lowest visible price.
@@ -530,6 +551,33 @@ def _launch_active(state: Dict[str, Any]) -> bool:
     pid = state.get("pid")
     if not pid or str(state.get("status") or "") != "running":
         return False
+    return _pid_exists(pid)
+
+
+def _pid_exists(pid: Any) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _mark_stale_launch_if_dead(state_path: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not state_path or not os.path.exists(state_path):
+        return {}
+    state = dict(state if state is not None else _load_json_if_exists(state_path))
+    if str(state.get("status") or "") != "running":
+        return state
+    pid = state.get("pid")
+    if _pid_exists(pid):
+        return state
+    state["status"] = "stale"
+    state["stale_reason"] = "previous_pid_dead"
+    state["previous_status"] = "running"
+    state["previous_pid"] = pid
+    state["updated_at"] = _now()
+    _write_json(state_path, state)
+    return state
 
 
 def _active_launch_count(plan_id: str, session_index: int) -> int:
@@ -540,14 +588,38 @@ def _active_launch_count(plan_id: str, session_index: int) -> int:
     for dirpath, _, filenames in os.walk(root):
         if "launch_state.json" not in filenames:
             continue
-        if _launch_active(_load_json_if_exists(os.path.join(dirpath, "launch_state.json"))):
+        state_path = os.path.join(dirpath, "launch_state.json")
+        state = _mark_stale_launch_if_dead(state_path)
+        if _launch_active(state):
             count += 1
     return count
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except OSError:
-        return False
+
+
+def _effective_extract_config(extract_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "codex_bin": extract_cfg.get("codex_bin", ""),
+        "profile": extract_cfg.get("profile", ""),
+        "model": extract_cfg.get("model", ""),
+        "sandbox": extract_cfg.get("sandbox", ""),
+        "approval_policy": extract_cfg.get("approval_policy", ""),
+        "json_events": bool(extract_cfg.get("json")),
+        "ephemeral": bool(extract_cfg.get("ephemeral")),
+        "ignore_rules": bool(extract_cfg.get("ignore_rules")),
+        "max_parallel": int(extract_cfg.get("max_parallel") or 1),
+    }
+
+
+def _toml_string_override(key: str, value: str) -> str:
+    return f"{key}={json.dumps(str(value))}"
+
+
+def _split_config_overrides(raw: str) -> List[str]:
+    overrides = []
+    for line in str(raw or "").splitlines():
+        item = line.strip()
+        if item and not item.startswith("#"):
+            overrides.append(item)
+    return overrides
 
 
 def _dedupe_keep_order(values: Iterable[str]) -> List[str]:

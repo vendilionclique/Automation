@@ -59,6 +59,9 @@ class MidsceneComputerConfig:
     allow_midscene_act: bool = True
     allow_midscene_query: bool = False
     final_extraction_owner: str = "codex"
+    no_fallback: bool = True
+    resource_unavailable_stop: bool = True
+    scroll_strategy: str = "fixed_scroll_tool_first"
     micro_pause_short: str = "0.8,3,0.82"
     micro_pause_medium: str = "3,6,0.14"
     micro_pause_long: str = "6,10,0.04"
@@ -110,13 +113,24 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
             config.get(section, "screenshot_prefixes", fallback="initial,results,scroll_1")
         ),
         model_enabled=config.getboolean(model_section, "enabled", fallback=False),
-        model_name=config.get(model_section, "model_name", fallback=""),
-        model_family=config.get(model_section, "model_family", fallback=""),
-        model_base_url=config.get(model_section, "base_url", fallback=""),
+        model_name=config.get(model_section, "model_name", fallback="glm-4.6v"),
+        model_family=config.get(model_section, "model_family", fallback="glm-v"),
+        model_base_url=config.get(
+            model_section,
+            "base_url",
+            fallback="https://open.bigmodel.cn/api/paas/v4",
+        ),
         model_api_key_env=config.get(model_section, "api_key_env", fallback="MIDSCENE_MODEL_API_KEY"),
         allow_midscene_act=config.getboolean(model_section, "allow_midscene_act", fallback=True),
         allow_midscene_query=config.getboolean(model_section, "allow_midscene_query", fallback=False),
         final_extraction_owner=config.get(model_section, "final_extraction_owner", fallback="codex"),
+        no_fallback=config.getboolean(model_section, "no_fallback", fallback=True),
+        resource_unavailable_stop=config.getboolean(
+            model_section, "resource_unavailable_stop", fallback=True
+        ),
+        scroll_strategy=config.get(
+            model_section, "scroll_strategy", fallback="fixed_scroll_tool_first"
+        ),
         micro_pause_short=config.get(behavior_section, "micro_pause_short", fallback="0.8,3,0.82"),
         micro_pause_medium=config.get(behavior_section, "micro_pause_medium", fallback="3,6,0.14"),
         micro_pause_long=config.get(behavior_section, "micro_pause_long", fallback="6,10,0.04"),
@@ -189,6 +203,9 @@ def write_midscene_computer_request(
             "allow_midscene_act": config.allow_midscene_act,
             "allow_midscene_query": config.allow_midscene_query,
             "final_extraction_owner": config.final_extraction_owner,
+            "no_fallback": config.no_fallback,
+            "resource_unavailable_stop": config.resource_unavailable_stop,
+            "scroll_strategy": config.scroll_strategy,
         },
         "visual_behavior": {
             "micro_pause_distribution": {
@@ -362,6 +379,13 @@ def write_midscene_session_worker_contract(
             "allow_midscene_act": config.allow_midscene_act,
             "allow_midscene_query": config.allow_midscene_query,
             "final_extraction_owner": config.final_extraction_owner,
+            "midscene_model_name": config.model_name,
+            "midscene_model_family": config.model_family,
+            "midscene_model_base_url": config.model_base_url,
+            "midscene_api_key_env": config.model_api_key_env,
+            "no_fallback": config.no_fallback,
+            "resource_unavailable_stop": config.resource_unavailable_stop,
+            "scroll_strategy": config.scroll_strategy,
             "forbidden_outputs": [
                 "final product rows",
                 "price trust decisions",
@@ -457,6 +481,18 @@ Chrome foreground rule:
 Keywords:
 {keywords or "- none"}
 
+Midscene VLM policy:
+- Model name: {payload["model_boundary"]["midscene_model_name"] or "<local env>"}
+- Model family: {payload["model_boundary"]["midscene_model_family"] or "<local env>"}
+- Base URL: {payload["model_boundary"]["midscene_model_base_url"] or "<local env>"}
+- No fallback: {payload["model_boundary"]["no_fallback"]}.
+- Resource-unavailable 429/code 1113 stop: {payload["model_boundary"]["resource_unavailable_stop"]}.
+- Scroll strategy: {payload["model_boundary"]["scroll_strategy"]}.
+- Treat `余额不足或无可用资源包`, `无可用资源包`, `code: 1113`, or
+  `code 1113` as VLM resource exhaustion, not ordinary QPS throttling. Stop the
+  current session as `vlm_resource_unavailable`; do not retry three times or
+  switch to another model.
+
 Allowed autonomy:
 - You may use bounded `act` or equivalent continuous visual actions to complete
   this small session.
@@ -494,6 +530,9 @@ Tile capture:
 - Max tiles per keyword: {payload["page_sampling"]["max_tiles_per_keyword"]}.
 - Estimated scroll distance per tile:
   {payload["page_sampling"]["calibration"]["tile_scroll_distance_px"]} px.
+- Scroll between tiles with the Midscene MCP `Scroll` tool using the fixed
+  distance above. Use `act` for scrolling only if the fixed scroll tool fails
+  and the error is not `vlm_resource_unavailable`.
 - After each tile, append the tile summary using:
   `{payload["page_sampling"]["tile_summary_command"]}`.
 
@@ -565,9 +604,16 @@ Midscene model boundary:
 - VLM enabled in project config: {model["midscene_vlm_enabled"]}
 - Model name: {model["midscene_model_name"] or "<local env>"}
 - Model family: {model["midscene_model_family"] or "<local env>"}
+- Base URL: {model["midscene_model_base_url"] or "<local env>"}
 - API key env: {model["midscene_api_key_env"]}
 - allow_midscene_act: {model["allow_midscene_act"]}
 - allow_midscene_query: {model["allow_midscene_query"]}
+- no_fallback: {model["no_fallback"]}
+- resource_unavailable_stop: {model["resource_unavailable_stop"]}
+- scroll_strategy: {model["scroll_strategy"]}
+- Resource-unavailable 429/code 1113 means the configured VLM package is not
+  usable. Stop the current session/keyword as `vlm_resource_unavailable` and do
+  not retry repeatedly or switch models.
 
 Natural pacing boundary:
 - Micro pauses are sampled from weighted segments: short={behavior["micro_pause_distribution"]["short"]},
@@ -628,9 +674,10 @@ Safety boundary:
 - Do not use Midscene Web bridge, Chrome extension bridge, or structural
   aiQuery extraction as the final product data source.
 - Do not navigate to additional pages unless PAGE_SAMPLING explicitly enables it.
-- For session capture, prefer bounded Midscene `act` tasks that reason from the
-  visible screen before acting. Do not let Python blindly type or scroll without
-  Midscene first establishing the visible context.
+- For session capture, use bounded Midscene `act` for search because it needs
+  visible search-box grounding. Between viewport tiles, use fixed-distance MCP
+  `Scroll` first to reduce VLM calls; use `act` for scrolling only after that
+  tool fails for a non-resource error.
 - If login, captcha, SMS, risk verification, pop-up blocking, white skeleton,
   or an unusual account state appears, stop and retain a screenshot.
 - Do not add to cart, favorite/unfavorite, delete cart items, claim rewards,

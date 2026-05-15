@@ -122,10 +122,13 @@ if (-not (Test-Path -LiteralPath $LocalEnv)) {
     $runDir = (Join-Path $RootDir "local\midscene-run") -replace '\\', '/'
     @"
 # Local Midscene computer VLM config. Gitignored; do not commit.
-export MIDSCENE_MODEL_NAME="glm-5v-turbo"
+export MIDSCENE_MODEL_NAME="glm-4.6v"
 export MIDSCENE_MODEL_API_KEY=""
 export MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"
 export MIDSCENE_MODEL_FAMILY="glm-v"
+export MIDSCENE_NO_FALLBACK="true"
+export TAOBAO_VLM_RESOURCE_UNAVAILABLE_STOP="true"
+export TAOBAO_SCROLL_STRATEGY="fixed_scroll_tool_first"
 export MIDSCENE_MODEL_REASONING_ENABLED="false"
 export MIDSCENE_RUN_DIR="$runDir"
 export MIDSCENE_REPORT_QUIET="true"

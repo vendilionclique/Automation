@@ -113,7 +113,7 @@ def cmd_setup(args):
             "SCHEDULER": ["daily_keyword_budget", "daily_session_count", "capture_freshness_days"],
             "VISUAL_BEHAVIOR": ["micro_pause_short", "inter_keyword_pause_min", "inter_keyword_pause_max"],
             "PAGE_SAMPLING": ["target_listings_per_keyword", "max_tiles_per_keyword", "retain_screenshots"],
-            "CODEX_EXTRACT": ["codex_bin", "profile", "model", "approval_policy"],
+            "CODEX_EXTRACT": ["codex_bin", "profile", "model", "approval_policy", "sandbox", "ignore_rules"],
         }
         for section, keys in optional_config.items():
             if not cfg.has_section(section):

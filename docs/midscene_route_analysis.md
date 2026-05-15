@@ -119,7 +119,7 @@ Codex 负责：
 - Midscene computer 作为系统级视觉操作层，可调用外部便宜 VLM 做 bounded session 内的可见屏幕判断和操作推进，例如前台确认、淘宝搜索框定位、搜索提交、结果页等待和 viewport 滚动。
 - 外部 VLM 的职责只到“看屏幕并辅助操作”为止；商品字段最终仍以保留截图为证据，由 Codex 复核后写入 `visual-ingest`。
 - Midscene MCP 通过 `local/start_midscene_computer_mcp.sh` 启动，读取本机 `local/midscene-computer.env`。真实 key 不进入仓库，也不写入 `~/.codex/config.toml`。
-- 当前本机非敏感模型配置记录为：`MIDSCENE_MODEL_NAME=glm-5v-turbo`、`MIDSCENE_MODEL_FAMILY=glm-v`、`MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`。
+- 历史记录（已过期，2026-05-15 不再推荐作为默认）：曾记录本机非敏感模型配置为 `MIDSCENE_MODEL_NAME=glm-5v-turbo`、`MIDSCENE_MODEL_FAMILY=glm-v`、`MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`。后续长期采集默认示例改为 4.6v 视觉模型（如 `glm-4.6v`，以智谱后台实际 id 为准），且不做模型 fallback；资源包不可用的 429/code1113 直接停止 session/keyword。
 
 边界策略：
 

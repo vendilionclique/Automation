@@ -7,8 +7,10 @@ read DOM, or contact Taobao.
 """
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional
 
 from modules.visual_capture import maybe_delete_screenshot
@@ -112,6 +114,7 @@ def ingest_rows(
     retain_screenshot: Optional[bool] = None,
     target_limit: int = 0,
     dedupe: bool = True,
+    enable_fuzzy_dedupe: bool = False,
 ) -> IngestResult:
     ensure_dir(task_dir)
     raw_jsonl = os.path.join(task_dir, "raw_rows.jsonl")
@@ -121,6 +124,8 @@ def ingest_rows(
     rows_received = len(normalized)
     existing_rows = _load_existing_rows(raw_jsonl)
     existing_keys = {_dedupe_key(row) for row in existing_rows} if dedupe else set()
+    fuzzy_enabled = bool(dedupe and enable_fuzzy_dedupe)
+    existing_fuzzy_keys = [_fuzzy_dedupe_key(row) for row in existing_rows] if fuzzy_enabled else []
     existing_for_keyword = [
         row for row in existing_rows
         if str(row.get("搜索关键词", "") or "").strip() == str(keyword or "").strip()
@@ -129,11 +134,14 @@ def ingest_rows(
     duplicates_removed = 0
     for row in normalized:
         key = _dedupe_key(row)
-        if dedupe and key in existing_keys:
+        fuzzy_key = _fuzzy_dedupe_key(row) if fuzzy_enabled else {}
+        if dedupe and (key in existing_keys or (fuzzy_enabled and _fuzzy_duplicate(fuzzy_key, existing_fuzzy_keys))):
             duplicates_removed += 1
             continue
         if dedupe:
             existing_keys.add(key)
+            if fuzzy_enabled:
+                existing_fuzzy_keys.append(fuzzy_key)
         deduped.append(row)
 
     rows_dropped_by_limit = 0
@@ -265,3 +273,43 @@ def _dedupe_key(row: Dict[str, Any]) -> str:
             clean(row.get("店铺名称")),
         ]
     )
+
+
+def _fuzzy_dedupe_key(row: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "keyword": _compact_text(row.get("搜索关键词")),
+        "title": _compact_title(row.get("商品名称")),
+        "price": _compact_text(row.get("现价")),
+        "shop": _compact_text(row.get("店铺名称")),
+    }
+
+
+def _fuzzy_duplicate(candidate: Dict[str, str], existing: List[Dict[str, str]]) -> bool:
+    title = candidate["title"]
+    if not title:
+        return False
+    for item in existing:
+        if candidate["keyword"] != item["keyword"]:
+            continue
+        if candidate["price"] != item["price"] or candidate["shop"] != item["shop"]:
+            continue
+        other = item["title"]
+        if not other:
+            continue
+        if title == other:
+            return True
+        shorter, longer = sorted((title, other), key=len)
+        if len(shorter) >= 8 and shorter in longer:
+            return True
+        if min(len(title), len(other)) >= 12 and SequenceMatcher(None, title, other).ratio() >= 0.92:
+            return True
+    return False
+
+
+def _compact_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def _compact_title(value: Any) -> str:
+    text = _compact_text(value)
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
