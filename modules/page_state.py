@@ -5,7 +5,7 @@ Product data extraction remains screenshot/vision based. This module only
 classifies coarse operational states from visible screenshot pixels.
 """
 from dataclasses import asdict, dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 
 VISIBLE_READY = "visible_ready"
@@ -23,6 +23,19 @@ class PageState:
     confidence: float
     reason: str
     metrics: Dict[str, float]
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass
+class VisibleKeywordVerification:
+    status: str
+    expected_keyword: str
+    observed_keyword: str
+    confidence: float
+    reason: str
+    source: str
 
     def to_dict(self):
         return asdict(self)
@@ -99,3 +112,96 @@ def detect_page_state(image_path: str, manual_state: Optional[str] = None) -> Pa
         reason="heuristics_inconclusive",
         metrics=metrics,
     )
+
+
+def verify_visible_keyword(
+    image_path: str,
+    expected_keyword: str,
+    page_state: Optional[Dict[str, Any]] = None,
+) -> VisibleKeywordVerification:
+    """Conservatively verify the visible search keyword from screenshot evidence.
+
+    This function never reads page structure. It first honors structured
+    screenshot-derived hints supplied by tests or future OCR/classifier code, then
+    tries optional local OCR when available. Unknown is preferred over guessing.
+    """
+    expected = _normalize_keyword(expected_keyword)
+    state = page_state or {}
+    hinted = _hinted_visible_keyword(state)
+    if hinted:
+        observed = _normalize_keyword(hinted)
+        if observed == expected:
+            return VisibleKeywordVerification(
+                status="matched",
+                expected_keyword=expected_keyword,
+                observed_keyword=hinted,
+                confidence=0.95,
+                reason="visible_search_keyword_hint_matched",
+                source="page_state_hint",
+            )
+        return VisibleKeywordVerification(
+            status="mismatch",
+            expected_keyword=expected_keyword,
+            observed_keyword=hinted,
+            confidence=0.95,
+            reason="visible_search_keyword_hint_mismatched",
+            source="page_state_hint",
+        )
+
+    ocr_text = _ocr_top_region_text(image_path)
+    if not ocr_text:
+        return VisibleKeywordVerification(
+            status="unknown",
+            expected_keyword=expected_keyword,
+            observed_keyword="",
+            confidence=0.0,
+            reason="visible_keyword_ocr_unavailable_or_empty",
+            source="ocr",
+        )
+    if expected and expected in _normalize_keyword(ocr_text):
+        return VisibleKeywordVerification(
+            status="matched",
+            expected_keyword=expected_keyword,
+            observed_keyword=ocr_text[:120],
+            confidence=0.70,
+            reason="visible_keyword_ocr_contains_expected_keyword",
+            source="ocr",
+        )
+    return VisibleKeywordVerification(
+        status="unknown",
+        expected_keyword=expected_keyword,
+        observed_keyword=ocr_text[:120],
+        confidence=0.25,
+        reason="visible_keyword_ocr_inconclusive",
+        source="ocr",
+    )
+
+
+def _hinted_visible_keyword(page_state: Dict[str, Any]) -> str:
+    for key in ("visible_search_keyword", "observed_keyword", "search_keyword"):
+        value = str(page_state.get(key) or "").strip()
+        if value:
+            return value
+    verification = page_state.get("keyword_verification")
+    if isinstance(verification, dict):
+        return str(verification.get("observed_keyword") or "").strip()
+    return ""
+
+
+def _ocr_top_region_text(image_path: str) -> str:
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image
+    except Exception:
+        return ""
+    try:
+        img = Image.open(image_path).convert("RGB")
+        width, height = img.size
+        top = img.crop((0, 0, width, max(1, int(height * 0.24))))
+        return " ".join(str(pytesseract.image_to_string(top, lang="chi_sim+eng") or "").split())
+    except Exception:
+        return ""
+
+
+def _normalize_keyword(value: str) -> str:
+    return "".join(str(value or "").lower().split())

@@ -434,7 +434,7 @@ def _sync_existing_worker_results(
     synced = []
     for idx in _sync_candidate_sessions(plan_id, session_index):
         worker_result = _session_worker_result_path(plan_id, idx)
-        if not os.path.exists(worker_result):
+        if not os.path.exists(worker_result) and not _session_has_keyword_results(plan_id, idx):
             continue
         sync_result = sync_midscene_worker_results(plan_id, idx)
         sync_result["worker_result"] = worker_result
@@ -446,6 +446,28 @@ def _sync_existing_worker_results(
             {"sync_result": sync_result},
         )
     return synced
+
+
+def _session_has_keyword_results(plan_id: str, session_index: int) -> bool:
+    """Allow heartbeat sync to consume per-keyword capture output mid-session."""
+    try:
+        from modules.visual_capture import keyword_evidence_dir
+        from modules.visual_pipeline import load_visual_manifest, task_dir_for_run
+
+        task_dir = task_dir_for_run(plan_id)
+        manifest = load_visual_manifest(plan_id)
+    except Exception:
+        return False
+
+    for record in manifest.get("records", []):
+        record_session = record.get("extra", {}).get("daily_session_index")
+        if int(record_session or 0) != int(session_index):
+            continue
+        keyword = record.get("keyword", "")
+        evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
+        if os.path.exists(os.path.join(evidence_dir, "keyword_result.json")):
+            return True
+    return False
 
 
 def _sync_candidate_sessions(plan_id: str, session_index: Optional[int]) -> List[int]:

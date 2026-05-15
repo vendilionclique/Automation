@@ -9,6 +9,7 @@ assets. It does not open a browser, inspect DOM, or contact Taobao.
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -16,7 +17,7 @@ from modules.page_sampling import page_sampling_config_from_settings, write_task
 from modules.session_capsule import session_dir_for
 from modules.utils import ConfigManager, ensure_dir, get_project_root, sanitize_filename
 from modules.visual_capture import keyword_evidence_dir, maybe_delete_screenshot
-from modules.visual_control import write_worker_runtime
+from modules.visual_control import control_interrupt_for_worker, load_worker_runtime, write_worker_runtime
 from modules.visual_pipeline import load_visual_manifest, save_visual_manifest, task_dir_for_run
 from modules.vision_extract import export_jsonl_to_excel, ingest_rows
 
@@ -25,6 +26,159 @@ READY_CAPTURE_STATUSES = {"captured", "completed", "success"}
 REQUEST_SCHEMA = "taobao_codex_extract_request_v1"
 RESULT_SCHEMA = "taobao_codex_extract_rows_v1"
 DEFAULT_WORKER_STALE_AFTER_MINUTES = 180
+DEFAULT_DRAIN_POLL_SECONDS = 20
+DEFAULT_DRAIN_IDLE_TIMEOUT_SECONDS = 900
+
+
+def run_codex_extract_drain(
+    plan_id: str,
+    session_index: int,
+    config_file: str = "config/settings.ini",
+    start: bool = True,
+    poll_seconds: Optional[float] = None,
+    idle_timeout_seconds: Optional[float] = None,
+    max_cycles: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Keep the extract side alive while capture is producing screenshots.
+
+    The resident drain process is only a scheduler/dispatcher. The actual
+    screenshot-reading Codex workers remain short-lived keyword workers because
+    their attached image inputs are fixed at launch.
+    """
+    config = ConfigManager(config_file)
+    extract_cfg = _codex_extract_config(config)
+    poll_seconds = float(
+        poll_seconds
+        if poll_seconds is not None
+        else extract_cfg.get("drain_poll_seconds", DEFAULT_DRAIN_POLL_SECONDS)
+    )
+    idle_timeout_seconds = float(
+        idle_timeout_seconds
+        if idle_timeout_seconds is not None
+        else extract_cfg.get("drain_idle_timeout_seconds", DEFAULT_DRAIN_IDLE_TIMEOUT_SECONDS)
+    )
+    poll_seconds = max(0.1, poll_seconds)
+    idle_timeout_seconds = max(1.0, idle_timeout_seconds)
+    started_at = time.monotonic()
+    last_activity_at = started_at
+    cycles = 0
+    prepared_total = 0
+    dispatched_total = 0
+    sync_total = 0
+    final_reason = ""
+    last_sync: Dict[str, Any] = {}
+    last_prepare: Dict[str, Any] = {}
+    last_dispatch: Dict[str, Any] = {}
+
+    write_worker_runtime(
+        plan_id,
+        session_index,
+        "codex_extract",
+        "draining",
+        start=bool(start),
+        poll_seconds=poll_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+        started_at=_now(),
+    )
+
+    while True:
+        cycles += 1
+        interrupt = control_interrupt_for_worker(plan_id, session_index)
+        if interrupt.get("interrupted"):
+            final_reason = interrupt.get("reason") or "control_interrupted"
+            break
+
+        last_sync = _sync_capture_outputs_for_extract(plan_id, session_index)
+        last_prepare = prepare_codex_extract_requests(plan_id, session_index, config_file=config_file)
+        last_dispatch = dispatch_codex_extract_requests(
+            plan_id,
+            session_index,
+            config_file=config_file,
+            start=start,
+        )
+
+        prepared = int(last_prepare.get("prepared") or 0)
+        dispatched = int(last_dispatch.get("count") or 0)
+        synced = int(last_sync.get("updated") or 0)
+        active = _active_launch_count(
+            plan_id,
+            session_index,
+            stale_after_seconds=float(extract_cfg["stale_after_minutes"]) * 60,
+        )
+        pending = len(_pending_requests(plan_id, session_index))
+        prepared_total += prepared
+        dispatched_total += dispatched
+        sync_total += synced
+
+        if prepared or dispatched or synced or active or pending:
+            last_activity_at = time.monotonic()
+
+        capture_state = _capture_source_state(plan_id, session_index)
+        if active <= 0 and pending <= 0 and capture_state.get("closed"):
+            final_reason = capture_state.get("reason") or "capture_closed_and_extract_queue_empty"
+            break
+
+        idle_for = time.monotonic() - last_activity_at
+        if active <= 0 and pending <= 0 and idle_for >= idle_timeout_seconds:
+            final_reason = "idle_timeout_waiting_for_capture_output"
+            break
+
+        if max_cycles is not None and cycles >= int(max_cycles):
+            final_reason = "max_cycles_reached"
+            break
+
+        write_worker_runtime(
+            plan_id,
+            session_index,
+            "codex_extract",
+            "waiting_for_capture_or_workers",
+            cycles=cycles,
+            prepared_total=prepared_total,
+            dispatched_total=dispatched_total,
+            sync_total=sync_total,
+            active_workers=active,
+            pending_requests=pending,
+            capture_state=capture_state,
+            last_sync=last_sync,
+            last_prepare={
+                "prepared": last_prepare.get("prepared", 0),
+                "skipped_count": len(last_prepare.get("skipped") or []),
+            },
+            last_dispatch={
+                "count": last_dispatch.get("count", 0),
+                "active_workers": last_dispatch.get("active_workers", 0),
+            },
+        )
+        time.sleep(poll_seconds)
+
+    elapsed_seconds = round(time.monotonic() - started_at, 3)
+    result = {
+        "ok": True,
+        "plan_id": plan_id,
+        "session_index": int(session_index),
+        "start": bool(start),
+        "status": "completed" if final_reason != "idle_timeout_waiting_for_capture_output" else "needs_review",
+        "reason": final_reason,
+        "cycles": cycles,
+        "prepared_total": prepared_total,
+        "dispatched_total": dispatched_total,
+        "sync_total": sync_total,
+        "elapsed_seconds": elapsed_seconds,
+        "last_sync": last_sync,
+        "last_prepare": last_prepare,
+        "last_dispatch": last_dispatch,
+        "capture_state": _capture_source_state(plan_id, session_index),
+    }
+    write_worker_runtime(
+        plan_id,
+        session_index,
+        "codex_extract",
+        result["status"],
+        drain_result=result,
+        finished_at=_now(),
+    )
+    return result
 
 
 def prepare_codex_extract_requests(
@@ -57,6 +211,17 @@ def prepare_codex_extract_requests(
         capture_status = str(keyword_result.get("status") or "").strip().lower()
         if capture_status not in READY_CAPTURE_STATUSES:
             skipped.append({"keyword": keyword, "reason": "keyword_result_not_ready"})
+            continue
+        result_keyword = str(keyword_result.get("keyword") or "").strip()
+        if result_keyword and result_keyword != keyword:
+            skipped.append(
+                {
+                    "keyword": keyword,
+                    "reason": "keyword_result_keyword_mismatch",
+                    "keyword_result": keyword_result_path,
+                    "result_keyword": result_keyword,
+                }
+            )
             continue
         screenshot_records = _collect_screenshot_records(keyword_result, record)
         screenshot_records = [item for item in screenshot_records if os.path.exists(str(item.get("path") or ""))]
@@ -204,6 +369,63 @@ def dispatch_codex_extract_requests(
     return summary
 
 
+def _sync_capture_outputs_for_extract(plan_id: str, session_index: int) -> Dict[str, Any]:
+    from modules.visual_pipeline import sync_midscene_worker_results
+
+    if not _has_syncable_capture_output(plan_id, session_index):
+        return {"ok": True, "updated": 0, "missing": 0, "reason": "no_capture_output_yet"}
+    return sync_midscene_worker_results(plan_id, session_index)
+
+
+def _has_syncable_capture_output(plan_id: str, session_index: int) -> bool:
+    session_dir = session_dir_for(plan_id, session_index)
+    if os.path.exists(os.path.join(session_dir, "session_worker_result.json")):
+        return True
+    try:
+        task_dir = task_dir_for_run(plan_id)
+        manifest = load_visual_manifest(plan_id)
+    except Exception:
+        return False
+    for record in manifest.get("records", []):
+        if int(record.get("extra", {}).get("daily_session_index") or 0) != int(session_index):
+            continue
+        keyword = record.get("keyword", "")
+        evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
+        if os.path.exists(os.path.join(evidence_dir, "keyword_result.json")):
+            return True
+    return False
+
+
+def _capture_source_state(plan_id: str, session_index: int) -> Dict[str, Any]:
+    session_dir = session_dir_for(plan_id, session_index)
+    session_result_path = os.path.join(session_dir, "session_worker_result.json")
+    session_result = _load_json_if_exists(session_result_path)
+    if session_result:
+        status = str(session_result.get("status") or "").strip()
+        return {
+            "closed": True,
+            "reason": f"session_result:{status or 'written'}",
+            "status": status,
+            "session_result": session_result_path,
+        }
+
+    runtime = load_worker_runtime(plan_id, session_index, "capture")
+    runtime_status = str(runtime.get("status") or "").strip()
+    if runtime_status and runtime_status not in {"prepared", "running", "draining"}:
+        return {
+            "closed": True,
+            "reason": f"capture_runtime:{runtime_status}",
+            "status": runtime_status,
+            "runtime": runtime,
+        }
+    return {
+        "closed": False,
+        "reason": "capture_still_open",
+        "status": runtime_status or "unknown",
+        "runtime": runtime,
+    }
+
+
 def apply_codex_extracted_rows(
     request_path: str,
     rows_file: Optional[str] = None,
@@ -223,6 +445,18 @@ def apply_codex_extracted_rows(
         request.get("confidence_threshold")
         or config.getfloat("VISUAL_CAPTURE", "confidence_threshold", fallback=0.80)
     )
+    fuzzy_dedupe_enabled = config.getboolean("VISUAL_DEDUPE", "fuzzy_enabled", fallback=True)
+    fuzzy_store_similarity_threshold = config.getfloat(
+        "VISUAL_DEDUPE",
+        "store_similarity_threshold",
+        fallback=0.70,
+    )
+    fuzzy_title_similarity_threshold = config.getfloat(
+        "VISUAL_DEDUPE",
+        "title_similarity_threshold",
+        fallback=0.95,
+    )
+    fuzzy_examples_limit = config.getint("VISUAL_DEDUPE", "fuzzy_examples_limit", fallback=20)
     target_limit = int(request.get("target_limit") or 0)
     plan_id = str(request["plan_id"])
     session_index = int(request["session_index"])
@@ -273,6 +507,10 @@ def apply_codex_extracted_rows(
         retain_screenshot=True,
         target_limit=target_limit,
         dedupe=True,
+        fuzzy_dedupe_enabled=fuzzy_dedupe_enabled,
+        fuzzy_store_similarity_threshold=fuzzy_store_similarity_threshold,
+        fuzzy_title_similarity_threshold=fuzzy_title_similarity_threshold,
+        fuzzy_examples_limit=fuzzy_examples_limit,
     )
     ingest_payload = ingest.to_dict()
     should_retain_for_review = any(
@@ -352,14 +590,20 @@ def _start_codex_worker(request_path: str, command: List[str]) -> Dict[str, Any]
     stdout_path = os.path.join(contract_dir, "codex_worker.stdout.jsonl")
     stderr_path = os.path.join(contract_dir, "codex_worker.stderr.log")
     state_path = os.path.join(contract_dir, "launch_state.json")
-    with open(stdout_path, "ab") as stdout, open(stderr_path, "ab") as stderr:
+    request = _load_json(request_path)
+    prompt = _read_text(str(request.get("prompt") or ""))
+    with open(stdout_path, "wb") as stdout, open(stderr_path, "wb") as stderr:
         proc = subprocess.Popen(
             command,
             cwd=get_project_root(),
+            stdin=subprocess.PIPE,
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
         )
+        if proc.stdin:
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
     state = {
         "status": "running",
         "pid": proc.pid,
@@ -386,15 +630,17 @@ def _launch_command(request_path: str, extract_cfg: Dict[str, Any]) -> List[str]
         command.extend(["-m", extract_cfg["model"]])
     if extract_cfg.get("sandbox"):
         command.extend(["-s", extract_cfg["sandbox"]])
+        command.extend(["-c", f"sandbox_mode={json.dumps(extract_cfg['sandbox'])}"])
     if extract_cfg.get("approval_policy"):
-        command.extend(["-a", extract_cfg["approval_policy"]])
+        command.extend(["-c", f"approval_policy={json.dumps(extract_cfg['approval_policy'])}"])
+    if extract_cfg.get("ignore_rules"):
+        command.append("--ignore-rules")
     if extract_cfg.get("json"):
         command.append("--json")
     if extract_cfg.get("ephemeral"):
         command.append("--ephemeral")
     for image in screenshots:
         command.extend(["-i", image])
-    command.append(_read_text(prompt_path))
     return command
 
 
@@ -406,6 +652,7 @@ def _codex_extract_config(config: ConfigManager) -> Dict[str, Any]:
         "model": config.get(section, "model", fallback="gpt-5.5").strip(),
         "sandbox": config.get(section, "sandbox", fallback="danger-full-access").strip(),
         "approval_policy": config.get(section, "approval_policy", fallback="never").strip(),
+        "ignore_rules": config.getboolean(section, "ignore_rules", fallback=True),
         "json": config.getboolean(section, "json_events", fallback=True),
         "ephemeral": config.getboolean(section, "ephemeral", fallback=True),
         "max_parallel": max(1, config.getint(section, "max_parallel", fallback=1)),
@@ -415,6 +662,18 @@ def _codex_extract_config(config: ConfigManager) -> Dict[str, Any]:
                 section,
                 "worker_stale_after_minutes",
                 fallback=DEFAULT_WORKER_STALE_AFTER_MINUTES,
+            ),
+        ),
+        "drain_poll_seconds": max(
+            1,
+            config.getint(section, "drain_poll_seconds", fallback=DEFAULT_DRAIN_POLL_SECONDS),
+        ),
+        "drain_idle_timeout_seconds": max(
+            1,
+            config.getint(
+                section,
+                "drain_idle_timeout_seconds",
+                fallback=DEFAULT_DRAIN_IDLE_TIMEOUT_SECONDS,
             ),
         ),
     }
@@ -429,11 +688,13 @@ def _build_extract_prompt(request: Dict[str, Any]) -> str:
     rows_output = request["rows_output"]
     apply_command = request["commands"]["apply"]
     screenshots = "\n".join(f"- {path}" for path in request.get("screenshots", []))
-    return f"""# Codex Extract Worker
+    return f"""# Screenshot Rows Worker
 
-You are a short-lived Codex extract worker for Taobao MTG visible-price evidence.
+You are a short-lived OCR-style worker for visible screenshot price evidence.
 
-Request JSON: {request_path_label(request)}
+This prompt is self-contained. Do not use skills, plugins, AGENTS.md, project docs, tests, source modules, or the request JSON to decide what to extract. The request JSON path is only for the deterministic apply command after you have written rows.
+
+Request JSON for apply only: {request_path_label(request)}
 Plan/session: {request["plan_id"]} / {request["session_index"]}
 Keyword: {request["keyword"]}
 Rows output: {rows_output}
@@ -444,6 +705,7 @@ Screenshots attached to this run are the only source of product data:
 Rules:
 - Extract product rows only from visible screenshot pixels.
 - Do not open or control Chrome.
+- Do not inspect repository files, project rules, tests, source code, docs, or skills.
 - Do not read DOM, HTML, AX tree, selector maps, cookies, storage, network payloads, page source, or JavaScript-evaluated page data.
 - Do not perform business filtering; just transcribe visible product rows.
 - Use one row per visible product card with a visible title and price.

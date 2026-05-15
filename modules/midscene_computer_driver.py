@@ -46,6 +46,7 @@ class MidsceneComputerConfig:
     page_load_wait: float = 8.0
     session_keyword_limit: int = 3
     keyword_timeout_seconds: int = 180
+    mcp_request_timeout_seconds: int = 240
     consecutive_abnormal_stop: int = 2
     min_rows_per_keyword: int = 5
     confidence_threshold: float = 0.80
@@ -100,6 +101,10 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
         page_load_wait=config.getfloat(section, "page_load_wait", fallback=8.0),
         session_keyword_limit=max(1, config.getint(section, "session_keyword_limit", fallback=3)),
         keyword_timeout_seconds=max(30, config.getint(section, "keyword_timeout_seconds", fallback=180)),
+        mcp_request_timeout_seconds=max(
+            30,
+            config.getint(section, "mcp_request_timeout_seconds", fallback=240),
+        ),
         consecutive_abnormal_stop=max(
             1, config.getint(section, "consecutive_abnormal_stop", fallback=2)
         ),
@@ -347,6 +352,7 @@ def write_midscene_session_worker_contract(
             ],
             "stop_after_consecutive_abnormal": config.consecutive_abnormal_stop,
             "timeout_per_keyword_seconds": config.keyword_timeout_seconds,
+            "mcp_request_timeout_seconds": config.mcp_request_timeout_seconds,
             "retain_abnormal_screenshots": True,
         },
         "action_boundary": {

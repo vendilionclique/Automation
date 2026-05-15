@@ -107,8 +107,11 @@ def run_visual_collection(
     manifest.setdefault("session", initial_session_state(policy))
     task_dir = task_dir_for_run(run_id)
     effective_limit = limit
-    if session_index is not None and effective_limit is None:
-        effective_limit = midscene_config.session_keyword_limit
+    if session_index is not None:
+        if effective_limit is None:
+            effective_limit = midscene_config.session_keyword_limit
+        else:
+            effective_limit = min(int(effective_limit), midscene_config.session_keyword_limit)
     capsule = None
     lease_acquired = False
     if session_index is not None:

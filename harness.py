@@ -403,6 +403,21 @@ def cmd_visual_codex_extract_dispatch(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def cmd_visual_codex_extract_drain(args):
+    from modules.codex_extract import run_codex_extract_drain
+
+    result = run_codex_extract_drain(
+        args.plan_id,
+        args.session,
+        config_file=args.config,
+        start=args.start,
+        poll_seconds=args.poll_seconds,
+        idle_timeout_seconds=args.idle_timeout_seconds,
+        max_cycles=args.max_cycles,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def cmd_visual_apply_extracted_rows(args):
     from modules.codex_extract import apply_codex_extracted_rows
 
@@ -647,6 +662,17 @@ def main():
     codex_extract_dispatch.add_argument("--limit", type=int, help="最多派发多少个 pending contract")
     codex_extract_dispatch.add_argument("--start", action="store_true", help="真正启动 codex exec；默认只返回启动建议")
 
+    codex_extract_drain = sub.add_parser(
+        "visual-codex-extract-drain",
+        help="常驻消费 capture 产物：增量 sync、prepare、dispatch，直到 capture 结束且队列清空",
+    )
+    codex_extract_drain.add_argument("--plan-id", required=True, help="daily plan id / run_id")
+    codex_extract_drain.add_argument("--session", type=int, required=True, help="session 编号")
+    codex_extract_drain.add_argument("--start", action="store_true", help="真正启动 codex exec worker；默认只做建议循环")
+    codex_extract_drain.add_argument("--poll-seconds", type=float, help="没有新输入时的轮询间隔")
+    codex_extract_drain.add_argument("--idle-timeout-seconds", type=float, help="无活动多久后退出为 needs_review")
+    codex_extract_drain.add_argument("--max-cycles", type=int, help="测试/诊断用：最多循环次数")
+
     apply_extracted = sub.add_parser(
         "visual-apply-extracted-rows",
         help="确定性应用 Codex extract worker 产出的 rows；不是抽取 worker",
@@ -729,6 +755,8 @@ def main():
         cmd_visual_codex_extract_prepare(args)
     elif args.cmd == "visual-codex-extract-dispatch":
         cmd_visual_codex_extract_dispatch(args)
+    elif args.cmd == "visual-codex-extract-drain":
+        cmd_visual_codex_extract_drain(args)
     elif args.cmd == "visual-apply-extracted-rows":
         cmd_visual_apply_extracted_rows(args)
     elif args.cmd == "visual-log-tile":

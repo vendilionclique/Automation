@@ -6,6 +6,9 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 from modules import codex_extract
+from modules import visual_control
+from modules import visual_pipeline
+from modules.vision_extract import ingest_rows
 
 
 def write_json(path, payload):
@@ -14,7 +17,75 @@ def write_json(path, payload):
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
+def read_jsonl(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
 class CodexExtractTests(unittest.TestCase):
+    def test_extract_drain_waits_when_capture_is_open_and_no_screenshots_yet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_id = "plan"
+            task_dir = os.path.join(tmp, "data", "tasks", plan_id)
+            session_dir = os.path.join(task_dir, "sessions", "session_01")
+            config_path = os.path.join(tmp, "settings.ini")
+            write_json(os.path.join(task_dir, "visual_tasks.json"), {"run_id": plan_id, "records": []})
+            os.makedirs(session_dir, exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "[CODEX_EXTRACT]\n"
+                    "max_parallel = 1\n"
+                    "drain_poll_seconds = 1\n"
+                    "drain_idle_timeout_seconds = 60\n"
+                )
+
+            with mock.patch.object(codex_extract, "get_project_root", return_value=tmp), \
+                mock.patch.object(codex_extract, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(visual_control, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_control, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(visual_pipeline, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_pipeline, "session_dir_for", return_value=session_dir):
+                result = codex_extract.run_codex_extract_drain(
+                    plan_id,
+                    1,
+                    config_file=config_path,
+                    start=False,
+                    max_cycles=1,
+                )
+
+            self.assertEqual(result["reason"], "max_cycles_reached")
+            self.assertEqual(result["prepared_total"], 0)
+            self.assertEqual(result["dispatched_total"], 0)
+            self.assertFalse(result["capture_state"]["closed"])
+
+    def test_extract_drain_exits_when_capture_closed_and_queue_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_id = "plan"
+            task_dir = os.path.join(tmp, "data", "tasks", plan_id)
+            session_dir = os.path.join(task_dir, "sessions", "session_01")
+            config_path = os.path.join(tmp, "settings.ini")
+            write_json(os.path.join(task_dir, "visual_tasks.json"), {"run_id": plan_id, "records": []})
+            write_json(os.path.join(session_dir, "session_worker_result.json"), {"status": "captured"})
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write("[CODEX_EXTRACT]\nmax_parallel = 1\n")
+
+            with mock.patch.object(codex_extract, "get_project_root", return_value=tmp), \
+                mock.patch.object(codex_extract, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(visual_control, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_control, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(visual_pipeline, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_pipeline, "session_dir_for", return_value=session_dir):
+                result = codex_extract.run_codex_extract_drain(
+                    plan_id,
+                    1,
+                    config_file=config_path,
+                    start=False,
+                )
+
+            self.assertEqual(result["reason"], "session_result:captured")
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["prepared_total"], 0)
+
     def test_repeat_apply_returns_existing_success_after_screenshots_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:
             request_path = os.path.join(tmp, "extract_request.json")
@@ -133,6 +204,7 @@ class CodexExtractTests(unittest.TestCase):
                     "model = \n"
                     "sandbox = \n"
                     "approval_policy = \n"
+                    "ignore_rules = false\n"
                     "json_events = false\n"
                     "ephemeral = false\n"
                     "max_parallel = 1\n"
@@ -151,6 +223,133 @@ class CodexExtractTests(unittest.TestCase):
                 updated = json.load(f)
             self.assertEqual(updated["status"], "stale")
             self.assertEqual(updated["stale_reason"], "ttl_exceeded")
+
+    def test_launch_command_uses_config_overrides_supported_by_current_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            request_path = os.path.join(tmp, "extract_request.json")
+            prompt_path = os.path.join(tmp, "extract_prompt.md")
+            image_path = os.path.join(tmp, "tile_00.png")
+            write_json(
+                request_path,
+                {
+                    "schema": codex_extract.REQUEST_SCHEMA,
+                    "prompt": prompt_path,
+                    "screenshots": [image_path],
+                },
+            )
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write("extract")
+            with open(image_path, "wb") as f:
+                f.write(b"png")
+
+            command = codex_extract._launch_command(
+                request_path,
+                {
+                    "codex_bin": "codex",
+                    "profile": "taobao_visual_extract",
+                    "model": "gpt-5.5",
+                    "sandbox": "danger-full-access",
+                    "approval_policy": "never",
+                    "ignore_rules": True,
+                    "json": True,
+                    "ephemeral": True,
+                },
+            )
+
+            self.assertNotIn("-a", command)
+            self.assertIn("--ignore-rules", command)
+            self.assertIn("sandbox_mode=\"danger-full-access\"", command)
+            self.assertIn("approval_policy=\"never\"", command)
+            self.assertNotIn("extract", command)
+
+    def test_fuzzy_dedupe_skips_near_duplicate_store_and_title_same_price(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = ingest_rows(
+                task_dir=tmp,
+                keyword="万智牌 中止",
+                rows=[
+                    {
+                        "商品名称": "万智牌 中止 中文 闪",
+                        "现价": "12.00",
+                        "店铺名称": "小蓝牌店",
+                        "识别置信度": 0.99,
+                    },
+                    {
+                        "商品名称": "万智牌中止中文闪",
+                        "现价": "12.00",
+                        "店铺名称": "小蓝脾店",
+                        "识别置信度": 0.99,
+                    },
+                ],
+                captured_at="2026-05-15 10:00:00",
+                retain_screenshot=True,
+            )
+
+            rows = read_jsonl(os.path.join(tmp, "raw_rows.jsonl"))
+            self.assertTrue(result.ok)
+            self.assertEqual(result.rows_written, 1)
+            self.assertEqual(result.fuzzy_duplicates_removed, 1)
+            self.assertEqual(len(result.fuzzy_duplicate_examples), 1)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["店铺名称"], "小蓝牌店")
+
+    def test_fuzzy_dedupe_keeps_same_store_price_when_title_similarity_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = ingest_rows(
+                task_dir=tmp,
+                keyword="万智牌 中止",
+                rows=[
+                    {
+                        "商品名称": "万智牌 中止 中文 闪 单卡",
+                        "现价": "12.00",
+                        "店铺名称": "小蓝牌店",
+                        "识别置信度": 0.99,
+                    },
+                    {
+                        "商品名称": "万智牌 中止 英文 普通 现货",
+                        "现价": "12.00",
+                        "店铺名称": "小蓝牌店",
+                        "识别置信度": 0.99,
+                    },
+                ],
+                captured_at="2026-05-15 10:00:00",
+                retain_screenshot=True,
+            )
+
+            rows = read_jsonl(os.path.join(tmp, "raw_rows.jsonl"))
+            self.assertTrue(result.ok)
+            self.assertEqual(result.rows_written, 2)
+            self.assertEqual(result.fuzzy_duplicates_removed, 0)
+            self.assertEqual(len(rows), 2)
+
+    def test_fuzzy_dedupe_keeps_different_price(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = ingest_rows(
+                task_dir=tmp,
+                keyword="万智牌 中止",
+                rows=[
+                    {
+                        "商品名称": "万智牌 中止 中文 闪",
+                        "现价": "12.00",
+                        "店铺名称": "小蓝牌店",
+                        "识别置信度": 0.99,
+                    },
+                    {
+                        "商品名称": "万智牌中止中文闪",
+                        "现价": "13.00",
+                        "店铺名称": "小蓝脾店",
+                        "识别置信度": 0.99,
+                    },
+                ],
+                captured_at="2026-05-15 10:00:00",
+                retain_screenshot=True,
+            )
+
+            rows = read_jsonl(os.path.join(tmp, "raw_rows.jsonl"))
+            self.assertTrue(result.ok)
+            self.assertEqual(result.rows_written, 2)
+            self.assertEqual(result.fuzzy_duplicates_removed, 0)
+            self.assertEqual(len(rows), 2)
 
 
 if __name__ == "__main__":

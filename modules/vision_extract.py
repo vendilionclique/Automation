@@ -7,6 +7,8 @@ read DOM, or contact Taobao.
 """
 import json
 import os
+import string
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
@@ -39,6 +41,8 @@ class IngestResult:
     raw_excel: str
     rows_received: int = 0
     duplicates_removed: int = 0
+    fuzzy_duplicates_removed: int = 0
+    fuzzy_duplicate_examples: List[Dict[str, Any]] = None
     rows_dropped_by_limit: int = 0
     screenshot_path: str = ""
     screenshot_deleted: bool = False
@@ -55,6 +59,8 @@ class IngestResult:
             "raw_excel": self.raw_excel,
             "rows_received": self.rows_received,
             "duplicates_removed": self.duplicates_removed,
+            "fuzzy_duplicates_removed": self.fuzzy_duplicates_removed,
+            "fuzzy_duplicate_examples": self.fuzzy_duplicate_examples or [],
             "rows_dropped_by_limit": self.rows_dropped_by_limit,
             "screenshot_path": self.screenshot_path,
             "screenshot_deleted": self.screenshot_deleted,
@@ -121,6 +127,10 @@ def ingest_rows(
     retain_screenshot: Optional[bool] = None,
     target_limit: int = 0,
     dedupe: bool = True,
+    fuzzy_dedupe_enabled: bool = True,
+    fuzzy_store_similarity_threshold: float = 0.70,
+    fuzzy_title_similarity_threshold: float = 0.95,
+    fuzzy_examples_limit: int = 20,
 ) -> IngestResult:
     ensure_dir(task_dir)
     raw_jsonl = os.path.join(task_dir, "raw_rows.jsonl")
@@ -145,13 +155,30 @@ def ingest_rows(
     ]
     deduped = []
     duplicates_removed = 0
+    fuzzy_duplicates_removed = 0
+    fuzzy_duplicate_examples = []
+    fuzzy_candidates = list(existing_rows)
     for row in normalized:
         key = _dedupe_key(row)
         if dedupe and key in existing_keys:
             duplicates_removed += 1
             continue
+        fuzzy_match = None
+        if dedupe and fuzzy_dedupe_enabled:
+            fuzzy_match = _find_fuzzy_duplicate(
+                row,
+                fuzzy_candidates,
+                store_threshold=fuzzy_store_similarity_threshold,
+                title_threshold=fuzzy_title_similarity_threshold,
+            )
+        if fuzzy_match:
+            fuzzy_duplicates_removed += 1
+            if len(fuzzy_duplicate_examples) < max(0, int(fuzzy_examples_limit)):
+                fuzzy_duplicate_examples.append(fuzzy_match)
+            continue
         if dedupe:
             existing_keys.add(key)
+            fuzzy_candidates.append(row)
         deduped.append(row)
 
     rows_dropped_by_limit = 0
@@ -203,6 +230,8 @@ def ingest_rows(
         raw_excel=raw_excel,
         rows_received=rows_received,
         duplicates_removed=duplicates_removed,
+        fuzzy_duplicates_removed=fuzzy_duplicates_removed,
+        fuzzy_duplicate_examples=fuzzy_duplicate_examples,
         rows_dropped_by_limit=rows_dropped_by_limit,
         screenshot_path=screenshot_path,
         screenshot_deleted=screenshot_deleted,
@@ -305,3 +334,83 @@ def _dedupe_key(row: Dict[str, Any]) -> str:
             clean(row.get("店铺名称")),
         ]
     )
+
+
+def _find_fuzzy_duplicate(
+    row: Dict[str, Any],
+    candidates: Iterable[Dict[str, Any]],
+    store_threshold: float,
+    title_threshold: float,
+) -> Optional[Dict[str, Any]]:
+    keyword = str(row.get("搜索关键词", "") or "").strip()
+    price = _clean_price(row.get("现价"))
+    store = _normalize_fuzzy_text(row.get("店铺名称"))
+    title = _normalize_fuzzy_text(row.get("商品名称"))
+    if not keyword or price in ("", None) or not store or not title:
+        return None
+
+    best = None
+    for existing in candidates:
+        if str(existing.get("搜索关键词", "") or "").strip() != keyword:
+            continue
+        if _clean_price(existing.get("现价")) != price:
+            continue
+        existing_store = _normalize_fuzzy_text(existing.get("店铺名称"))
+        existing_title = _normalize_fuzzy_text(existing.get("商品名称"))
+        if not existing_store or not existing_title:
+            continue
+        store_similarity = _levenshtein_similarity(store, existing_store)
+        if store_similarity < store_threshold:
+            continue
+        title_similarity = _levenshtein_similarity(title, existing_title)
+        if title_similarity < title_threshold:
+            continue
+        match = {
+            "keyword": keyword,
+            "price": price,
+            "incoming_title": row.get("商品名称", ""),
+            "matched_title": existing.get("商品名称", ""),
+            "incoming_store": row.get("店铺名称", ""),
+            "matched_store": existing.get("店铺名称", ""),
+            "store_similarity": round(store_similarity, 4),
+            "title_similarity": round(title_similarity, 4),
+        }
+        if best is None or (
+            match["title_similarity"],
+            match["store_similarity"],
+        ) > (
+            best["title_similarity"],
+            best["store_similarity"],
+        ):
+            best = match
+    return best
+
+
+def _normalize_fuzzy_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).lower()
+    drop = set(string.whitespace)
+    drop.update(" \t\r\n\f\v")
+    drop.update(".,;:!?()[]{}<>\"'`~@#$%^&*_+-=|\\/，。；：！？（）【】《》“”‘’、·…￥")
+    return "".join(ch for ch in text if ch not in drop)
+
+
+def _levenshtein_similarity(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    max_len = max(len(a), len(b))
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current = [i]
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + cost,
+                )
+            )
+        previous = current
+    return 1.0 - (previous[-1] / max_len)

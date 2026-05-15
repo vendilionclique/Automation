@@ -4,9 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${MIDSCENE_ENV_FILE:-${ROOT_DIR}/local/midscene-computer.env}"
 LOCAL_NODE_BIN="${ROOT_DIR}/local/node-runtime/node-v24.14.0-darwin-arm64/bin/node"
+CODEX_RUNTIME_NODE_BIN="${HOME}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
 NODE_BIN="${NODE_BIN:-}"
 if [[ -z "${NODE_BIN}" && -x "${LOCAL_NODE_BIN}" ]]; then
   NODE_BIN="${LOCAL_NODE_BIN}"
+fi
+if [[ -z "${NODE_BIN}" && -x "${CODEX_RUNTIME_NODE_BIN}" ]]; then
+  NODE_BIN="${CODEX_RUNTIME_NODE_BIN}"
 fi
 if [[ -z "${NODE_BIN}" ]] && command -v node >/dev/null 2>&1; then
   NODE_BIN="$(command -v node)"
