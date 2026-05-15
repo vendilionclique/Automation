@@ -42,6 +42,8 @@ class IngestResult:
     rows_dropped_by_limit: int = 0
     screenshot_path: str = ""
     screenshot_deleted: bool = False
+    capture_time_source: str = ""
+    warnings: List[str] = None
     error: Optional[str] = None
 
     def to_dict(self):
@@ -56,6 +58,8 @@ class IngestResult:
             "rows_dropped_by_limit": self.rows_dropped_by_limit,
             "screenshot_path": self.screenshot_path,
             "screenshot_deleted": self.screenshot_deleted,
+            "capture_time_source": self.capture_time_source,
+            "warnings": self.warnings or [],
             "error": self.error,
         }
 
@@ -81,14 +85,17 @@ def normalize_rows(
     keyword: str,
     screenshot_path: str = "",
     captured_at: str = "",
+    screenshot_capture_times: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     normalized = []
-    captured_at = captured_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    screenshot_capture_times = screenshot_capture_times or {}
+    captured_at = captured_at or _fallback_capture_time()
     for row in rows:
         item = {col: row.get(col, "") for col in REQUIRED_COLUMNS}
         item["搜索关键词"] = item["搜索关键词"] or keyword
-        item["采集时间"] = _normalize_capture_time(item["采集时间"] or captured_at)
         item["截图文件"] = item["截图文件"] or screenshot_path
+        evidence_time = _capture_time_for_row(item["截图文件"], screenshot_capture_times, captured_at)
+        item["采集时间"] = _normalize_capture_time(evidence_time)
         item["商品名称"] = str(item["商品名称"] or "").strip()
         item["店铺名称"] = str(item["店铺名称"] or "").strip()
         item["地区"] = str(item["地区"] or "").strip()
@@ -108,6 +115,8 @@ def ingest_rows(
     keyword: str,
     rows: List[Dict[str, Any]],
     screenshot_path: str = "",
+    captured_at: str = "",
+    screenshot_capture_times: Optional[Dict[str, str]] = None,
     confidence_threshold: float = 0.80,
     retain_screenshot: Optional[bool] = None,
     target_limit: int = 0,
@@ -117,7 +126,16 @@ def ingest_rows(
     raw_jsonl = os.path.join(task_dir, "raw_rows.jsonl")
     raw_excel = os.path.join(task_dir, "raw_results.xlsx")
 
-    normalized = normalize_rows(rows, keyword=keyword, screenshot_path=screenshot_path)
+    screenshot_capture_times = screenshot_capture_times or {}
+    fallback_used = not bool(captured_at or screenshot_capture_times)
+    fallback_time = captured_at or _fallback_capture_time()
+    normalized = normalize_rows(
+        rows,
+        keyword=keyword,
+        screenshot_path=screenshot_path,
+        captured_at=fallback_time,
+        screenshot_capture_times=screenshot_capture_times,
+    )
     rows_received = len(normalized)
     existing_rows = _load_existing_rows(raw_jsonl)
     existing_keys = {_dedupe_key(row) for row in existing_rows} if dedupe else set()
@@ -148,6 +166,9 @@ def ingest_rows(
         if not row["商品名称"] or row["现价"] in ("", None)
     ]
     low_conf = [row for row in deduped if float(row.get("识别置信度") or 0) < confidence_threshold]
+    warnings = ["missing_screenshot_captured_at_fallback_now"] if fallback_used else []
+    if low_conf:
+        warnings.append(f"low_confidence_rows:{len(low_conf)}")
 
     status = "extracted"
     ok = True
@@ -158,7 +179,7 @@ def ingest_rows(
         else:
             status = "needs_review"
             ok = False
-    elif missing_required or low_conf:
+    elif missing_required:
         status = "needs_review"
         ok = False
 
@@ -169,7 +190,7 @@ def ingest_rows(
     export_jsonl_to_excel(raw_jsonl, raw_excel)
 
     if retain_screenshot is None:
-        retain_screenshot = not ok
+        retain_screenshot = (not ok) or bool(low_conf)
     screenshot_deleted = False
     if not retain_screenshot:
         screenshot_deleted = maybe_delete_screenshot(screenshot_path)
@@ -185,7 +206,9 @@ def ingest_rows(
         rows_dropped_by_limit=rows_dropped_by_limit,
         screenshot_path=screenshot_path,
         screenshot_deleted=screenshot_deleted,
-        error=None if ok else "empty_rows_or_low_confidence_or_missing_required_fields",
+        capture_time_source="fallback_now" if fallback_used else "screenshot_evidence",
+        warnings=warnings,
+        error=None if ok else "empty_rows_or_missing_required_fields",
     )
 
 
@@ -235,6 +258,23 @@ def _normalize_capture_time(value: Any) -> str:
     except Exception:
         pass
     return text
+
+
+def _fallback_capture_time() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _capture_time_for_row(screenshot_file: str, capture_times: Dict[str, str], fallback: str) -> str:
+    if not capture_times:
+        return fallback
+    candidates = []
+    if screenshot_file:
+        text = str(screenshot_file).strip()
+        candidates.extend([text, os.path.abspath(text), os.path.basename(text)])
+    for key in candidates:
+        if key in capture_times and capture_times[key]:
+            return capture_times[key]
+    return fallback
 
 
 def _load_existing_rows(raw_jsonl: str) -> List[Dict[str, Any]]:

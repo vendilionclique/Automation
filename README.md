@@ -36,7 +36,7 @@ npm install
 bash scripts/start_taobao_visual_chrome.sh
 ```
 
-Windows:
+Windows 暂不纳入当前业务主线；PowerShell 脚本仅作为远期/实验辅助保留。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_taobao_visual_chrome.ps1
@@ -61,18 +61,15 @@ Codex App 的 MCP server 使用 `local/start_midscene_computer_mcp.sh` 启动，
 从全量输入台账生成当天分段采集计划：
 
 ```bash
-.venv/bin/python harness.py visual-auto-tick --raw-input cards.xlsx
-.venv/bin/python harness.py visual-auto-tick --raw-input cards.xlsx --prepare-requests
-
 .venv/bin/python harness.py visual-plan-day --raw-input cards.xlsx
 .venv/bin/python harness.py visual-scheduler-status <plan_id>
-.venv/bin/python harness.py visual-session-capsule <plan_id> --session 1
-.venv/bin/python harness.py visual-session-run <plan_id> --session 1
+.venv/bin/python harness.py visual-heartbeat --mode prepare --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-heartbeat --mode dispatch --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-control status --plan-id <plan_id> --session 1
 .venv/bin/python harness.py visual-sync-worker <plan_id> --session 1
-.venv/bin/python harness.py visual-session-lease <plan_id> --session 1 --action inspect
 ```
 
-`visual-auto-tick` 是 automation / Slack / 新 Codex 会话的默认入口：它读取整本台账，自动创建或复用当天 `daily_YYYYMMDD` plan，并根据当前时间和任务状态选择应运行的 session。日常远程触发不需要人工知道 `plan_id` 或 `session`。`visual-plan-day` 会从 `preferred_mode=statistical` 且 `淘宝采集时间` 缺失或过期的牌名中，按日预算和 session 数自动挑选关键词；`skip` 和 `with_keywords` 不进入当前默认统计采集池。`with_keywords` 表示该行未来应使用“万智牌 中文牌名 关键词”这类更具体的搜索结果统计赋值；当前只记录为待处理路由，尚未实现额外关键词采集或赋值。
+`visual-heartbeat` 是当前本地 scheduler / automation 的短命心跳入口：它根据已有 plan、session 状态和 `control.json` 执行 `sync`、`prepare`、`dispatch` 或 `all`，只做确定性判断、准备 session worker contract、返回 worker 命令；不打开 Chrome、不触碰淘宝页面、不直接启动后台进程。`visual-auto-tick` 仍保留为兼容/辅助入口，但不再作为文档主线。`visual-plan-day` 会从 `preferred_mode=statistical` 且 `淘宝采集时间` 缺失或过期的牌名中，按日预算和 session 数自动挑选关键词；`skip` 和 `with_keywords` 不进入当前默认统计采集池。`with_keywords` 表示该行未来应使用“万智牌 中文牌名 关键词”这类更具体的搜索结果统计赋值；当前只记录为待处理路由，尚未实现额外关键词采集或赋值。
 
 长程运行不依赖单个 Codex 会话的上下文。每个 session 都可以生成独立
 capsule：
@@ -152,7 +149,7 @@ npm run midscene:computer:help
 - 定位：截图/VLM。
 - 输出：系统鼠标、键盘、滚轮。
 - 不连接浏览器 CDP，不读 DOM/HTML/network/cookies/storage。
-- Codex 仍是长期任务入口和调度 agent；Midscene 的外部 VLM 只做局部视觉定位/操作。
+- Codex 负责 plan/session 监督、异常裁判、证据复核和后处理编排；长期在线调度交给短命 heartbeat、worker contract 和文件状态。
 - `visual-session-run` now also writes a bounded small-session worker contract:
   `sessions/session_NN/midscene_session_worker_request.json`. Midscene may
   continuously capture the selected keywords inside that contract, but Codex
@@ -173,8 +170,10 @@ npm run midscene:computer:help
 # Midscene computer / 视觉采集入口
 .venv/bin/python harness.py visual-one 中止
 .venv/bin/python harness.py visual-run <run_id> --limit 1
-.venv/bin/python harness.py visual-auto-tick --raw-input cards.xlsx --prepare-requests
 .venv/bin/python harness.py visual-plan-day --raw-input cards.xlsx
+.venv/bin/python harness.py visual-heartbeat --mode prepare --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-heartbeat --mode dispatch --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-control status --plan-id <plan_id> --session 1
 .venv/bin/python harness.py visual-session-capsule <plan_id> --session 1
 .venv/bin/python harness.py visual-session-run <plan_id> --session 1
 .venv/bin/python harness.py visual-sync-worker <plan_id> --session 1
@@ -195,6 +194,7 @@ npm run midscene:computer:help
 # 自检
 .venv/bin/python harness.py setup
 .venv/bin/python harness.py db
+scripts/check_portable_config.sh
 ```
 
 ## 项目结构

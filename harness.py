@@ -473,6 +473,7 @@ def cmd_visual_ingest(args):
         keyword=args.keyword,
         rows=rows,
         screenshot_path=os.path.abspath(args.screenshot) if args.screenshot else "",
+        captured_at=args.captured_at or "",
         confidence_threshold=args.confidence_threshold,
         retain_screenshot=retain,
         target_limit=sampling_config.target_listings_per_keyword,
@@ -502,7 +503,7 @@ def cmd_visual_export(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
     if args.filter:
-        from modules.filter import filter_exported_results
+        from modules.filter import filter_exported_results, filter_exported_results_by_keyword
         from modules.utils import ConfigManager, setup_logging
 
         config = ConfigManager(args.config)
@@ -511,17 +512,29 @@ def cmd_visual_export(args):
         filtered_dir = os.path.join(task_dir, "filtered")
         keyword = args.keyword or ""
         card_name = args.card or keyword.replace(config.get("INPUT", "keyword_prefix", fallback="万智牌"), "").strip()
-        filter_result = filter_exported_results(
-            result["raw_excel"],
-            keyword=keyword or args.run_id,
-            card_name=card_name,
-            output_dir=filtered_dir,
-            require_magic_prefix=config.getboolean("FILTER", "require_magic_prefix", fallback=True),
-            require_card_name=bool(card_name) and config.getboolean("FILTER", "require_card_name", fallback=True),
-            exclude_shop_names=config.get("FILTER", "exclude_shop_names", fallback=""),
-            exclude_title_keywords=config.get("FILTER", "exclude_title_keywords", fallback=""),
-            logger=logger,
-        )
+        if keyword or args.card:
+            filter_result = filter_exported_results(
+                result["raw_excel"],
+                keyword=keyword or card_name or "all_keywords",
+                card_name=card_name,
+                output_dir=filtered_dir,
+                require_magic_prefix=config.getboolean("FILTER", "require_magic_prefix", fallback=True),
+                require_card_name=bool(card_name) and config.getboolean("FILTER", "require_card_name", fallback=True),
+                exclude_shop_names=config.get("FILTER", "exclude_shop_names", fallback=""),
+                exclude_title_keywords=config.get("FILTER", "exclude_title_keywords", fallback=""),
+                logger=logger,
+            )
+        else:
+            filter_result = filter_exported_results_by_keyword(
+                result["raw_excel"],
+                output_dir=filtered_dir,
+                keyword_prefix=config.get("INPUT", "keyword_prefix", fallback="万智牌"),
+                require_magic_prefix=config.getboolean("FILTER", "require_magic_prefix", fallback=True),
+                require_card_name=config.getboolean("FILTER", "require_card_name", fallback=True),
+                exclude_shop_names=config.get("FILTER", "exclude_shop_names", fallback=""),
+                exclude_title_keywords=config.get("FILTER", "exclude_title_keywords", fallback=""),
+                logger=logger,
+            )
         print(json.dumps(filter_result, ensure_ascii=False, indent=2))
 
 
@@ -675,6 +688,7 @@ def main():
     ingest.add_argument("--confidence-threshold", type=float, default=0.80, help="低于该置信度标记 needs_review")
     ingest.add_argument("--failure-reason", help="异常原因；只有人工介入级别会按策略保留截图")
     ingest.add_argument("--retain-screenshot", action="store_true", default=False, help="即使识别成功也保留原始截图")
+    ingest.add_argument("--captured-at", help="截图证据时间；缺失时会 fallback 到当前时间并在结果中提示")
 
     export = sub.add_parser("visual-export", help="将 raw_rows.jsonl 导出为 raw_results.xlsx")
     export.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")

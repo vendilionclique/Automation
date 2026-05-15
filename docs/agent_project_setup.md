@@ -5,12 +5,12 @@ This repository keeps project-specific agent knowledge and Midscene MCP launch d
 ## What Is Project-Level
 
 - `.agents/skills/taobao-visual-collection/SKILL.md`: repo-specific workflow skill.
-- `.agents/mcp/midscene-computer.json`: portable MCP definition for import-capable agents.
-- `.cursor/mcp.json`: Cursor project MCP configuration.
-- `scripts/start_midscene_computer_mcp.ps1`: Windows Midscene computer MCP launcher.
+- `.agents/mcp/midscene-computer.json`: macOS MCP definition for import-capable agents.
+- `.cursor/mcp.json`: macOS Cursor project MCP configuration.
+- `local/start_midscene_computer_mcp.sh`: macOS Midscene computer MCP launcher.
 - `scripts/sync_agent_project_config.sh`: macOS Codex sync for MCP and tool approvals.
-- `scripts/sync_agent_project_config.ps1`: Windows Codex sync for MCP and tool approvals.
 - `scripts/check_taobao_visual_cron_permissions.sh`: macOS cron preflight for process enumeration and screenshot persistence.
+- `scripts/*.ps1`: Windows helpers retained for future/experimental work; Windows is not part of the current Taobao collection mainline.
 
 ## What Remains Machine-Local
 
@@ -29,7 +29,7 @@ bash scripts/check_taobao_visual_cron_permissions.sh
 python harness.py setup
 ```
 
-Windows:
+Windows is future/experimental for this workflow and is not part of the current business mainline:
 
 ```powershell
 npm ci
@@ -122,4 +122,10 @@ session and report setup drift instead of clicking through permission screens.
 Codex accepts `auto`, `prompt`, and `approve`; use `approve` for trusted local
 Midscene computer tools in unattended collection.
 
-For Cursor, open the repository and use the tracked `.cursor/mcp.json`. If Cursor does not expand `${workspaceFolder}` in MCP args on a specific version, replace that one arg with the absolute path to `scripts\start_midscene_computer_mcp.ps1`.
+For Cursor on macOS, open the repository and use the tracked `.cursor/mcp.json`. If Cursor does not expand `${workspaceFolder}` in MCP args on a specific version, replace that one arg with the absolute path to `local/start_midscene_computer_mcp.sh`.
+
+For lightweight local checks before committing config/script changes:
+
+```bash
+scripts/check_portable_config.sh
+```

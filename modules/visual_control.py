@@ -137,6 +137,20 @@ def control_blocks_dispatch(state: Dict[str, Any], session_index: Optional[int] 
     return {"blocked": False, "reason": "", "source": {}}
 
 
+def control_interrupt_for_worker(plan_id: str, session_index: Optional[int] = None) -> Dict[str, Any]:
+    """Return the current pause/stop/cooldown block for a running worker."""
+    state = load_control_state(plan_id)
+    block = control_blocks_dispatch(state, session_index)
+    if not block.get("blocked"):
+        return {"interrupted": False, "reason": "", "control": state, "block": block}
+    return {
+        "interrupted": True,
+        "reason": block.get("reason") or "control_blocked",
+        "control": state,
+        "block": block,
+    }
+
+
 def write_worker_runtime(
     plan_id: str,
     session_index: int,

@@ -18,6 +18,7 @@ from modules.page_sampling import (
 )
 from modules.session_state import initial_session_state, session_policy_from_settings
 from modules.session_capsule import (
+    RUNNABLE_STATUSES,
     acquire_session_lease,
     build_session_capsule,
     complete_session_lease,
@@ -140,12 +141,7 @@ def run_visual_collection(
                 record_session = record.get("extra", {}).get("daily_session_index")
                 if int(record_session or 0) != int(session_index):
                     continue
-            if record.get("status") not in (
-                "pending",
-                "cooldown",
-                "failed",
-                "needs_midscene_computer",
-            ):
+            if record.get("status") not in RUNNABLE_STATUSES:
                 continue
 
             keyword = record["keyword"]
@@ -332,6 +328,23 @@ def sync_midscene_worker_results(run_id: str, session_index: int) -> Dict:
         elif status in {"needs_review", "review"}:
             record["status"] = "needs_review"
             record["failure_reason"] = keyword_result.get("stop_reason") or rough_state or "needs_review"
+        elif status in {"real_not_available"}:
+            record["status"] = "paused_needs_human"
+            record["failure_reason"] = (
+                keyword_result.get("stop_reason") or rough_state or "real_capture_not_available"
+            )
+        elif status in {"paused_needs_human", "paused_needs_supervisor"}:
+            record["status"] = status
+            record["failure_reason"] = keyword_result.get("stop_reason") or rough_state or status
+        elif status in {"cooldown", "cooling_down"}:
+            record["status"] = "cooldown"
+            record["failure_reason"] = keyword_result.get("stop_reason") or rough_state or "cooldown"
+        elif status in {"failed_recoverable"}:
+            record["status"] = "failed_recoverable"
+            record["failure_reason"] = keyword_result.get("stop_reason") or rough_state or "worker_failed"
+        elif status in {"failed_hard"}:
+            record["status"] = "failed_hard"
+            record["failure_reason"] = keyword_result.get("stop_reason") or rough_state or "worker_failed_hard"
         elif status in {"skipped"}:
             record["status"] = "skipped"
             record["failure_reason"] = keyword_result.get("stop_reason") or "skipped"

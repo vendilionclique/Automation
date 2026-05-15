@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 
+Write-Warning "Windows Chrome launcher is retained for future/experimental use. The current Taobao visual collection mainline is macOS."
+
 $RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $ProfileDir = if ($env:TAOBAO_CHROME_PROFILE_DIR) {
     $env:TAOBAO_CHROME_PROFILE_DIR

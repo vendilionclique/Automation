@@ -16,8 +16,7 @@ from modules.utils import ensure_dir, get_project_root
 
 RUNNABLE_STATUSES = {
     "pending",
-    "cooldown",
-    "failed",
+    "failed_recoverable",
     "needs_midscene_computer",
 }
 

@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 
+Write-Warning "Windows Midscene MCP launcher is retained for future/experimental use. The current Taobao visual collection mainline is macOS + local/start_midscene_computer_mcp.sh."
+
 $RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $EnvFile = if ($env:MIDSCENE_ENV_FILE) { $env:MIDSCENE_ENV_FILE } else { Join-Path $RootDir "local\midscene-computer.env" }
 $Launcher = Join-Path $RootDir "scripts\midscene_computer_mcp_launcher.cjs"

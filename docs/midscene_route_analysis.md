@@ -115,7 +115,7 @@ Codex 负责：
 
 当前落地为混合架构：
 
-- Codex 仍是长期任务入口、调度 agent、异常裁判、证据复核和后处理编排。
+- Codex 负责计划入口、异常裁判、证据复核和后处理编排；长期在线调度交给短命 heartbeat、worker contract 和文件状态。
 - Midscene computer 作为系统级视觉操作层，可调用外部便宜 VLM 做 bounded session 内的可见屏幕判断和操作推进，例如前台确认、淘宝搜索框定位、搜索提交、结果页等待和 viewport 滚动。
 - 外部 VLM 的职责只到“看屏幕并辅助操作”为止；商品字段最终仍以保留截图为证据，由 Codex 复核后写入 `visual-ingest`。
 - Midscene MCP 通过 `local/start_midscene_computer_mcp.sh` 启动，读取本机 `local/midscene-computer.env`。真实 key 不进入仓库，也不写入 `~/.codex/config.toml`。

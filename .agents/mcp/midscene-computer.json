@@ -1,13 +1,10 @@
 {
   "name": "midscene-computer",
   "transport": "stdio",
-  "command": "powershell",
+  "platform": "macos",
+  "command": "bash",
   "args": [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    "scripts/start_midscene_computer_mcp.ps1"
+    "local/start_midscene_computer_mcp.sh"
   ],
   "env_file": "local/midscene-computer.env",
   "tool_approval": {
@@ -32,9 +29,10 @@
     }
   },
   "notes": [
-    "Project-level source of truth for agent apps that can import MCP server definitions.",
+    "Project-level source of truth for agent apps that can import MCP server definitions on the current macOS mainline.",
     "Do not commit local/midscene-computer.env; each machine supplies its own VLM key.",
     "The MCP server uses system screenshots and system mouse/keyboard/scroll actions only.",
-    "For Codex cron/local agent runs, use scripts/sync_agent_project_config.ps1 to register this server and pre-approve the bounded visual action tools."
+    "For Codex cron/local agent runs on macOS, use scripts/sync_agent_project_config.sh to register this server and pre-approve the bounded visual action tools.",
+    "Windows PowerShell launchers are retained as future/experimental helpers and are not part of the current Taobao collection mainline."
   ]
 }

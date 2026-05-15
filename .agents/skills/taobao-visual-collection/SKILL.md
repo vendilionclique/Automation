@@ -20,7 +20,7 @@ Use this skill for project-specific Taobao collection work in this repository. I
 
 1. Read `AGENTS.md` for current project policy and status.
 2. Run `python harness.py setup` when environment readiness is unclear.
-3. Use `python harness.py visual-plan-day` or `visual-auto-tick` for ledger-driven planning.
+3. Use `python harness.py visual-plan-day` for ledger-driven planning; `visual-auto-tick` is retained as a compatibility helper, not the current documented mainline.
 4. Prefer `python harness.py visual-heartbeat --mode prepare|dispatch|sync|all` for the local short-lived scheduler heartbeat. It may prepare contracts and return worker commands, but it must not open Chrome or touch Taobao.
 5. Use `python harness.py visual-control status|pause|resume|stop|cooldown|lock|unlock --plan-id ...` as the Codex/human supervisor control plane. Codex should not be the long-running heartbeat.
 6. Use `python harness.py visual-session-run <plan_id> --session <N>` when a bounded session contract must be prepared directly.
@@ -55,7 +55,7 @@ Use this skill for project-specific Taobao collection work in this repository. I
 - First try normal visual/system switching: taskbar/Dock click, Alt-Tab on Windows, or Cmd-Tab on macOS. A user clicking Codex to check progress is not Chrome instability.
 - If Chrome is still not visible after visual switching, run the platform launcher. The launcher must reuse an existing logged-in Chrome window when any Chrome is already running; it must not open duplicate collection windows or restart a new profile just because Codex was foreground.
 
-Windows:
+Windows is future/experimental for this workflow; the current Taobao collection mainline is macOS.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_taobao_visual_chrome.ps1
@@ -72,7 +72,7 @@ bash scripts/start_taobao_visual_chrome.sh
 
 ## Codex/Midscene Permission Setup
 
-- Unattended cron/session runs must pre-approve the Midscene computer MCP server and its bounded visual tools. On macOS, run `bash scripts/sync_agent_project_config.sh`; on Windows, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync_agent_project_config.ps1`.
+- Unattended cron/session runs must pre-approve the Midscene computer MCP server and its bounded visual tools. On macOS, run `bash scripts/sync_agent_project_config.sh`. Windows PowerShell helpers are retained for future/experimental work and are not part of the current business mainline.
 - The same sync scripts create Codex profiles named `taobao_visual_cron` and `taobao_visual_extract` with `model = "gpt-5.5"`, `sandbox_mode = "danger-full-access"`, and `approval_policy = "never"`. Run Taobao visual cron jobs with `taobao_visual_cron`; run short-lived Codex extract workers with `taobao_visual_extract`. Both profiles are intended to avoid unattended automation pausing for tool approvals.
 - On macOS, run `bash scripts/check_taobao_visual_cron_permissions.sh` from the repository root before relying on an unattended cron. It must be able to see Chrome with `pgrep` when Chrome is running and save a system screenshot with `screencapture`.
 - The sync scripts write Codex-side `default_tools_approval_mode = "approve"` and per-tool `approval_mode = "approve"` for the actual Midscene tool names: `computer_connect`, `computer_disconnect`, `computer_list_displays`, `ListDisplays`, `take_screenshot`, `Tap`, `DoubleClick`, `RightClick`, `MouseMove`, `Input`, `Scroll`, `KeyboardPress`, `DragAndDrop`, `ClearInput`, `act`, and `assert`.
@@ -83,29 +83,19 @@ bash scripts/start_taobao_visual_chrome.sh
 
 - `config/settings.ini`: machine-local secrets and ledger path; ignored by git.
 - `local/midscene-computer.env`: machine-local Midscene VLM key; ignored by git.
-- `scripts/start_taobao_visual_chrome.ps1`: Windows launcher/focus helper for the dedicated Taobao Chrome profile.
+- `scripts/start_taobao_visual_chrome.ps1`: future/experimental Windows launcher/focus helper for the dedicated Taobao Chrome profile.
 - `scripts/start_taobao_visual_chrome.sh`: macOS launcher/focus helper for the dedicated Taobao Chrome profile.
-- `scripts/start_midscene_computer_mcp.ps1`: Windows stdio launcher for Midscene MCP.
+- `scripts/start_midscene_computer_mcp.ps1`: future/experimental Windows stdio launcher for Midscene MCP.
 - `scripts/check_taobao_visual_cron_permissions.sh`: macOS preflight for process enumeration and screenshot persistence in the cron execution context.
 - `scripts/sync_agent_project_config.sh`: macOS Codex MCP/skill sync with Midscene tool pre-approval.
-- `scripts/sync_agent_project_config.ps1`: syncs project MCP/skill into Codex on a new machine.
+- `scripts/sync_agent_project_config.ps1`: future/experimental Windows Codex sync helper.
 - `.cursor/mcp.json`: project-level Cursor MCP declaration.
 - `.agents/mcp/midscene-computer.json`: portable MCP declaration for agent apps/import scripts.
 - `data/tasks/<plan_id>/`: durable plan/session/evidence state; ignored by git.
 
 ## New Machine Setup
 
-From the repository root on Windows:
-
-```powershell
-npm ci
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync_agent_project_config.ps1
-python harness.py setup
-```
-
-Then fill `local/midscene-computer.env` with the local VLM key if it was newly created, start/login the dedicated Taobao Chrome profile manually, and restart the agent app if it caches MCP server lists.
-
-From the repository root on macOS:
+Windows is future/experimental for this workflow. From the repository root on macOS:
 
 ```bash
 npm ci
@@ -113,3 +103,5 @@ bash scripts/sync_agent_project_config.sh
 bash scripts/check_taobao_visual_cron_permissions.sh
 python harness.py setup
 ```
+
+Then fill `local/midscene-computer.env` with the local VLM key if it was newly created, start/login the dedicated Taobao Chrome profile manually, and restart the agent app if it caches MCP server lists.

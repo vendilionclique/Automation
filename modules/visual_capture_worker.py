@@ -14,11 +14,24 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from modules.page_sampling import write_task_event, write_tile_summary
+from modules.page_state import (
+    CAPTCHA_REQUIRED,
+    EMPTY_RESULT,
+    LOGIN_REQUIRED,
+    UNKNOWN,
+    VISIBLE_READY,
+    WHITE_SKELETON,
+    detect_page_state,
+)
 from modules.utils import ensure_dir
-from modules.visual_control import write_worker_runtime
+from modules.visual_control import (
+    apply_control_action,
+    control_interrupt_for_worker,
+    write_worker_runtime,
+)
 
 
 MCP_REQUIRED_TOOLS = {
@@ -28,6 +41,47 @@ MCP_REQUIRED_TOOLS = {
 }
 MCP_OPTIONAL_TOOLS = {"assert"}
 REAL_NOT_AVAILABLE_STATUS = "real_not_available"
+CAPTURED_STATUSES = {"captured"}
+CAPTURABLE_PAGE_STATES = {
+    VISIBLE_READY,
+    EMPTY_RESULT,
+    "results_page",
+    "search_results",
+    "visible_results",
+}
+HARD_ABNORMAL_REASONS = {
+    "login_required",
+    "captcha_required",
+    "captcha_or_risk",
+    "risk_suspected",
+    "popup_blocked",
+    "white_skeleton",
+    "page_not_loaded",
+    "account_state_changed_or_unusual",
+    "automation_permission_blocked",
+    "keyword_timeout",
+    "manual_review_needed",
+    "page_state_detection_failed",
+}
+
+
+class WorkerControlInterrupt(RuntimeError):
+    def __init__(self, reason: str, status: str = "paused_needs_supervisor"):
+        super().__init__(reason)
+        self.reason = reason
+        self.status = status
+
+
+class KeywordTimeout(RuntimeError):
+    pass
+
+
+class MidsceneActionAbnormal(RuntimeError):
+    def __init__(self, reason: str, rough_state: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+        self.rough_state = rough_state
+        self.message = message
 
 
 def run_capture_worker(contract_path: str) -> Dict[str, Any]:
@@ -139,6 +193,15 @@ def _run_real_capture_contract(
     task_dir: str,
     keyword_tasks: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    initial_interrupt = _control_interrupt(run_id, session_index)
+    if initial_interrupt:
+        return {
+            "status": initial_interrupt.status,
+            "stop_reason": initial_interrupt.reason,
+            "keyword_results": [],
+            "notes": "Capture worker did not start because supervisor control blocked dispatch.",
+        }
+
     launcher = _mcp_launcher_path()
     if not launcher:
         return _real_unavailable_results(
@@ -152,7 +215,8 @@ def _run_real_capture_contract(
 
     try:
         with MidsceneStdioClient(_mcp_command(launcher), cwd=_project_root()) as client:
-            tools = client.list_tools()
+            _raise_if_controlled(run_id, session_index)
+            tools = client.list_tools(interrupt_check=lambda: _raise_if_controlled(run_id, session_index))
             missing = sorted(MCP_REQUIRED_TOOLS - set(tools))
             if missing:
                 return _real_unavailable_results(
@@ -172,12 +236,20 @@ def _run_real_capture_contract(
                 contract_path=contract_path,
                 tools=sorted(set(tools) & (MCP_REQUIRED_TOOLS | MCP_OPTIONAL_TOOLS)),
             )
-            client.call_tool("computer_connect", {})
+            client.call_tool(
+                "computer_connect",
+                {},
+                interrupt_check=lambda: _raise_if_controlled(run_id, session_index),
+            )
 
             keyword_results = []
+            consecutive_abnormal = 0
+            abnormal_limit = _consecutive_abnormal_limit(contract)
             for fallback_index, task in enumerate(keyword_tasks, start=1):
+                _raise_if_controlled(run_id, session_index)
                 if fallback_index > 1:
                     _sleep_between_keywords(contract, run_id, session_index, task_dir, task)
+                    _raise_if_controlled(run_id, session_index)
                 keyword_result = _capture_keyword_with_mcp(
                     client=client,
                     task=task,
@@ -189,12 +261,48 @@ def _run_real_capture_contract(
                     tools=tools,
                 )
                 keyword_results.append(keyword_result)
-                if keyword_result.get("status") == "needs_review":
+                status = str(keyword_result.get("status") or "")
+                reason = str(keyword_result.get("stop_reason") or "")
+                if status in CAPTURED_STATUSES:
+                    consecutive_abnormal = 0
+                elif status in {"skipped"}:
+                    continue
+                else:
+                    consecutive_abnormal += 1
+
+                if status in {"paused_needs_human", "paused_needs_supervisor"}:
+                    return {
+                        "status": status,
+                        "stop_reason": reason or status,
+                        "keyword_results": keyword_results,
+                        "notes": "Real Midscene computer MCP capture interrupted by supervisor control.",
+                    }
+                if status == "failed" and reason in {"stopped", "stop_or_locked"}:
+                    return {
+                        "status": "failed",
+                        "stop_reason": reason,
+                        "keyword_results": keyword_results,
+                        "notes": "Real Midscene computer MCP capture stopped by supervisor control.",
+                    }
+                if _should_stop_immediately(status, reason):
+                    _request_worker_cooldown(run_id, session_index, reason)
                     return {
                         "status": "needs_review",
-                        "stop_reason": keyword_result.get("stop_reason") or "keyword_needs_review",
+                        "stop_reason": reason or "keyword_needs_review",
                         "keyword_results": keyword_results,
-                        "notes": "Real Midscene computer MCP capture stopped for human review.",
+                        "notes": "Real Midscene computer MCP capture stopped for human-in-the-loop review.",
+                    }
+                if consecutive_abnormal >= abnormal_limit:
+                    stop_reason = reason or "consecutive_abnormal_limit"
+                    _request_worker_cooldown(run_id, session_index, stop_reason)
+                    return {
+                        "status": "cooldown",
+                        "stop_reason": "consecutive_abnormal_limit",
+                        "keyword_results": keyword_results,
+                        "notes": (
+                            "Real Midscene computer MCP capture reached the consecutive abnormal "
+                            "limit and requested session cooldown."
+                        ),
                     }
 
             session_status = (
@@ -211,6 +319,13 @@ def _run_real_capture_contract(
                     "owned by extract/ingest from retained visible screenshots."
                 ),
             }
+    except WorkerControlInterrupt as exc:
+        return {
+            "status": exc.status,
+            "stop_reason": exc.reason,
+            "keyword_results": [],
+            "notes": "Real Midscene computer MCP capture interrupted by supervisor control.",
+        }
     except Exception as exc:
         return _real_unavailable_results(
             keyword_tasks,
@@ -247,27 +362,56 @@ def _capture_keyword_with_mcp(
     scroll_distance = max(1, scroll_distance)
     page_load_wait = float((contract.get("config") or {}).get("page_load_wait") or 8.0)
     allow_act = bool((contract.get("model_boundary") or {}).get("allow_midscene_act", True))
+    timeout_seconds = _keyword_timeout_seconds(task, contract)
+    keyword_deadline = started + timeout_seconds
+
+    def interrupt_check() -> None:
+        _raise_if_controlled(run_id, session_index)
 
     try:
+        _raise_if_controlled(run_id, session_index)
+        _raise_if_keyword_timeout(started, timeout_seconds, keyword)
         if not allow_act:
             raise RuntimeError("midscene_act_disabled_for_real_capture")
-        _call_act(
+        search_result = _call_act(
             client,
             _keyword_search_prompt(keyword=keyword, scroll_distance=scroll_distance),
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
         )
+        _raise_if_abnormal_act(search_result, default_context="keyword_search")
         _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_keyword_search_act")
-        time.sleep(page_load_wait)
+        _interruptible_sleep(
+            page_load_wait,
+            run_id,
+            session_index,
+            task_dir,
+            keyword=keyword,
+            reason="page_load_wait",
+            started=started,
+            timeout_seconds=timeout_seconds,
+        )
 
         for tile_index in range(max_tiles):
+            _raise_if_controlled(run_id, session_index)
+            _raise_if_keyword_timeout(started, timeout_seconds, keyword)
             tile_id = f"tile_{tile_index:02d}"
             tile_path = _tile_path(capture_plan, evidence_dir, tile_index)
-            screenshot = client.capture_screenshot(tile_path)
+            screenshot = client.capture_screenshot(
+                tile_path,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                keyword=keyword,
+            )
+            page_state = _classify_screenshot(tile_path, contract)
             screenshots.append(
                 {
                     "tile_id": tile_id,
                     "path": tile_path,
                     "mime_type": screenshot.get("mime_type") or "image/png",
                     "captured_at": _now(),
+                    "page_state": page_state,
                 }
             )
             write_tile_summary(
@@ -276,21 +420,32 @@ def _capture_keyword_with_mcp(
                 keyword=keyword,
                 tile_id=tile_id,
                 scroll_distance_px=0 if tile_index == 0 else scroll_distance,
-                rough_state="visible_results_unverified",
+                rough_state=page_state["status"],
                 image_path=tile_path,
                 image_retained=True,
-                notes="captured_by_midscene_computer_mcp",
+                notes=page_state.get("reason") or "captured_by_midscene_computer_mcp",
             )
+            review_reason = _page_state_review_reason(page_state)
+            if review_reason:
+                raise MidsceneActionAbnormal(
+                    reason=review_reason,
+                    rough_state=page_state["status"],
+                    message=f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
+                )
             if tile_index < max_tiles - 1:
                 _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"before_scroll_{tile_index + 1}")
-                _call_act(
+                scroll_result = _call_act(
                     client,
                     _next_tile_prompt(
                         keyword=keyword,
                         tile_index=tile_index + 1,
                         scroll_distance=scroll_distance,
                     ),
+                    interrupt_check=interrupt_check,
+                    keyword_deadline=keyword_deadline,
+                    keyword=keyword,
                 )
+                _raise_if_abnormal_act(scroll_result, default_context=f"scroll_tile_{tile_index + 1}")
                 _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_act_{tile_index + 1}")
 
         elapsed = round(time.monotonic() - started, 3)
@@ -308,17 +463,66 @@ def _capture_keyword_with_mcp(
             screenshots=screenshots,
             elapsed_seconds=elapsed,
         )
-    except Exception as exc:
-        abnormal_path = (
-            task.get("abnormal_screenshot_path")
-            or capture_plan.get("abnormal_screenshot_path")
-            or os.path.join(evidence_dir, "abnormal_state.png")
+    except WorkerControlInterrupt as exc:
+        elapsed = round(time.monotonic() - started, 3)
+        return _write_keyword_result(
+            task=task,
+            run_id=run_id,
+            session_index=session_index,
+            task_dir=task_dir,
+            fallback_index=fallback_index,
+            mode="real",
+            status=exc.status,
+            rough_state=exc.reason,
+            stop_reason=exc.reason,
+            notes="Keyword capture interrupted by supervisor control.",
+            screenshots=screenshots,
+            elapsed_seconds=elapsed,
         )
-        try:
-            client.capture_screenshot(str(abnormal_path))
-            abnormal_screenshot = str(abnormal_path)
-        except Exception:
-            abnormal_screenshot = ""
+    except KeywordTimeout as exc:
+        abnormal_screenshot = _capture_abnormal_screenshot(
+            client,
+            task,
+            capture_plan,
+            evidence_dir,
+            timeout_seconds=0.5,
+        )
+        elapsed = round(time.monotonic() - started, 3)
+        return _write_keyword_result(
+            task=task,
+            run_id=run_id,
+            session_index=session_index,
+            task_dir=task_dir,
+            fallback_index=fallback_index,
+            mode="real",
+            status="failed_recoverable",
+            rough_state="keyword_timeout",
+            stop_reason="keyword_timeout",
+            notes=str(exc),
+            screenshots=screenshots,
+            abnormal_screenshot=abnormal_screenshot,
+            elapsed_seconds=elapsed,
+        )
+    except MidsceneActionAbnormal as exc:
+        abnormal_screenshot = _capture_abnormal_screenshot(client, task, capture_plan, evidence_dir)
+        elapsed = round(time.monotonic() - started, 3)
+        return _write_keyword_result(
+            task=task,
+            run_id=run_id,
+            session_index=session_index,
+            task_dir=task_dir,
+            fallback_index=fallback_index,
+            mode="real",
+            status="needs_review",
+            rough_state=exc.rough_state,
+            stop_reason=exc.reason,
+            notes=exc.message,
+            screenshots=screenshots,
+            abnormal_screenshot=abnormal_screenshot,
+            elapsed_seconds=elapsed,
+        )
+    except Exception as exc:
+        abnormal_screenshot = _capture_abnormal_screenshot(client, task, capture_plan, evidence_dir)
         elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
             task=task,
@@ -360,7 +564,7 @@ def _sleep_between_keywords(
         keyword=keyword,
         seconds=round(seconds, 3),
     )
-    time.sleep(seconds)
+    _interruptible_sleep(seconds, run_id, session_index, task_dir, keyword=keyword, reason="inter_keyword_pause")
 
 
 def _sleep_micro_pause(
@@ -381,7 +585,7 @@ def _sleep_micro_pause(
         reason=reason,
         seconds=round(seconds, 3),
     )
-    time.sleep(seconds)
+    _interruptible_sleep(seconds, run_id, session_index, task_dir, keyword=keyword, reason=reason)
 
 
 def _sample_micro_pause_seconds(behavior: Dict[str, Any]) -> float:
@@ -409,6 +613,127 @@ def _sample_micro_pause_seconds(behavior: Dict[str, Any]) -> float:
             return random.uniform(low, high)
     low, high, _ = segments[-1]
     return random.uniform(low, high)
+
+
+def _interruptible_sleep(
+    seconds: float,
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+    keyword: str = "",
+    reason: str = "sleep",
+    started: Optional[float] = None,
+    timeout_seconds: Optional[float] = None,
+) -> None:
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        _raise_if_controlled(run_id, session_index)
+        if started is not None and timeout_seconds is not None:
+            _raise_if_keyword_timeout(started, timeout_seconds, keyword)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, remaining))
+
+
+def _control_interrupt(run_id: str, session_index: int) -> Optional[WorkerControlInterrupt]:
+    interrupt = control_interrupt_for_worker(run_id, session_index)
+    if not interrupt.get("interrupted"):
+        return None
+    reason = str(interrupt.get("reason") or "control_blocked")
+    status = "paused_needs_supervisor"
+    if reason in {"stopped", "stop_or_locked"}:
+        status = "failed"
+    elif reason in {"cooling_down"}:
+        status = "cooldown"
+    elif reason in {"locked"}:
+        status = "paused_needs_human"
+    return WorkerControlInterrupt(reason=reason, status=status)
+
+
+def _raise_if_controlled(run_id: str, session_index: int) -> None:
+    interrupt = _control_interrupt(run_id, session_index)
+    if interrupt:
+        raise interrupt
+
+
+def _keyword_timeout_seconds(task: Dict[str, Any], contract: Dict[str, Any]) -> float:
+    capture_plan = task.get("capture_plan") or {}
+    hard_stop = contract.get("hard_stop_policy") or {}
+    value = (
+        task.get("timeout_seconds")
+        or capture_plan.get("timeout_seconds")
+        or hard_stop.get("timeout_per_keyword_seconds")
+        or (contract.get("config") or {}).get("keyword_timeout_seconds")
+        or 180
+    )
+    try:
+        return max(10.0, float(value))
+    except (TypeError, ValueError):
+        return 180.0
+
+
+def _raise_if_keyword_timeout(started: float, timeout_seconds: float, keyword: str) -> None:
+    if time.monotonic() - started > timeout_seconds:
+        raise KeywordTimeout(f"Keyword capture timed out after {timeout_seconds:.1f}s: {keyword}")
+
+
+def _consecutive_abnormal_limit(contract: Dict[str, Any]) -> int:
+    hard_stop = contract.get("hard_stop_policy") or {}
+    try:
+        return max(1, int(hard_stop.get("stop_after_consecutive_abnormal") or 2))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _should_stop_immediately(status: str, reason: str) -> bool:
+    if status in {"paused_needs_human", "paused_needs_supervisor", "failed_hard", "cooldown"}:
+        return True
+    return reason in HARD_ABNORMAL_REASONS
+
+
+def _request_worker_cooldown(run_id: str, session_index: int, reason: str) -> None:
+    try:
+        apply_control_action(
+            run_id,
+            "cooldown",
+            session_index=session_index,
+            reason=f"capture_worker:{reason}",
+            cooldown_minutes=60,
+        )
+    except Exception:
+        pass
+
+
+def _capture_abnormal_screenshot(
+    client: "MidsceneStdioClient",
+    task: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    evidence_dir: str,
+    timeout_seconds: float = 3.0,
+) -> str:
+    abnormal_path = (
+        task.get("abnormal_screenshot_path")
+        or capture_plan.get("abnormal_screenshot_path")
+        or os.path.join(evidence_dir, "abnormal_state.png")
+    )
+    try:
+        client.capture_screenshot(str(abnormal_path), timeout_seconds=timeout_seconds)
+        return str(abnormal_path)
+    except Exception:
+        return ""
+
+
+def _page_state_review_reason(page_state: Dict[str, Any]) -> str:
+    status = str(page_state.get("status") or UNKNOWN)
+    reason = str(page_state.get("reason") or "")
+    if status in {LOGIN_REQUIRED, CAPTCHA_REQUIRED, WHITE_SKELETON, "risk_suspected", "popup_blocked"}:
+        return status
+    if reason.startswith("page_state_detection_failed"):
+        return "page_state_detection_failed"
+    if status not in CAPTURABLE_PAGE_STATES:
+        return "manual_review_needed"
+    return ""
 
 
 def _real_unavailable_results(
@@ -569,18 +894,47 @@ class MidsceneStdioClient:
             except Exception:
                 self.process.kill()
 
-    def list_tools(self) -> List[str]:
-        result = self.request("tools/list", {})
+    def list_tools(self, interrupt_check: Optional[Callable[[], None]] = None) -> List[str]:
+        result = self.request("tools/list", {}, interrupt_check=interrupt_check)
         return [item.get("name") for item in result.get("tools", []) if item.get("name")]
 
-    def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        result = self.request("tools/call", {"name": name, "arguments": arguments})
+    def call_tool(
+        self,
+        name: str,
+        arguments: Dict[str, Any],
+        timeout_seconds: Optional[float] = None,
+        interrupt_check: Optional[Callable[[], None]] = None,
+        keyword_deadline: Optional[float] = None,
+        keyword: str = "",
+    ) -> Dict[str, Any]:
+        result = self.request(
+            "tools/call",
+            {"name": name, "arguments": arguments},
+            timeout_seconds=timeout_seconds,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
+        )
         if result.get("isError"):
             raise RuntimeError(_tool_text(result) or f"MCP tool failed: {name}")
         return result
 
-    def capture_screenshot(self, path: str) -> Dict[str, Any]:
-        result = self.call_tool("take_screenshot", {})
+    def capture_screenshot(
+        self,
+        path: str,
+        timeout_seconds: Optional[float] = None,
+        interrupt_check: Optional[Callable[[], None]] = None,
+        keyword_deadline: Optional[float] = None,
+        keyword: str = "",
+    ) -> Dict[str, Any]:
+        result = self.call_tool(
+            "take_screenshot",
+            {},
+            timeout_seconds=timeout_seconds,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
+        )
         image = _first_image(result)
         if not image:
             raise RuntimeError("take_screenshot returned no image content")
@@ -589,15 +943,34 @@ class MidsceneStdioClient:
             f.write(base64.b64decode(image["data"]))
         return {"path": path, "mime_type": image.get("mimeType") or "image/png"}
 
-    def request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def request(
+        self,
+        method: str,
+        params: Dict[str, Any],
+        timeout_seconds: Optional[float] = None,
+        interrupt_check: Optional[Callable[[], None]] = None,
+        keyword_deadline: Optional[float] = None,
+        keyword: str = "",
+    ) -> Dict[str, Any]:
         request_id = self._next_id
         self._next_id += 1
         self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
-        deadline = time.monotonic() + self.timeout_seconds
-        while time.monotonic() < deadline:
+        timeout = self.timeout_seconds if timeout_seconds is None else max(0.0, float(timeout_seconds))
+        request_deadline = time.monotonic() + timeout
+        while time.monotonic() < request_deadline:
+            if interrupt_check:
+                interrupt_check()
+            if keyword_deadline is not None and time.monotonic() >= keyword_deadline:
+                raise KeywordTimeout(f"Keyword capture timed out while waiting for MCP request: {keyword or method}")
             self._raise_if_dead()
+            wait_until = request_deadline
+            if keyword_deadline is not None:
+                wait_until = min(wait_until, keyword_deadline)
+            remaining = wait_until - time.monotonic()
+            if remaining <= 0:
+                break
             try:
-                message = self._responses.get(timeout=0.2)
+                message = self._responses.get(timeout=min(0.2, remaining))
             except queue.Empty:
                 continue
             if message.get("id") != request_id:
@@ -605,6 +978,10 @@ class MidsceneStdioClient:
             if "error" in message:
                 raise RuntimeError(message["error"].get("message") or message["error"])
             return message.get("result") or {}
+        if interrupt_check:
+            interrupt_check()
+        if keyword_deadline is not None and time.monotonic() >= keyword_deadline:
+            raise KeywordTimeout(f"Keyword capture timed out while waiting for MCP request: {keyword or method}")
         raise TimeoutError(f"MCP request timed out: {method}; stderr={self._stderr_tail()}")
 
     def notify(self, method: str, params: Dict[str, Any]) -> None:
@@ -649,8 +1026,85 @@ class MidsceneStdioClient:
         return "\n".join(items[-8:])
 
 
-def _call_act(client: MidsceneStdioClient, prompt: str) -> None:
-    client.call_tool("act", {"prompt": prompt})
+def _call_act(
+    client: MidsceneStdioClient,
+    prompt: str,
+    interrupt_check: Optional[Callable[[], None]] = None,
+    keyword_deadline: Optional[float] = None,
+    keyword: str = "",
+) -> Dict[str, Any]:
+    return client.call_tool(
+        "act",
+        {"prompt": prompt},
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        keyword=keyword,
+    )
+
+
+def _raise_if_abnormal_act(result: Dict[str, Any], default_context: str) -> None:
+    classification = classify_midscene_act_result(result, default_context=default_context)
+    if classification["abnormal"]:
+        raise MidsceneActionAbnormal(
+            reason=classification["stop_reason"],
+            rough_state=classification["rough_state"],
+            message=classification["message"],
+        )
+
+
+def classify_midscene_act_result(result: Dict[str, Any], default_context: str = "act") -> Dict[str, Any]:
+    """Classify the MCP `act` ToolResult without trusting it as product data."""
+    text = _tool_text(result)
+    normalized = " ".join(text.lower().split())
+    if result.get("isError"):
+        return {
+            "abnormal": True,
+            "rough_state": "mcp_action_failed",
+            "stop_reason": "midscene_mcp_action_failed",
+            "message": text or f"Midscene act failed during {default_context}.",
+        }
+
+    patterns = [
+        ("captcha_required", ["captcha", "验证码", "滑块", "验证", "security verification", "安全验证"]),
+        ("login_required", ["login required", "please login", "sign in", "登录", "请登录", "重新登录"]),
+        ("risk_suspected", ["risk", "风控", "风险", "unusual account", "异常账号", "账号异常", "安全检查"]),
+        ("popup_blocked", ["permission panel", "automation permission", "权限", "弹窗", "blocked", "拦截"]),
+        ("white_skeleton", ["white skeleton", "白屏", "骨架屏", "skeleton", "blank page"]),
+        ("page_not_loaded", ["page not loaded", "加载失败", "无法打开", "chrome/taobao is unavailable"]),
+        ("midscene_reported_failure", ["stop and report failure", "report failure", "failed to", "cannot", "unable to"]),
+    ]
+    for reason, needles in patterns:
+        if any(needle in normalized for needle in needles):
+            rough_state = "captcha_required" if reason == "captcha_required" else reason
+            if reason == "midscene_reported_failure":
+                rough_state = "mcp_reported_failure"
+            return {
+                "abnormal": True,
+                "rough_state": rough_state,
+                "stop_reason": reason,
+                "message": text or f"Midscene reported abnormal state during {default_context}.",
+            }
+
+    return {
+        "abnormal": False,
+        "rough_state": "act_completed",
+        "stop_reason": "",
+        "message": text,
+    }
+
+
+def _classify_screenshot(path: str, contract: Dict[str, Any]) -> Dict[str, Any]:
+    manual_state = str(contract.get("manual_state") or "").strip() or None
+    try:
+        state = detect_page_state(path, manual_state=manual_state).to_dict()
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "confidence": 0.0,
+            "reason": f"page_state_detection_failed:{exc}",
+            "metrics": {},
+        }
+    return state
 
 
 def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:

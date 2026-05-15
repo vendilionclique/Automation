@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 
+Write-Warning "Windows Codex sync is retained for future/experimental use. The current Taobao visual collection mainline is macOS; use scripts/sync_agent_project_config.sh there."
+
 $RootDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
 $CodexConfig = Join-Path $CodexHome "config.toml"

@@ -220,3 +220,111 @@ def filter_exported_results(export_file, keyword, card_name,
 
     log.info(f"过滤完成: {total_rows} → {filtered_rows} 行")
     return result
+
+
+def filter_exported_results_by_keyword(export_file,
+                                       output_dir='data/filtered',
+                                       keyword_prefix='万智牌',
+                                       require_magic_prefix=True,
+                                       require_card_name=True,
+                                       exclude_shop_names='',
+                                       exclude_title_keywords='',
+                                       logger=None):
+    """
+    按 raw 行的搜索关键词分组执行规则过滤，适用于 daily/multi-keyword export。
+
+    这里不能把 run_id 当 keyword/card_name，否则牌名规则会把多关键词结果全过滤空。
+    """
+    log = logger or logging.getLogger(__name__)
+    if not os.path.exists(export_file):
+        log.error(f"导出文件不存在: {export_file}")
+        return {'success': False, 'error': '文件不存在'}
+    try:
+        df = pd.read_excel(export_file, engine='openpyxl')
+    except Exception as e:
+        log.error(f"读取导出文件失败: {e}")
+        return {'success': False, 'error': str(e)}
+
+    if '搜索关键词' not in df.columns:
+        return filter_exported_results(
+            export_file,
+            keyword='all_keywords',
+            card_name='',
+            output_dir=output_dir,
+            require_magic_prefix=require_magic_prefix,
+            require_card_name=False,
+            exclude_shop_names=exclude_shop_names,
+            exclude_title_keywords=exclude_title_keywords,
+            logger=logger,
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+    temp_dir = os.path.join(output_dir, "_filter_inputs")
+    os.makedirs(temp_dir, exist_ok=True)
+    keyword_values = [
+        str(value).strip()
+        for value in df['搜索关键词'].dropna().unique().tolist()
+        if str(value).strip()
+    ]
+    results = []
+    filtered_frames = []
+    audit_frames = []
+    for keyword in keyword_values:
+        subset = df[df['搜索关键词'].astype(str).str.strip() == keyword].copy()
+        if subset.empty:
+            continue
+        card_name = _infer_card_name_from_keyword(keyword, keyword_prefix)
+        safe_name = keyword.replace(' ', '_').replace('/', '_')
+        subset_file = os.path.join(temp_dir, f"{safe_name}_raw_subset.xlsx")
+        subset.to_excel(subset_file, index=False, engine='openpyxl')
+        result = filter_exported_results(
+            subset_file,
+            keyword=keyword,
+            card_name=card_name,
+            output_dir=output_dir,
+            require_magic_prefix=require_magic_prefix,
+            require_card_name=bool(card_name) and require_card_name,
+            exclude_shop_names=exclude_shop_names,
+            exclude_title_keywords=exclude_title_keywords,
+            logger=logger,
+        )
+        result['keyword'] = keyword
+        result['card_name'] = card_name
+        results.append(result)
+        if result.get('success') and result.get('filtered_file') and os.path.exists(result['filtered_file']):
+            filtered_frames.append(pd.read_excel(result['filtered_file'], engine='openpyxl'))
+        if result.get('success') and result.get('audit_file') and os.path.exists(result['audit_file']):
+            audit_frames.append(pd.read_excel(result['audit_file'], sheet_name='全部', engine='openpyxl'))
+
+    combined_filtered_file = os.path.join(output_dir, "all_keywords_filtered.xlsx")
+    combined_audit_file = os.path.join(output_dir, "all_keywords_filter_audit.xlsx")
+    combined_filtered = pd.concat(filtered_frames, ignore_index=True) if filtered_frames else pd.DataFrame()
+    combined_audit = pd.concat(audit_frames, ignore_index=True) if audit_frames else pd.DataFrame()
+    combined_filtered.to_excel(combined_filtered_file, index=False, engine='openpyxl')
+    with pd.ExcelWriter(combined_audit_file, engine='openpyxl') as writer:
+        combined_audit.to_excel(writer, sheet_name='全部', index=False)
+        if not combined_audit.empty and '规则过滤_保留' in combined_audit.columns:
+            combined_audit[~combined_audit['规则过滤_保留'].astype(bool)].to_excel(
+                writer,
+                sheet_name='已删除',
+                index=False,
+            )
+
+    return {
+        'success': True,
+        'mode': 'by_keyword',
+        'keywords': len(results),
+        'total_rows': int(sum(item.get('total_rows', 0) for item in results)),
+        'filtered_rows': int(sum(item.get('filtered_rows', 0) for item in results)),
+        'combined_filtered_file': combined_filtered_file,
+        'combined_audit_file': combined_audit_file,
+        'results': results,
+    }
+
+
+def _infer_card_name_from_keyword(keyword, keyword_prefix='万智牌'):
+    text = str(keyword or '').strip()
+    prefix = str(keyword_prefix or '').strip()
+    if prefix and text.startswith(prefix):
+        text = text[len(prefix):].strip()
+    return text

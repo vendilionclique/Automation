@@ -1,13 +1,9 @@
 {
   "mcpServers": {
     "midscene-computer": {
-      "command": "powershell",
+      "command": "bash",
       "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "${workspaceFolder}\\scripts\\start_midscene_computer_mcp.ps1"
+        "${workspaceFolder}/local/start_midscene_computer_mcp.sh"
       ]
     }
   }
