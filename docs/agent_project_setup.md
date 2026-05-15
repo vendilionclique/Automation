@@ -19,7 +19,7 @@ This repository keeps project-specific agent knowledge and Midscene MCP launch d
 - Local Chrome profile and Taobao login state.
 
 `local/midscene-computer.env.example` and the sync scripts default the Midscene
-computer external VLM to Zhipu `glm-4.6v-flashx` with
+computer external VLM to Zhipu `glm-4.6v-flash` with
 `MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4` and
 `MIDSCENE_MODEL_FAMILY=glm-v`. Keep the API key machine-local in
 `local/midscene-computer.env`.

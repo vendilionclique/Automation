@@ -124,7 +124,7 @@ if (-not (Test-Path -LiteralPath $LocalEnv)) {
     $runDir = (Join-Path $RootDir "local\midscene-run") -replace '\\', '/'
     @"
 # Local Midscene computer VLM config. Gitignored; do not commit.
-export MIDSCENE_MODEL_NAME="glm-4.6v-flashx"
+export MIDSCENE_MODEL_NAME="glm-4.6v-flash"
 export MIDSCENE_MODEL_API_KEY=""
 export MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"
 export MIDSCENE_MODEL_FAMILY="glm-v"

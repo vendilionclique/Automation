@@ -46,7 +46,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start_taobao_visual_
 
 ```bash
 cp local/midscene-computer.env.example local/midscene-computer.env
-# 默认示例使用智谱 glm-4.6v-flashx；编辑本机文件，只填写 MIDSCENE_MODEL_API_KEY。
+# 默认示例使用智谱 glm-4.6v-flash；编辑本机文件，只填写 MIDSCENE_MODEL_API_KEY。
 ```
 
 Codex App 的 MCP server 使用 `local/start_midscene_computer_mcp.sh` 启动，

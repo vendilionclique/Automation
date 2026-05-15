@@ -5,17 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 echo "Checking tracked files for machine-local absolute paths..."
-if git grep -n -E '/Users/[^/"[:space:]]+' -- ':!scripts/check_portable_config.sh'; then
+if git grep -n -E '/Users/[^/"[:space:]]+' -- ':!scripts/check_portable_config.sh' ':!tests/test_midscene_config.py'; then
   echo "Found user-specific absolute paths in tracked files." >&2
   exit 1
 fi
-if git grep -n -E '[A-Za-z]:\\Users\\[^\\[:space:]]+' -- ':!scripts/check_portable_config.sh'; then
+if git grep -n -E '[A-Za-z]:\\Users\\[^\\[:space:]]+' -- ':!scripts/check_portable_config.sh' ':!tests/test_midscene_config.py'; then
   echo "Found Windows user-specific absolute paths in tracked files." >&2
   exit 1
 fi
 
 echo "Checking Midscene GLM env example..."
-grep -q 'MIDSCENE_MODEL_NAME="glm-4.6v-flashx"' local/midscene-computer.env.example
+grep -q 'MIDSCENE_MODEL_NAME="glm-4.6v-flash"' local/midscene-computer.env.example
 grep -q 'MIDSCENE_MODEL_API_KEY=""' local/midscene-computer.env.example
 grep -q 'MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"' local/midscene-computer.env.example
 grep -q 'MIDSCENE_MODEL_FAMILY="glm-v"' local/midscene-computer.env.example

@@ -42,6 +42,31 @@ Use this skill for project-specific Taobao collection work in this repository. I
 - Codex supervisor intervenes through `visual-control` only: status review, pause/resume/stop/cooldown/lock/unlock, exception judgment, and human communication.
 - Screenshot deletion is keyword-granular: delete only after keyword ingest succeeds and quality is acceptable; retain screenshots for low confidence, abnormal states, or human/supervisor review.
 
+## VLM Supply Memory
+
+- The current limiting factor for pure-vision capture is stable real-time VLM
+  grounding, not browser control. Midscene computer provides system screenshot,
+  coordinate click, keyboard input, and scroll actions; locating the Taobao
+  search box, confirming result pages, recognizing abnormal states, and deciding
+  visible-screen progress all require a reliable VLM.
+- `glm-4.6v-flash` is the tracked free/default development fallback after
+  `glm-4.6v-flashx` quota was exhausted. It can be useful for local testing, but
+  observed free-tier `429` traffic pressure means it must not be treated as the
+  unattended production SLA. If it fails, stop as `needs_review`/`cooldown` and
+  retain evidence instead of pretending capture succeeded.
+- Do not make a long-lived Codex chat session the real-time visual controller.
+  Codex remains the supervisor/control-plane and the short-lived screenshot
+  extract worker. It may judge low-frequency abnormal states, but it should not
+  participate in every ordinary click/scroll decision.
+- Avoid the dual-brain loop where Midscene has a VLM but Codex makes each live
+  click decision; it adds latency, synchronization cost, and failure surface.
+- DeepSeek local VLMs are not the preferred GUI grounding route. DeepSeek-VL2
+  tiny may be a research backup, but it needs custom serving, coordinate parsing,
+  prompts, and regression tests. Janus-Pro is not recommended for dense Taobao
+  UI coordinate grounding. If testing local VLM on the M4/16GB Mac, prefer small
+  Qwen2.5-VL/Qwen3-VL or UI-TARS-style candidates first; for production, prefer
+  a stable paid cloud VLM key connected to Midscene.
+
 ## Cron Communication
 
 - Taobao visual cron runs must communicate with the user in Chinese by default: progress updates, blockers, final summaries, and inbox item copy should all be Chinese.

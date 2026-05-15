@@ -30,7 +30,7 @@ class MidsceneConfigTests(unittest.TestCase):
     def test_glm_flash_env_example_points_to_local_secret_env(self):
         text = (ROOT / "local" / "midscene-computer.env.example").read_text(encoding="utf-8")
 
-        self.assertIn('MIDSCENE_MODEL_NAME="glm-4.6v-flashx"', text)
+        self.assertIn('MIDSCENE_MODEL_NAME="glm-4.6v-flash"', text)
         self.assertIn('MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"', text)
         self.assertIn('MIDSCENE_MODEL_FAMILY="glm-v"', text)
         self.assertIn('MIDSCENE_MODEL_API_KEY=""', text)
@@ -66,7 +66,7 @@ screenshot_prefixes = initial,results,scroll_1
 
 [MIDSCENE_MODEL]
 enabled = true
-model_name = glm-4.6v-flashx
+model_name = glm-4.6v-flash
 model_family = glm-v
 base_url = https://open.bigmodel.cn/api/paas/v4
 api_key_env = MIDSCENE_MODEL_API_KEY
@@ -87,12 +87,12 @@ final_extraction_owner = codex
             with open(request.request_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
 
-        self.assertEqual(payload["config"]["model_name"], "glm-4.6v-flashx")
+        self.assertEqual(payload["config"]["model_name"], "glm-4.6v-flash")
         self.assertEqual(payload["config"]["model_family"], "glm-v")
         self.assertEqual(payload["config"]["model_base_url"], "https://open.bigmodel.cn/api/paas/v4")
         self.assertEqual(payload["config"]["mcp_request_timeout_seconds"], 240)
         self.assertTrue(payload["model_boundary"]["midscene_vlm_enabled"])
-        self.assertEqual(payload["model_boundary"]["midscene_model_name"], "glm-4.6v-flashx")
+        self.assertEqual(payload["model_boundary"]["midscene_model_name"], "glm-4.6v-flash")
         self.assertEqual(payload["model_boundary"]["midscene_model_family"], "glm-v")
         self.assertEqual(
             payload["model_boundary"]["midscene_model_base_url"],
