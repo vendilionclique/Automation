@@ -244,6 +244,15 @@ class ConfigManager:
             'daily_keyword_budget': '120',
             'daily_session_count': '4',
             'capture_freshness_days': '30',
+            'session_due_times': '',
+            'session_due_interval_minutes': '0',
+            'capture_worker_stale_after_minutes': '240',
+        }
+
+        config['CAPTURE_WATCHDOG'] = {
+            'poll_seconds': '30',
+            'idle_timeout_seconds': '900',
+            'max_restarts': '2',
         }
 
         config['VISUAL_BEHAVIOR'] = {

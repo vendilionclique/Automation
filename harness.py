@@ -110,7 +110,19 @@ def cmd_setup(args):
                     return False
 
         optional_config = {
-            "SCHEDULER": ["daily_keyword_budget", "daily_session_count", "capture_freshness_days"],
+            "SCHEDULER": [
+                "daily_keyword_budget",
+                "daily_session_count",
+                "capture_freshness_days",
+                "session_due_times",
+                "session_due_interval_minutes",
+                "capture_worker_stale_after_minutes",
+            ],
+            "CAPTURE_WATCHDOG": [
+                "poll_seconds",
+                "idle_timeout_seconds",
+                "max_restarts",
+            ],
             "VISUAL_BEHAVIOR": ["micro_pause_short", "inter_keyword_pause_min", "inter_keyword_pause_max"],
             "PAGE_SAMPLING": ["target_listings_per_keyword", "max_tiles_per_keyword", "retain_screenshots"],
             "CODEX_EXTRACT": ["codex_bin", "profile", "model", "approval_policy"],
@@ -338,6 +350,48 @@ def cmd_visual_heartbeat(args):
         session_count=args.session_count,
         force_lease=args.force_lease,
     )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_automation_tick(args):
+    from modules.visual_automation_tick import run_visual_automation_tick
+
+    result = run_visual_automation_tick(
+        raw_input_file=args.raw_input,
+        config_file=args.config,
+        plan_id=args.plan_id,
+        session_index=args.session,
+        limit=args.limit,
+        random_sample=args.random_sample,
+        random_seed=args.random_seed,
+        session_count=args.session_count,
+        force_lease=args.force_lease,
+        start_capture=args.start_capture,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_visual_capture_watchdog(args):
+    try:
+        from modules.visual_capture_watchdog import run_capture_watchdog
+    except ImportError as exc:
+        result = {
+            "ok": False,
+            "action": "capture_watchdog",
+            "error": "visual_capture_watchdog_module_missing",
+            "message": "modules.visual_capture_watchdog.run_capture_watchdog is not available yet",
+            "import_error": str(exc),
+        }
+    else:
+        result = run_capture_watchdog(
+            args.plan_id,
+            args.session,
+            config_file=args.config,
+            start=args.start,
+            poll_seconds=args.poll_seconds,
+            idle_timeout_seconds=args.idle_timeout_seconds,
+            max_restarts=args.max_restarts,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -634,6 +688,31 @@ def main():
     heartbeat.add_argument("--session-count", type=int, help="首次创建 plan 时覆盖 session 数")
     heartbeat.add_argument("--force-lease", action="store_true", help="准备请求时覆盖已有 active lease")
 
+    automation_tick = sub.add_parser(
+        "visual-automation-tick",
+        help="Codex App Automation 短命 tick：heartbeat advice，可选启动一次 bounded capture，再 sync",
+    )
+    automation_tick.add_argument("--raw-input", help="整本原始输入台账；缺省读 config [PRODUCT_ROUTING] raw_input_file")
+    automation_tick.add_argument("--plan-id", help="可选：覆盖自动 daily_YYYYMMDD plan_id")
+    automation_tick.add_argument("--session", type=int, help="可选：强制指定 session；缺省按当前时间和状态选择")
+    automation_tick.add_argument("--limit", type=int, help="最多纳入多少个 runnable 关键词")
+    automation_tick.add_argument("--random-sample", type=int, help="首次创建 plan 时从候选牌名中随机抽样 N 个关键词")
+    automation_tick.add_argument("--random-seed", type=int, help="随机抽样 seed，便于复现")
+    automation_tick.add_argument("--session-count", type=int, help="首次创建 plan 时覆盖 session 数")
+    automation_tick.add_argument("--force-lease", action="store_true", help="准备请求时覆盖已有 active lease")
+    automation_tick.add_argument("--start-capture", action="store_true", help="真正启动一次 bounded capture worker；默认只返回 advice")
+
+    capture_watchdog = sub.add_parser(
+        "visual-capture-watchdog",
+        help="Session 级 bounded capture watchdog：监督并按规则恢复一个 capture worker",
+    )
+    capture_watchdog.add_argument("--plan-id", required=True, help="daily plan id / run_id")
+    capture_watchdog.add_argument("--session", type=int, required=True, help="session 编号")
+    capture_watchdog.add_argument("--start", action="store_true", help="真正启动/恢复 capture worker；默认只做建议循环")
+    capture_watchdog.add_argument("--poll-seconds", type=float, help="worker 存活或无新动作时的轮询间隔")
+    capture_watchdog.add_argument("--idle-timeout-seconds", type=float, help="无进展多久后退出")
+    capture_watchdog.add_argument("--max-restarts", type=int, help="本 watchdog 生命周期内最多恢复启动次数")
+
     control = sub.add_parser("visual-control", help="Codex/人工 supervisor 控制面")
     control.add_argument("action", choices=["status", "pause", "resume", "stop", "cooldown", "lock", "unlock"])
     control.add_argument("--plan-id", required=True, help="daily plan id / run_id")
@@ -747,6 +826,10 @@ def main():
         cmd_visual_auto_tick(args)
     elif args.cmd == "visual-heartbeat":
         cmd_visual_heartbeat(args)
+    elif args.cmd == "visual-automation-tick":
+        cmd_visual_automation_tick(args)
+    elif args.cmd == "visual-capture-watchdog":
+        cmd_visual_capture_watchdog(args)
     elif args.cmd == "visual-control":
         cmd_visual_control(args)
     elif args.cmd == "visual-capture-worker":

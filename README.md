@@ -65,11 +65,37 @@ Codex App 的 MCP server 使用 `local/start_midscene_computer_mcp.sh` 启动，
 .venv/bin/python harness.py visual-scheduler-status <plan_id>
 .venv/bin/python harness.py visual-heartbeat --mode prepare --plan-id <plan_id> --session 1
 .venv/bin/python harness.py visual-heartbeat --mode dispatch --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-capture-watchdog --plan-id <plan_id> --session 1 --start
 .venv/bin/python harness.py visual-control status --plan-id <plan_id> --session 1
 .venv/bin/python harness.py visual-sync-worker <plan_id> --session 1
 ```
 
-`visual-heartbeat` 是当前本地 scheduler / automation 的短命心跳入口：它根据已有 plan、session 状态和 `control.json` 执行 `sync`、`prepare`、`dispatch` 或 `all`，只做确定性判断、准备 session worker contract、返回 worker 命令；不打开 Chrome、不触碰淘宝页面、不直接启动后台进程。`visual-auto-tick` 仍保留为兼容/辅助入口，但不再作为文档主线。`visual-plan-day` 会从 `preferred_mode=statistical` 且 `淘宝采集时间` 缺失或过期的牌名中，按日预算和 session 数自动挑选关键词；`skip` 和 `with_keywords` 不进入当前默认统计采集池。`with_keywords` 表示该行未来应使用“万智牌 中文牌名 关键词”这类更具体的搜索结果统计赋值；当前只记录为待处理路由，尚未实现额外关键词采集或赋值。
+`visual-heartbeat` 是当前本地 scheduler / automation 的短命心跳入口：它根据已有 plan、session 状态和 `control.json` 执行 `sync`、`prepare`、`dispatch` 或 `all`，只做确定性判断、准备 session worker contract、返回 worker 命令；不打开 Chrome、不触碰淘宝页面、不直接启动后台进程。`visual-auto-tick` 是旧的 plan/session 选择辅助入口，`visual-automation-tick --start-capture` 是旧 automation 的兼容薄入口；两者都不再作为文档主线。`visual-plan-day` 会从 `preferred_mode=statistical` 且 `淘宝采集时间` 缺失或过期的牌名中，按日预算和 session 数自动挑选关键词；`skip` 和 `with_keywords` 不进入当前默认统计采集池。`with_keywords` 表示该行未来应使用“万智牌 中文牌名 关键词”这类更具体的搜索结果统计赋值；当前只记录为待处理路由，尚未实现额外关键词采集或赋值。
+
+术语约定：
+
+- `scheduler`：确定性计划层，负责 daily plan、session 切分和 due session 选择。
+- `heartbeat`：短命唤醒动作，负责 sync / prepare / dispatch advice；由 Codex App Automation 或等价可见定时器按小时级触发。
+- `capture watchdog`：session 级 bounded watchdog，在单个 session 生命周期内常驻监督一个 capture worker；worker 正常活着就等待，异常死亡/stale/recoverable failed 时按规则恢复，session 完成、人工异常、control block 或 idle timeout 后退出。
+- `supervisor`：非常驻人工/Codex 监督者，只做状态查看、异常裁判和 `visual-control`，不承担全天常驻调度。
+
+session due-time 可配置在 `[SCHEDULER]`。生产建议使用固定时刻，例如 `session_due_times = 09:00,13:00,17:00,21:00`，数量必须等于 `daily_session_count`；短间隔测试可临时设置 `session_due_interval_minutes = 3`，表示从 plan 创建时间起每 3 分钟到期一个 session。大于 0 的 interval 会优先于固定时刻。
+
+`visual-heartbeat --mode dispatch` 会返回 `capture_start_allowed` 和 `capture_worker_liveness`。外部 automation 只有在 `capture_start_allowed=true` 时才能启动 `worker_commands.capture`；如果 runtime 显示 capture worker 仍 active，不要重复启动。若 runtime 显示 `running` 但 pid 已消失或超过 `[SCHEDULER] capture_worker_stale_after_minutes` 且没有 `session_worker_result.json`，heartbeat 会标记 `capture_worker_stale` / `failed_recoverable`，让该 session 后续可恢复重跑。
+
+Codex App Automation 推荐到点启动当前 due session 的 bounded watchdog，而不是直接启动 capture worker：
+
+```bash
+.venv/bin/python harness.py visual-capture-watchdog \
+  --plan-id <plan_id> \
+  --session 1 \
+  --start \
+  --poll-seconds 30 \
+  --idle-timeout-seconds 900 \
+  --max-restarts 2
+```
+
+该命令不是全天 scheduler，也不是系统 daemon。它只在这个 session 生命周期内运行：循环调用 heartbeat、读取 liveness 和 `capture_start_allowed`，只在允许且有 `worker_commands.capture` 时启动一个 capture worker；worker 活着就轮询等待，worker 退出后 sync，再判断是否需要恢复或退出。省略 `--start` 时是 dry-run / advice 模式，不打开 Chrome、不启动采集。`visual-automation-tick --start-capture` 仍保留为兼容薄入口，但文档主线改为 `visual-capture-watchdog`。
 
 长程运行不依赖单个 Codex 会话的上下文。每个 session 都可以生成独立
 capsule：
@@ -173,6 +199,7 @@ npm run midscene:computer:help
 .venv/bin/python harness.py visual-plan-day --raw-input cards.xlsx
 .venv/bin/python harness.py visual-heartbeat --mode prepare --plan-id <plan_id> --session 1
 .venv/bin/python harness.py visual-heartbeat --mode dispatch --plan-id <plan_id> --session 1
+.venv/bin/python harness.py visual-capture-watchdog --plan-id <plan_id> --session 1 --start
 .venv/bin/python harness.py visual-control status --plan-id <plan_id> --session 1
 .venv/bin/python harness.py visual-session-capsule <plan_id> --session 1
 .venv/bin/python harness.py visual-session-run <plan_id> --session 1

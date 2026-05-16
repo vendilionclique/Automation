@@ -64,6 +64,7 @@ HARD_ABNORMAL_REASONS = {
     "midscene_mcp_request_timeout",
     "keyword_mismatch",
     "visible_keyword_mismatch",
+    "rate_limited",
     "manual_review_needed",
     "page_state_detection_failed",
 }
@@ -262,6 +263,14 @@ def _run_real_capture_contract(
             abnormal_limit = _consecutive_abnormal_limit(contract)
             for fallback_index, task in enumerate(keyword_tasks, start=1):
                 _raise_if_controlled(run_id, session_index)
+                _refresh_capture_runtime(
+                    run_id,
+                    session_index,
+                    contract_path,
+                    current_keyword=str(task.get("keyword") or ""),
+                    progress_event="keyword_started",
+                    keyword_index=fallback_index,
+                )
                 if fallback_index > 1:
                     _sleep_between_keywords(contract, run_id, session_index, task_dir, task)
                     _raise_if_controlled(run_id, session_index)
@@ -276,6 +285,17 @@ def _run_real_capture_contract(
                     tools=tools,
                 )
                 keyword_results.append(keyword_result)
+                _refresh_capture_runtime(
+                    run_id,
+                    session_index,
+                    contract_path,
+                    current_keyword=str(task.get("keyword") or ""),
+                    progress_event="keyword_finished",
+                    keyword_index=fallback_index,
+                    last_keyword_status=keyword_result.get("status"),
+                    last_stop_reason=keyword_result.get("stop_reason"),
+                    processed_keywords=len(keyword_results),
+                )
                 status = str(keyword_result.get("status") or "")
                 reason = str(keyword_result.get("stop_reason") or "")
                 if status in CAPTURED_STATUSES:
@@ -402,6 +422,7 @@ def _capture_keyword_with_mcp(
             diagnostics,
             {"keyword_search_act": _midscene_text_diagnostics(search_result, client=client)},
         )
+        _raise_if_rate_limited_diagnostics(diagnostics.get("keyword_search_act"), "keyword_search")
         _raise_if_abnormal_act(search_result, default_context="keyword_search")
         _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_keyword_search_act")
         _interruptible_sleep(
@@ -428,6 +449,15 @@ def _capture_keyword_with_mcp(
         )
         if search_verification["screenshot"]:
             screenshots.append(search_verification["screenshot"])
+            _refresh_capture_runtime(
+                run_id,
+                session_index,
+                "",
+                current_keyword=keyword,
+                progress_event="tile_captured",
+                tile_id="tile_00",
+                captured_tiles=len(screenshots),
+            )
             write_tile_summary(
                 task_dir=task_dir,
                 run_id=run_id,
@@ -467,6 +497,10 @@ def _capture_keyword_with_mcp(
                 diagnostics,
                 {f"scroll_tile_{tile_index}_act": _midscene_text_diagnostics(scroll_result, client=client)},
             )
+            _raise_if_rate_limited_diagnostics(
+                diagnostics.get(f"scroll_tile_{tile_index}_act"),
+                f"scroll_tile_{tile_index}",
+            )
             _raise_if_abnormal_act(scroll_result, default_context=f"scroll_tile_{tile_index}")
             _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_act_{tile_index}")
             tile_id = f"tile_{tile_index:02d}"
@@ -486,6 +520,15 @@ def _capture_keyword_with_mcp(
                     "captured_at": _now(),
                     "page_state": page_state,
                 }
+            )
+            _refresh_capture_runtime(
+                run_id,
+                session_index,
+                "",
+                current_keyword=keyword,
+                progress_event="tile_captured",
+                tile_id=tile_id,
+                captured_tiles=len(screenshots),
             )
             write_tile_summary(
                 task_dir=task_dir,
@@ -605,6 +648,7 @@ def _capture_keyword_with_mcp(
             diagnostics=_merge_diagnostics(diagnostics, exc.diagnostics),
         )
     except Exception as exc:
+        classification = classify_midscene_exception(exc)
         abnormal_screenshot = _capture_abnormal_screenshot(client, task, capture_plan, evidence_dir)
         elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
@@ -615,8 +659,8 @@ def _capture_keyword_with_mcp(
             fallback_index=fallback_index,
             mode="real",
             status="needs_review",
-            rough_state="mcp_action_failed",
-            stop_reason="midscene_mcp_action_failed",
+            rough_state=classification["rough_state"],
+            stop_reason=classification["stop_reason"],
             notes=f"Real MCP action failed before completing keyword capture: {exc}",
             screenshots=screenshots,
             abnormal_screenshot=abnormal_screenshot,
@@ -805,6 +849,31 @@ def _request_worker_cooldown(run_id: str, session_index: int, reason: str) -> No
         pass
 
 
+def _refresh_capture_runtime(
+    run_id: str,
+    session_index: int,
+    contract_path: str = "",
+    **progress: Any,
+) -> None:
+    payload = {
+        key: value
+        for key, value in progress.items()
+        if value not in (None, "")
+    }
+    if contract_path:
+        payload["contract_path"] = contract_path
+    try:
+        write_worker_runtime(
+            run_id,
+            session_index,
+            "capture",
+            "running",
+            **payload,
+        )
+    except Exception:
+        pass
+
+
 def _merge_diagnostics(*items: Dict[str, Any]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {}
     for item in items:
@@ -838,7 +907,7 @@ def _midscene_text_diagnostics(
     rate_limit_sources = []
     for item in sources:
         text = str(item.get("text") or "")
-        if "429" in text:
+        if _is_rate_limited_text(text):
             rate_limit_sources.append(
                 {
                     "source": item.get("source") or "unknown",
@@ -848,6 +917,7 @@ def _midscene_text_diagnostics(
     if not rate_limit_sources:
         return {}
     return {
+        "rate_limited": True,
         "http_429_detected": True,
         "rate_limit_diagnostics": rate_limit_sources,
     }
@@ -855,10 +925,11 @@ def _midscene_text_diagnostics(
 
 def _midscene_exception_diagnostics(exc: BaseException) -> Dict[str, Any]:
     text = str(exc or "")
-    if "429" not in text:
+    if not _is_rate_limited_text(text):
         return {}
     return {
         "exception": {
+            "rate_limited": True,
             "http_429_detected": True,
             "rate_limit_diagnostics": [
                 {
@@ -890,6 +961,17 @@ def _sanitize_diagnostic_text(text: str) -> str:
     value = re.sub(r"(?i)(authorization|bearer|api[-_]?key|access[-_]?token|cookie)[:=]\s*\S+", r"\1=[redacted]", value)
     value = re.sub(r"\b[A-Za-z0-9_\-]{32,}\b", "[redacted]", value)
     return value[:240]
+
+
+def _raise_if_rate_limited_diagnostics(diagnostics: Optional[Dict[str, Any]], default_context: str) -> None:
+    if not diagnostics or not diagnostics.get("rate_limited"):
+        return
+    raise MidsceneActionAbnormal(
+        reason="rate_limited",
+        rough_state="rate_limited",
+        message=f"Midscene/VLM rate limit detected during {default_context}.",
+        diagnostics={default_context: diagnostics},
+    )
 
 
 def _capture_abnormal_screenshot(
@@ -1488,10 +1570,34 @@ def _raise_if_abnormal_act(result: Dict[str, Any], default_context: str) -> None
         )
 
 
+def classify_midscene_exception(exc: BaseException) -> Dict[str, Any]:
+    text = str(exc or "")
+    if _is_rate_limited_text(text):
+        return {
+            "abnormal": True,
+            "rough_state": "rate_limited",
+            "stop_reason": "rate_limited",
+            "message": text or "Midscene/VLM rate limit detected.",
+        }
+    return {
+        "abnormal": True,
+        "rough_state": "mcp_action_failed",
+        "stop_reason": "midscene_mcp_action_failed",
+        "message": text,
+    }
+
+
 def classify_midscene_act_result(result: Dict[str, Any], default_context: str = "act") -> Dict[str, Any]:
     """Classify the MCP `act` ToolResult without trusting it as product data."""
     text = _tool_text(result)
     normalized = " ".join(text.lower().split())
+    if _is_rate_limited_text(text):
+        return {
+            "abnormal": True,
+            "rough_state": "rate_limited",
+            "stop_reason": "rate_limited",
+            "message": text or f"Midscene/VLM rate limit detected during {default_context}.",
+        }
     if result.get("isError"):
         return {
             "abnormal": True,
@@ -1527,6 +1633,24 @@ def classify_midscene_act_result(result: Dict[str, Any], default_context: str = 
         "stop_reason": "",
         "message": text,
     }
+
+
+def _is_rate_limited_text(text: str) -> bool:
+    normalized = " ".join(str(text or "").lower().split())
+    if not normalized:
+        return False
+    needles = [
+        "429",
+        "rate limit",
+        "rate-limit",
+        "ratelimit",
+        "too many requests",
+        "quota",
+        "访问量过大",
+        "额度",
+        "限流",
+    ]
+    return any(needle in normalized for needle in needles)
 
 
 def _classify_screenshot(path: str, contract: Dict[str, Any]) -> Dict[str, Any]:

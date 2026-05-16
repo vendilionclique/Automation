@@ -115,6 +115,29 @@ automation entry, a dedicated conversation, and status tracking. If the Codex
 automation creation/update tool is unavailable in the current session, report
 that limitation rather than starting an invisible system cron.
 
+The recommended automation command is the session-level bounded capture
+watchdog:
+
+```bash
+.venv/bin/python harness.py visual-capture-watchdog \
+  --plan-id <plan_id> \
+  --session <N> \
+  --start \
+  --poll-seconds 30 \
+  --idle-timeout-seconds 900 \
+  --max-restarts 2
+```
+
+It is not an all-day scheduler or an invisible system daemon. The Codex App
+Automation wakes up at the session time, starts this watchdog, and the watchdog
+stays alive only for that session: it loops heartbeat/liveness checks, starts or
+recovers at most one capture worker at a time when scheduler dispatch says
+`capture_start_allowed=true`, syncs after worker exit, and then terminates when
+the session is complete, blocked by control/human-review state, idle timed out,
+or restart budget is exhausted. Without `--start`, it is a dry-run advice loop.
+`visual-automation-tick --start-capture` remains a compatibility helper, but it
+is no longer the documented mainline automation command.
+
 That cron rule is about the daily/supervisor entrypoint. It does not forbid the
 local extract dispatcher from using `codex exec` as a leaf worker after capture
 screenshots already exist.

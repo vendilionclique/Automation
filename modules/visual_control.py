@@ -16,7 +16,9 @@ from modules.utils import ensure_dir, get_project_root
 
 
 CONTROL_ACTIONS = {"status", "pause", "resume", "stop", "cooldown", "lock", "unlock"}
-WORKER_KINDS = {"capture", "codex_extract"}
+WORKER_KINDS = {"capture", "codex_extract", "heartbeat"}
+DEFAULT_CAPTURE_WORKER_STALE_AFTER_MINUTES = 240
+CAPTURE_SESSION_SUCCESS_STATUSES = {"captured", "completed", "success", "succeeded"}
 
 
 def control_path_for(plan_id: str) -> str:
@@ -188,7 +190,119 @@ def session_runtime_summary(plan_id: str, session_index: int) -> Dict[str, Any]:
     return {
         "capture_worker": load_worker_runtime(plan_id, session_index, "capture"),
         "codex_extract_worker": load_worker_runtime(plan_id, session_index, "codex_extract"),
+        "heartbeat_worker": load_worker_runtime(plan_id, session_index, "heartbeat"),
     }
+
+
+def capture_worker_liveness(
+    plan_id: str,
+    session_index: int,
+    stale_after_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Inspect capture worker runtime without starting or touching browser state."""
+    runtime = load_worker_runtime(plan_id, session_index, "capture")
+    session_result = os.path.join(session_dir_for(plan_id, session_index), "session_worker_result.json")
+    result_exists = os.path.exists(session_result)
+    status = str(runtime.get("status") or "").strip()
+    if result_exists:
+        session_result_payload = _read_json_safely(session_result)
+        session_status = str(session_result_payload.get("status") or "").strip().lower()
+        session_success = session_status in CAPTURE_SESSION_SUCCESS_STATUSES
+        reason = "session_result_success" if session_success else "session_result_non_success"
+        return {
+            "active": False,
+            "stale": False,
+            "reason": reason,
+            "status": status,
+            "runtime": runtime,
+            "session_result": session_result,
+            "session_result_exists": True,
+            "session_result_status": session_status,
+            "session_result_success": session_success,
+            "session_result_terminal_success": session_success,
+            "session_result_payload": session_result_payload,
+        }
+    if not runtime:
+        return {
+            "active": False,
+            "stale": False,
+            "reason": "runtime_missing",
+            "status": "",
+            "runtime": {},
+            "session_result": session_result,
+            "session_result_exists": False,
+        }
+    if status != "running":
+        return {
+            "active": False,
+            "stale": False,
+            "reason": f"runtime_status:{status or 'unknown'}",
+            "status": status,
+            "runtime": runtime,
+            "session_result": session_result,
+            "session_result_exists": False,
+        }
+
+    stale_reason = _capture_runtime_stale_reason(runtime, stale_after_seconds)
+    if stale_reason:
+        marked = mark_capture_worker_stale(plan_id, session_index, runtime, stale_reason)
+        return {
+            "active": False,
+            "stale": True,
+            "reason": f"capture_worker_stale:{stale_reason}",
+            "stale_reason": stale_reason,
+            "status": marked.get("status", "failed_recoverable"),
+            "runtime": marked,
+            "session_result": session_result,
+            "session_result_exists": False,
+        }
+    return {
+        "active": True,
+        "stale": False,
+        "reason": "capture_worker_running",
+        "status": status,
+        "runtime": runtime,
+        "session_result": session_result,
+        "session_result_exists": False,
+    }
+
+
+def mark_capture_worker_stale(
+    plan_id: str,
+    session_index: int,
+    runtime: Optional[Dict[str, Any]] = None,
+    reason: str = "",
+) -> Dict[str, Any]:
+    state = dict(runtime or load_worker_runtime(plan_id, session_index, "capture"))
+    now = _now()
+    original_runtime = dict(state)
+    state.update(
+        {
+            "plan_id": plan_id,
+            "session_index": int(session_index),
+            "worker_kind": "capture",
+            "status": "failed_recoverable",
+            "failure_reason": "capture_worker_stale",
+            "stale": True,
+            "stale_reason": reason or "unknown",
+            "stale_detected_at": now,
+            "stale_original_pid": original_runtime.get("pid"),
+            "stale_original_updated_at": original_runtime.get("updated_at"),
+            "stale_original_runtime": original_runtime,
+            "updated_at": now,
+        }
+    )
+    _write_json(worker_runtime_path(plan_id, session_index, "capture"), state)
+    return state
+
+
+def _read_json_safely(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {"status": "", "payload": payload}
+    except Exception as exc:
+        return {"status": "", "read_error": str(exc)}
 
 
 def _default_control_state(plan_id: str) -> Dict[str, Any]:
@@ -235,6 +349,33 @@ def _parse_time(value: str) -> datetime:
         return datetime.fromisoformat(value)
     except ValueError:
         return datetime.max
+
+
+def _capture_runtime_stale_reason(
+    runtime: Dict[str, Any],
+    stale_after_seconds: Optional[float],
+) -> str:
+    pid = runtime.get("pid")
+    if not pid:
+        return "missing_pid"
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        pass
+    except (OSError, ValueError, TypeError):
+        return "pid_not_active"
+    if not stale_after_seconds or stale_after_seconds <= 0:
+        return ""
+    updated_at = str(runtime.get("updated_at") or runtime.get("started_at") or "").strip()
+    if not updated_at:
+        return "missing_updated_at"
+    try:
+        updated = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return "invalid_updated_at"
+    if datetime.now() - updated > timedelta(seconds=float(stale_after_seconds)):
+        return "ttl_exceeded"
+    return ""
 
 
 def _write_json(path: str, payload: Dict[str, Any]) -> str:

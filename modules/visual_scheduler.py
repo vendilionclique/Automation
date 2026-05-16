@@ -20,6 +20,8 @@ from modules.session_capsule import RUNNABLE_STATUSES, build_session_capsule, se
 from modules.task_state import TaskRecord
 from modules.utils import ConfigManager, ensure_dir, get_project_root
 from modules.visual_control import (
+    DEFAULT_CAPTURE_WORKER_STALE_AFTER_MINUTES,
+    capture_worker_liveness,
     control_blocks_dispatch,
     load_control_state,
     session_runtime_summary,
@@ -32,6 +34,8 @@ class SchedulerConfig:
     daily_keyword_budget: int = 120
     daily_session_count: int = 4
     capture_freshness_days: int = 30
+    session_due_times: str = ""
+    session_due_interval_minutes: int = 0
     capture_time_output_column: str = "淘宝采集时间"
     preferred_mode_column: str = "preferred_mode"
     pricing_mode_column: str = "pricing_mode"
@@ -47,6 +51,11 @@ def scheduler_config_from_settings(config: ConfigManager) -> SchedulerConfig:
         daily_keyword_budget=config.getint("SCHEDULER", "daily_keyword_budget", fallback=120),
         daily_session_count=max(1, config.getint("SCHEDULER", "daily_session_count", fallback=4)),
         capture_freshness_days=max(0, config.getint("SCHEDULER", "capture_freshness_days", fallback=30)),
+        session_due_times=config.get("SCHEDULER", "session_due_times", fallback="").strip(),
+        session_due_interval_minutes=max(
+            0,
+            config.getint("SCHEDULER", "session_due_interval_minutes", fallback=0),
+        ),
         capture_time_output_column=config.get(
             "PRODUCT_ROUTING", "capture_time_output_column", fallback="淘宝采集时间"
         ).strip() or "淘宝采集时间",
@@ -102,7 +111,7 @@ def plan_daily_collection(
     )
     candidates = _sample_candidates(candidates, random_sample, random_seed)
     selected = candidates[: max(0, scheduler.daily_keyword_budget)]
-    sessions = _assign_sessions(selected, scheduler.daily_session_count)
+    sessions = _assign_sessions(selected, scheduler.daily_session_count, today, scheduler)
 
     plan_id = plan_id or datetime.now().strftime("%Y%m%d_%H%M%S")
     task_dir = os.path.join(get_project_root(), "data", "tasks", plan_id)
@@ -132,7 +141,7 @@ def plan_daily_collection(
 
     manifest = {
         "run_id": plan_id,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": today.isoformat(timespec="seconds"),
         "source": {
             "raw_input_file": raw_input_file,
             "config": os.path.abspath(config_file),
@@ -334,6 +343,12 @@ def heartbeat_daily_collection(
         result["sync"] = _sync_existing_worker_results(plan_id, session_index)
         if result["sync"]:
             result["action"] = "synced"
+        stale = _mark_stale_capture_workers_for_heartbeat(plan_id, session_index, config_file)
+        if stale:
+            result["stale_workers"] = stale
+            if result["action"] == "noop":
+                result["action"] = "stale_recovered"
+            result["reason"] = stale[0].get("reason", "capture_worker_stale")
 
     if mode in {"prepare", "all"}:
         tick = auto_tick_daily_collection(
@@ -386,11 +401,21 @@ def heartbeat_daily_collection(
             session_block = control_blocks_dispatch(control, dispatch_session)
             if session_block.get("blocked"):
                 return _heartbeat_paused(plan_id, dispatch_session, control, session_block)
-            dispatch = _dispatch_advice(plan_id, dispatch_session)
+            dispatch = _dispatch_advice(
+                plan_id,
+                dispatch_session,
+                config_file=config_file,
+                limit=limit,
+                manual_state=manual_state,
+                force_lease=force_lease,
+            )
             result["dispatch"] = dispatch
             if dispatch.get("contract_exists"):
                 result["action"] = "dispatch_advised"
-                _write_heartbeat_runtime(plan_id, dispatch_session, "dispatch_advised", result)
+                if dispatch.get("capture_worker_stale"):
+                    result["reason"] = dispatch.get("reason", "capture_worker_stale")
+                runtime_status = "failed_recoverable" if dispatch.get("capture_worker_stale") else "dispatch_advised"
+                _write_heartbeat_runtime(plan_id, dispatch_session, runtime_status, result)
             elif result["action"] == "noop":
                 result["reason"] = "no_prepared_contract"
 
@@ -491,13 +516,108 @@ def _dispatch_session_from_existing_contracts(plan_id: str) -> int:
     return 0
 
 
-def _dispatch_advice(plan_id: str, session_index: int) -> Dict[str, Any]:
+def _dispatch_advice(
+    plan_id: str,
+    session_index: int,
+    config_file: str = "config/settings.ini",
+    limit: Optional[int] = None,
+    manual_state: Optional[str] = None,
+    force_lease: bool = False,
+) -> Dict[str, Any]:
     contract = _session_contract_path(plan_id, session_index)
     instructions = os.path.join(
         session_dir_for(plan_id, session_index),
         "midscene_session_worker_instructions.md",
     )
     result_path = _session_worker_result_path(plan_id, session_index)
+    liveness = capture_worker_liveness(
+        plan_id,
+        session_index,
+        stale_after_seconds=_capture_worker_stale_after_seconds(config_file),
+    )
+    manifest_state = _session_manifest_recovery_state(plan_id, session_index)
+    recovery_prepare_result = None
+    recovery_reason = ""
+    stale_manifest_update = None
+    if liveness.get("stale"):
+        recovery_reason = liveness.get("reason", "capture_worker_stale")
+        stale_manifest_update = _mark_session_records_recoverable_stale(
+            plan_id,
+            session_index,
+            liveness,
+        )
+        manifest_state["stale_manifest_update"] = stale_manifest_update
+        manifest_state = _session_manifest_recovery_state(plan_id, session_index)
+        manifest_state["stale_manifest_update"] = stale_manifest_update
+    elif liveness.get("session_result_exists") and not liveness.get("session_result_success"):
+        recovery_reason = (
+            f"session_result:{liveness.get('session_result_status') or 'unknown'}"
+        )
+
+    should_prepare_recovery_contract = (
+        not bool(liveness.get("active"))
+        and not bool(liveness.get("session_result_success"))
+        and bool(recovery_reason)
+        and int(manifest_state.get("runnable_count", 0)) > 0
+    )
+    if should_prepare_recovery_contract:
+        from modules.visual_pipeline import run_visual_collection
+
+        recovery_prepare_result = run_visual_collection(
+            plan_id,
+            config_file=config_file,
+            limit=limit,
+            manual_state=manual_state,
+            session_index=session_index,
+            force_lease=True if (liveness.get("stale") or liveness.get("session_result_exists")) else force_lease,
+        )
+        manifest_state = _session_manifest_recovery_state(plan_id, session_index)
+        if stale_manifest_update is not None:
+            manifest_state["stale_manifest_update"] = stale_manifest_update
+
+    capture_command = (
+        f"python3 harness.py visual-capture-worker --contract {json.dumps(contract, ensure_ascii=False)}"
+    )
+    has_runnable_manifest_records = int(manifest_state.get("runnable_count", 0)) > 0
+    capture_start_allowed = (
+        os.path.exists(contract)
+        and has_runnable_manifest_records
+        and not bool(liveness.get("active"))
+        and not bool(liveness.get("session_result_success"))
+        and (
+            (
+                not recovery_reason
+                and not bool(liveness.get("session_result_exists"))
+            )
+            or (
+                bool(recovery_reason)
+                and (
+                    int(manifest_state.get("runnable_count", 0)) > 0
+                    or bool(recovery_prepare_result)
+                )
+            )
+        )
+    )
+    worker_commands = {
+        "codex_extract_prepare": (
+            f"python3 harness.py visual-codex-extract-prepare "
+            f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
+        ),
+        "codex_extract_dispatch_advice": (
+            f"python3 harness.py visual-codex-extract-dispatch "
+            f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
+        ),
+        "codex_extract_dispatch_start": (
+            f"python3 harness.py visual-codex-extract-dispatch "
+            f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)} --start"
+        ),
+    }
+    reason = recovery_reason or liveness.get("reason", "")
+    if liveness.get("stale") and capture_start_allowed:
+        worker_commands["capture"] = capture_command
+        worker_commands["capture_recoverable_restart"] = capture_command
+    elif capture_start_allowed:
+        worker_commands["capture"] = capture_command
     return {
         "ok": True,
         "plan_id": plan_id,
@@ -507,30 +627,142 @@ def _dispatch_advice(plan_id: str, session_index: int) -> Dict[str, Any]:
         "instructions": instructions,
         "instructions_exists": os.path.exists(instructions),
         "expected_result": result_path,
-        "worker_commands": {
-            "capture": f"python3 harness.py visual-capture-worker --contract {json.dumps(contract, ensure_ascii=False)}",
-            "codex_extract_prepare": (
-                f"python3 harness.py visual-codex-extract-prepare "
-                f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
-            ),
-            "codex_extract_dispatch_advice": (
-                f"python3 harness.py visual-codex-extract-dispatch "
-                f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
-            ),
-            "codex_extract_dispatch_start": (
-                f"python3 harness.py visual-codex-extract-dispatch "
-                f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)} --start"
-            ),
-        },
+        "capture_worker_liveness": liveness,
+        "capture_worker_stale": bool(liveness.get("stale")),
+        "capture_start_allowed": capture_start_allowed,
+        "manifest_recovery_state": manifest_state,
+        "recovery_prepare_result": recovery_prepare_result,
+        "reason": reason,
+        "worker_commands": worker_commands,
         "suggested_command": (
             f"python3 harness.py visual-sync-worker {plan_id} --session {int(session_index)}"
         ),
         "notes": (
             "v1 heartbeat does not start a background worker. Hand the contract "
-            "to the bounded Midscene computer worker, then run the suggested "
-            "sync command after session_worker_result.json exists."
+            "to the bounded Midscene computer worker only when "
+            "capture_start_allowed is true, then run the suggested sync command "
+            "after session_worker_result.json exists."
         ),
     }
+
+
+def _mark_stale_capture_workers_for_heartbeat(
+    plan_id: str,
+    session_index: Optional[int],
+    config_file: str,
+) -> List[Dict[str, Any]]:
+    stale = []
+    stale_after_seconds = _capture_worker_stale_after_seconds(config_file)
+    for idx in _sync_candidate_sessions(plan_id, session_index):
+        liveness = capture_worker_liveness(plan_id, idx, stale_after_seconds=stale_after_seconds)
+        if not liveness.get("stale"):
+            continue
+        manifest_update = _mark_session_records_recoverable_stale(plan_id, idx, liveness)
+        item = {
+            "plan_id": plan_id,
+            "session_index": idx,
+            "reason": liveness.get("reason", "capture_worker_stale"),
+            "stale_reason": liveness.get("stale_reason", ""),
+            "runtime": liveness.get("runtime", {}),
+            "manifest_update": manifest_update,
+        }
+        stale.append(item)
+        _write_heartbeat_runtime(
+            plan_id,
+            idx,
+            "failed_recoverable",
+            {
+                "action": "stale_recovered",
+                "reason": item["reason"],
+                "plan_id": plan_id,
+                "session_index": idx,
+            },
+        )
+    return stale
+
+
+def _session_manifest_recovery_state(plan_id: str, session_index: int) -> Dict[str, Any]:
+    try:
+        from modules.visual_pipeline import load_visual_manifest
+
+        manifest = load_visual_manifest(plan_id)
+    except Exception as exc:
+        return {"runnable_count": 0, "failed_recoverable_count": 0, "error": str(exc)}
+    runnable_count = 0
+    failed_recoverable_count = 0
+    by_status: Dict[str, int] = {}
+    for record in manifest.get("records", []):
+        record_session = record.get("extra", {}).get("daily_session_index")
+        if int(record_session or 0) != int(session_index):
+            continue
+        status = str(record.get("status") or "")
+        by_status[status] = by_status.get(status, 0) + 1
+        if status in RUNNABLE_STATUSES:
+            runnable_count += 1
+        if status == "failed_recoverable":
+            failed_recoverable_count += 1
+    return {
+        "runnable_count": runnable_count,
+        "failed_recoverable_count": failed_recoverable_count,
+        "by_status": by_status,
+    }
+
+
+def _mark_session_records_recoverable_stale(
+    plan_id: str,
+    session_index: int,
+    liveness: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        from modules.visual_pipeline import load_visual_manifest, save_visual_manifest
+        from modules.visual_capture import keyword_evidence_dir
+        from modules.visual_pipeline import task_dir_for_run
+
+        manifest = load_visual_manifest(plan_id)
+        task_dir = task_dir_for_run(plan_id)
+    except Exception as exc:
+        return {"updated": 0, "error": str(exc)}
+    now = datetime.now().isoformat(timespec="seconds")
+    updated = 0
+    skipped_keyword_results = 0
+    for record in manifest.get("records", []):
+        record_session = record.get("extra", {}).get("daily_session_index")
+        if int(record_session or 0) != int(session_index):
+            continue
+        if str(record.get("status") or "") in {"captured", "extracted", "success", "skipped", "failed_hard"}:
+            continue
+        keyword = record.get("keyword", "")
+        evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
+        if os.path.exists(os.path.join(evidence_dir, "keyword_result.json")):
+            skipped_keyword_results += 1
+            continue
+        record["status"] = "failed_recoverable"
+        record["failure_reason"] = "capture_worker_stale"
+        record["last_action"] = "capture_worker_stale_recovered"
+        record["updated_at"] = now
+        record.setdefault("extra", {})
+        record["extra"]["capture_worker_stale_reason"] = liveness.get("stale_reason", "")
+        record["extra"]["capture_worker_runtime"] = liveness.get("runtime", {})
+        updated += 1
+    if updated > 0:
+        session = manifest.setdefault("session", {})
+        session["status"] = "failed_recoverable"
+        session["worker_status"] = "failed_recoverable"
+        session["failure_reason"] = "capture_worker_stale"
+        session["stale_reason"] = liveness.get("stale_reason", "")
+        session["updated_at"] = now
+    save_visual_manifest(plan_id, manifest)
+    return {"updated": updated, "skipped_keyword_results": skipped_keyword_results}
+
+
+def _capture_worker_stale_after_seconds(config_file: str = "config/settings.ini") -> float:
+    config = ConfigManager(config_file)
+    minutes = config.getint(
+        "SCHEDULER",
+        "capture_worker_stale_after_minutes",
+        fallback=DEFAULT_CAPTURE_WORKER_STALE_AFTER_MINUTES,
+    )
+    return float(max(1, int(minutes)) * 60)
 
 
 def _session_contract_path(plan_id: str, session_index: int) -> str:
@@ -571,7 +803,7 @@ def _write_heartbeat_runtime(
     write_worker_runtime(
         plan_id,
         session_index,
-        "capture",
+        "heartbeat",
         status,
         heartbeat=True,
         heartbeat_action=compact_payload["action"],
@@ -675,10 +907,17 @@ def _sample_candidates(
     return [item for item in candidates if item["card_name"] in sampled_names]
 
 
-def _assign_sessions(selected: List[Dict[str, Any]], session_count: int) -> List[Dict[str, Any]]:
+def _assign_sessions(
+    selected: List[Dict[str, Any]],
+    session_count: int,
+    base_time: Optional[datetime] = None,
+    scheduler: Optional[SchedulerConfig] = None,
+) -> List[Dict[str, Any]]:
     total = len(selected)
     if total == 0:
         return []
+    base_time = base_time or datetime.now()
+    schedule = _build_session_schedule(base_time, session_count, scheduler)
     per_session = int(math.ceil(total / max(1, session_count)))
     sessions = []
     for idx, item in enumerate(selected):
@@ -686,8 +925,79 @@ def _assign_sessions(selected: List[Dict[str, Any]], session_count: int) -> List
         item["session_index"] = session_index
     for session_index in range(1, session_count + 1):
         count = sum(1 for item in selected if item["session_index"] == session_index)
-        sessions.append({"session_index": session_index, "keyword_count": count, "status": "pending"})
+        due = schedule[session_index - 1]
+        sessions.append(
+            {
+                "session_index": session_index,
+                "keyword_count": count,
+                "status": "pending",
+                "due_at": due["due_at"],
+                "due_time": due["due_time"],
+                "schedule_mode": due["schedule_mode"],
+            }
+        )
     return sessions
+
+
+def _build_session_schedule(
+    base_time: datetime,
+    session_count: int,
+    scheduler: Optional[SchedulerConfig],
+) -> List[Dict[str, str]]:
+    session_count = max(1, int(session_count))
+    interval_minutes = int(getattr(scheduler, "session_due_interval_minutes", 0) or 0)
+    fixed_times = str(getattr(scheduler, "session_due_times", "") or "").strip()
+    if interval_minutes > 0:
+        return [
+            _schedule_item(
+                base_time + timedelta(minutes=interval_minutes * idx),
+                "interval_from_plan_start",
+            )
+            for idx in range(session_count)
+        ]
+    if fixed_times:
+        parsed = _parse_session_due_times(fixed_times)
+        if len(parsed) != session_count:
+            raise ValueError(
+                "SCHEDULER.session_due_times 的数量必须等于 daily_session_count；"
+                f"当前 {len(parsed)} 个时间 / {session_count} 个 session。"
+            )
+        return [_schedule_item(base_time.replace(hour=hour, minute=minute, second=0, microsecond=0), "fixed_time") for hour, minute in parsed]
+    minutes_per_session = 1440 / session_count
+    day_start = base_time.replace(hour=0, minute=0, second=0, microsecond=0)
+    return [
+        _schedule_item(day_start + timedelta(minutes=minutes_per_session * idx), "even_day_split")
+        for idx in range(session_count)
+    ]
+
+
+def _parse_session_due_times(value: str) -> List[tuple]:
+    result = []
+    for part in value.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            hour_text, minute_text = item.split(":", 1)
+            hour = int(hour_text)
+            minute = int(minute_text)
+        except ValueError as exc:
+            raise ValueError(f"无效 session_due_times 时间: {item}") from exc
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            raise ValueError(f"无效 session_due_times 时间: {item}")
+        result.append((hour, minute))
+    for previous, current in zip(result, result[1:]):
+        if current <= previous:
+            raise ValueError("SCHEDULER.session_due_times 必须按时间严格递增，且不能重复")
+    return result
+
+
+def _schedule_item(due_at: datetime, mode: str) -> Dict[str, str]:
+    return {
+        "due_at": due_at.isoformat(timespec="seconds"),
+        "due_time": due_at.strftime("%H:%M"),
+        "schedule_mode": mode,
+    }
 
 
 def _resolve_raw_input_file(config: ConfigManager, raw_input_file: Optional[str]) -> str:
@@ -709,20 +1019,51 @@ def _today_plan_id(now: Optional[datetime] = None) -> str:
     return f"daily_{now.strftime('%Y%m%d')}"
 
 
-def _choose_due_session(plan: Dict[str, Any], manifest: Dict[str, Any]) -> int:
+def _choose_due_session(
+    plan: Dict[str, Any],
+    manifest: Dict[str, Any],
+    now: Optional[datetime] = None,
+) -> int:
     sessions = plan.get("sessions", [])
     if not sessions:
         return 0
     session_count = max(1, int(plan.get("daily_session_count") or len(sessions) or 1))
-    now = datetime.now()
-    minute_of_day = now.hour * 60 + now.minute
-    minutes_per_session = 1440 / session_count
-    due_session = min(session_count, max(1, int(minute_of_day // minutes_per_session) + 1))
     runnable_by_session = _runnable_counts_by_session(manifest)
-    for idx in range(1, due_session + 1):
+    due_indices = _due_session_indices(sessions, session_count, now or datetime.now())
+    for idx in due_indices:
         if runnable_by_session.get(idx, 0) > 0:
             return idx
     return 0
+
+
+def _due_session_indices(
+    sessions: List[Dict[str, Any]],
+    session_count: int,
+    now: datetime,
+) -> List[int]:
+    due = []
+    explicit_due_count = sum(1 for session in sessions if str(session.get("due_at") or "").strip())
+    if explicit_due_count and explicit_due_count != len(sessions):
+        raise ValueError("daily_plan sessions 的 due_at 不完整；请重新生成 plan 或补齐 session due-time")
+    for session in sessions:
+        idx = int(session.get("session_index") or 0)
+        if idx <= 0:
+            continue
+        due_at = str(session.get("due_at") or "").strip()
+        if not due_at:
+            continue
+        try:
+            parsed = datetime.fromisoformat(due_at)
+        except ValueError as exc:
+            raise ValueError(f"daily_plan session {idx} 的 due_at 无效: {due_at}") from exc
+        if parsed <= now:
+            due.append(idx)
+    if explicit_due_count:
+        return sorted(set(due))
+    minute_of_day = now.hour * 60 + now.minute
+    minutes_per_session = 1440 / max(1, session_count)
+    due_session = min(session_count, max(1, int(minute_of_day // minutes_per_session) + 1))
+    return list(range(1, due_session + 1))
 
 
 def _runnable_counts_by_session(manifest: Dict[str, Any]) -> Dict[int, int]:
