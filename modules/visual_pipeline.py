@@ -9,7 +9,6 @@ from typing import Dict, Optional
 
 from modules.midscene_computer_driver import (
     midscene_computer_config_from_settings,
-    write_midscene_computer_request,
     write_midscene_session_worker_contract,
 )
 from modules.page_sampling import (
@@ -94,39 +93,6 @@ def save_visual_manifest(run_id: str, manifest: Dict) -> str:
     return path
 
 
-def prepare_single_keyword_run(keyword: str, config_file: str = "config/settings.ini") -> Dict:
-    ConfigManager(config_file)
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    task_dir = task_dir_for_run(run_id)
-    evidence_dir = keyword_evidence_dir(task_dir, keyword)
-    ensure_dir(task_dir)
-    manifest = {
-        "run_id": run_id,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "source": {"keyword": keyword, "config": os.path.abspath(config_file)},
-        "workflow": "midscene_computer_visual_capture",
-        "keywords": [keyword],
-        "records": [
-            {
-                "keyword": keyword,
-                "status": "pending",
-                "failure_reason": None,
-                "error": None,
-                "evidence_dir": evidence_dir,
-                "retry_count": 0,
-                "last_action": "visual_task_prepared",
-                "agent_notes": "",
-                "started_at": None,
-                "finished_at": None,
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-                "extra": {},
-            }
-        ],
-    }
-    save_visual_manifest(run_id, manifest)
-    return manifest
-
-
 def run_visual_collection(
     run_id: str,
     config_file: str = "config/settings.ini",
@@ -135,6 +101,9 @@ def run_visual_collection(
     session_index: Optional[int] = None,
     force_lease: bool = False,
 ) -> Dict:
+    if session_index is None:
+        raise ValueError("visual collection now requires a session_index; use visual-session-run or visual-heartbeat")
+
     config = ConfigManager(config_file)
     midscene_config = midscene_computer_config_from_settings(config)
     sampling_config = page_sampling_config_from_settings(config)
@@ -171,7 +140,7 @@ def run_visual_collection(
     results = []
     session_records = []
     worker_contract = None
-    run_status = "requests_prepared"
+    run_status = "session_contract_prepared"
     try:
         for record in manifest.get("records", []):
             if effective_limit is not None and processed >= effective_limit:
@@ -187,7 +156,7 @@ def run_visual_collection(
             record_session = record.get("extra", {}).get("daily_session_index")
             write_task_event(
                 task_dir,
-                event="keyword_request_started",
+                event="session_keyword_contract_started",
                 run_id=run_id,
                 session_index=record_session,
                 keyword=keyword,
@@ -196,54 +165,38 @@ def run_visual_collection(
             record["status"] = "needs_midscene_computer"
             record["started_at"] = record.get("started_at") or datetime.now().isoformat(timespec="seconds")
             record["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            record["last_action"] = "midscene_computer_request_prepared"
+            record["last_action"] = "midscene_session_worker_contract_pending"
             save_visual_manifest(run_id, manifest)
 
             evidence_dir = record.get("evidence_dir") or keyword_evidence_dir(task_dir, keyword)
-            request = write_midscene_computer_request(
-                run_id=run_id,
-                keyword=keyword,
-                evidence_dir=evidence_dir,
-                config=midscene_config,
-                sampling_config=sampling_config,
-                manual_state=manual_state,
-            )
-            target = request.start_url
 
-            record["status"] = request.status
+            record["status"] = "needs_midscene_computer"
             record["failure_reason"] = None
             record["evidence_dir"] = evidence_dir
-            record["last_action"] = "midscene_computer_request_prepared"
+            record["last_action"] = "midscene_session_worker_contract_pending"
             record["updated_at"] = datetime.now().isoformat(timespec="seconds")
             record.setdefault("extra", {})
-            record["extra"]["midscene_computer_request"] = request.request_path
-            record["extra"]["midscene_computer_instructions"] = request.instruction_path
-            record["extra"]["target_url"] = target
-            record["extra"]["expected_screenshot"] = request.screenshot_path
             record["extra"]["sampling"] = sampling_config.to_dict()
 
             result_payload = {
                 "keyword": keyword,
-                "status": request.status,
-                "request": request.request_path,
-                "instructions": request.instruction_path,
-                "target_url": target,
+                "status": record["status"],
+                "evidence_dir": evidence_dir,
                 "provider": "midscene_computer",
             }
 
             session = manifest.setdefault("session", initial_session_state(policy))
-            session["status"] = "awaiting_midscene_computer"
+            session["status"] = "awaiting_midscene_session_worker"
             session["updated_at"] = datetime.now().isoformat(timespec="seconds")
             save_visual_manifest(run_id, manifest)
             write_task_event(
                 task_dir,
-                event="keyword_request_prepared",
+                event="session_keyword_contract_prepared",
                 run_id=run_id,
                 session_index=record_session,
                 keyword=keyword,
                 status=record["status"],
-                request_path=request.request_path,
-                instructions_path=request.instruction_path,
+                evidence_dir=evidence_dir,
             )
             results.append(result_payload)
             session_records.append(record)
@@ -470,7 +423,7 @@ def update_manifest_after_ingest(run_id: str, keyword: str, ingest_result: Dict)
         record_session = record.get("extra", {}).get("daily_session_index")
         if ingest_result.get("ok"):
             record["finished_at"] = now
-        screenshot_path = ingest_result.get("screenshot_path") or record.get("extra", {}).get("expected_screenshot", "")
+        screenshot_path = ingest_result.get("screenshot_path") or ""
         retained = bool(ingest_result.get("screenshot_retained", False))
         write_task_event(
             task_dir,

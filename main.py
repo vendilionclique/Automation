@@ -119,7 +119,7 @@ def prepare_visual_task(args):
     print(f"关键词文件: {keywords_path}")
     if checkpoint_copy:
         print(f"checkpoint: {checkpoint_copy}")
-    print("\n下一步: 使用 harness.py visual-run 生成视觉采集请求。")
+    print("\n下一步: 使用 harness.py visual-plan-day / visual-heartbeat 进入 session worker 主线。")
 
 
 def _safe_name(value):

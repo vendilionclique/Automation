@@ -19,10 +19,13 @@ This repository keeps project-specific agent knowledge and Midscene MCP launch d
 - Local Chrome profile and Taobao login state.
 
 `local/midscene-computer.env.example` and the sync scripts default the Midscene
-computer external VLM to Zhipu `glm-4.6v-flash` with
-`MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4` and
-`MIDSCENE_MODEL_FAMILY=glm-v`. Keep the API key machine-local in
-`local/midscene-computer.env`.
+computer external VLM to paid high-speed Zhipu `glm-4.6v-flashx` with
+`MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`,
+`MIDSCENE_MODEL_FAMILY=glm-v`, `MIDSCENE_MODEL_REASONING_ENABLED=false`, and
+`MIDSCENE_MODEL_TEMPERATURE=0`. Kimi/Moonshot has been abandoned for this
+workflow and is not the mainline. Keep the API key machine-local in
+`local/midscene-computer.env`; GLM-5V-Turbo is reserved only for later A/B
+evaluation.
 
 ## New Machine Bootstrap
 
@@ -83,10 +86,11 @@ Those failures can make the Chrome launcher misread an already-running browser
 as missing, then attempt to start a duplicate profile and surface misleading
 Chrome crash reports.
 
-The pre-approved Midscene tool set is limited to the visual workflow surface:
-display listing/connection, system screenshots, coordinate mouse actions,
-keyboard input, scroll, assertion, and disconnect. It does not grant DOM, HTML,
-network, cookie, storage, or CDP extraction capabilities.
+The pre-approved Midscene tool set is limited to the bounded act mainline:
+display listing/connection, system screenshots, bounded `act`, assertion, and
+disconnect. Short action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`,
+and `ClearInput` are not pre-approved for unattended cron. The approved set does
+not grant DOM, HTML, network, cookie, storage, or CDP extraction capabilities.
 
 Cron automations for this workflow should request the latest GPT-5.5 model by
 default. Codex extract dispatch may use `codex exec -p taobao_visual_extract`
@@ -135,8 +139,8 @@ recovers at most one capture worker at a time when scheduler dispatch says
 `capture_start_allowed=true`, syncs after worker exit, and then terminates when
 the session is complete, blocked by control/human-review state, idle timed out,
 or restart budget is exhausted. Without `--start`, it is a dry-run advice loop.
-`visual-automation-tick --start-capture` remains a compatibility helper, but it
-is no longer the documented mainline automation command.
+The legacy automation tick CLI is no longer exposed; automation should invoke
+heartbeat and this bounded session watchdog directly.
 
 That cron rule is about the daily/supervisor entrypoint. It does not forbid the
 local extract dispatcher from using `codex exec` as a leaf worker after capture

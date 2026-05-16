@@ -193,42 +193,6 @@ def cmd_db(_args):
         sys.exit(1)
 
 
-def _keyword_with_prefix(config_file, card_name):
-    from modules.utils import ConfigManager
-
-    config = ConfigManager(config_file)
-    prefix = config.get("INPUT", "keyword_prefix", fallback="万智牌")
-    return f"{prefix} {card_name}".strip()
-
-
-def cmd_visual_one(args):
-    from modules.visual_pipeline import prepare_single_keyword_run, run_visual_collection
-
-    keyword = _keyword_with_prefix(args.config, args.card)
-    manifest = prepare_single_keyword_run(keyword, config_file=args.config)
-    run_id = manifest["run_id"]
-    result = run_visual_collection(
-        run_id,
-        config_file=args.config,
-        limit=1,
-        manual_state=args.state,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
-def cmd_visual_run(args):
-    from modules.visual_pipeline import run_visual_collection
-
-    result = run_visual_collection(
-        args.run_id,
-        config_file=args.config,
-        limit=args.limit,
-        manual_state=args.state,
-        session_index=args.session,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
 def cmd_visual_plan_day(args):
     from modules.visual_scheduler import plan_daily_collection
 
@@ -317,24 +281,6 @@ def cmd_visual_scheduler_status(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def cmd_visual_auto_tick(args):
-    from modules.visual_scheduler import auto_tick_daily_collection
-
-    result = auto_tick_daily_collection(
-        raw_input_file=args.raw_input,
-        config_file=args.config,
-        plan_id=args.plan_id,
-        session_index=args.session,
-        limit=args.limit,
-        random_sample=args.random_sample,
-        random_seed=args.random_seed,
-        session_count=args.session_count,
-        prepare_requests=args.prepare_requests,
-        force_lease=args.force_lease,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
 def cmd_visual_heartbeat(args):
     from modules.visual_scheduler import heartbeat_daily_collection
 
@@ -349,24 +295,6 @@ def cmd_visual_heartbeat(args):
         random_seed=args.random_seed,
         session_count=args.session_count,
         force_lease=args.force_lease,
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
-def cmd_visual_automation_tick(args):
-    from modules.visual_automation_tick import run_visual_automation_tick
-
-    result = run_visual_automation_tick(
-        raw_input_file=args.raw_input,
-        config_file=args.config,
-        plan_id=args.plan_id,
-        session_index=args.session,
-        limit=args.limit,
-        random_sample=args.random_sample,
-        random_seed=args.random_seed,
-        session_count=args.session_count,
-        force_lease=args.force_lease,
-        start_capture=args.start_capture,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -616,16 +544,6 @@ def main():
     sub.add_parser("setup", help="Python/依赖/目录自检")
     sub.add_parser("db", help="万智牌数据库（含 SSH 隧道）连通性")
 
-    visual_one = sub.add_parser("visual-one", help="准备单关键词视觉采集任务")
-    visual_one.add_argument("card", help="牌名（不含「万智牌」前缀），如 中止")
-    visual_one.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
-
-    visual_run = sub.add_parser("visual-run", help="为已准备 run_id 生成视觉采集请求")
-    visual_run.add_argument("run_id", help="data/tasks/<run_id> 中的 run_id")
-    visual_run.add_argument("--limit", type=int, help="最多处理多少个 pending 关键词")
-    visual_run.add_argument("--session", type=int, help="仅处理 daily plan 中指定 session 的关键词")
-    visual_run.add_argument("--state", help="手动覆盖页面状态，如 visible_ready / white_skeleton")
-
     plan_day = sub.add_parser("visual-plan-day", help="从全量输入台账生成当天分段采集计划")
     plan_day.add_argument("--raw-input", required=True, help="原始输入台账 Excel")
     plan_day.add_argument("--plan-id", help="可选：指定 data/tasks/<plan_id>，默认使用时间戳")
@@ -667,17 +585,6 @@ def main():
     scheduler_status = sub.add_parser("visual-scheduler-status", help="查看 daily plan 的 session/状态摘要")
     scheduler_status.add_argument("plan_id", help="visual-plan-day 生成的 plan_id")
 
-    auto_tick = sub.add_parser("visual-auto-tick", help="自动创建/复用今日 plan，并选择当前应运行的 session")
-    auto_tick.add_argument("--raw-input", help="整本原始输入台账；缺省读 config [PRODUCT_ROUTING] raw_input_file")
-    auto_tick.add_argument("--plan-id", help="可选：覆盖自动 daily_YYYYMMDD plan_id")
-    auto_tick.add_argument("--session", type=int, help="可选：强制指定 session；缺省按当前时间和状态选择")
-    auto_tick.add_argument("--limit", type=int, help="最多纳入多少个 runnable 关键词")
-    auto_tick.add_argument("--random-sample", type=int, help="首次创建 plan 时从候选牌名中随机抽样 N 个关键词")
-    auto_tick.add_argument("--random-seed", type=int, help="随机抽样 seed，便于复现")
-    auto_tick.add_argument("--session-count", type=int, help="首次创建 plan 时覆盖 session 数")
-    auto_tick.add_argument("--prepare-requests", action="store_true", help="同时生成该 session 的 Midscene 请求")
-    auto_tick.add_argument("--force-lease", action="store_true", help="prepare-requests 时覆盖已有 active lease")
-
     heartbeat = sub.add_parser("visual-heartbeat", help="短命心跳：同步状态、准备 session worker contract、返回 worker 命令")
     heartbeat.add_argument("--raw-input", help="整本原始输入台账；缺省读 config [PRODUCT_ROUTING] raw_input_file")
     heartbeat.add_argument("--plan-id", help="可选：覆盖自动 daily_YYYYMMDD plan_id")
@@ -688,20 +595,6 @@ def main():
     heartbeat.add_argument("--random-seed", type=int, help="随机抽样 seed，便于复现")
     heartbeat.add_argument("--session-count", type=int, help="首次创建 plan 时覆盖 session 数")
     heartbeat.add_argument("--force-lease", action="store_true", help="准备请求时覆盖已有 active lease")
-
-    automation_tick = sub.add_parser(
-        "visual-automation-tick",
-        help="Codex App Automation 短命 tick：heartbeat advice，可选启动一次 bounded capture，再 sync",
-    )
-    automation_tick.add_argument("--raw-input", help="整本原始输入台账；缺省读 config [PRODUCT_ROUTING] raw_input_file")
-    automation_tick.add_argument("--plan-id", help="可选：覆盖自动 daily_YYYYMMDD plan_id")
-    automation_tick.add_argument("--session", type=int, help="可选：强制指定 session；缺省按当前时间和状态选择")
-    automation_tick.add_argument("--limit", type=int, help="最多纳入多少个 runnable 关键词")
-    automation_tick.add_argument("--random-sample", type=int, help="首次创建 plan 时从候选牌名中随机抽样 N 个关键词")
-    automation_tick.add_argument("--random-seed", type=int, help="随机抽样 seed，便于复现")
-    automation_tick.add_argument("--session-count", type=int, help="首次创建 plan 时覆盖 session 数")
-    automation_tick.add_argument("--force-lease", action="store_true", help="准备请求时覆盖已有 active lease")
-    automation_tick.add_argument("--start-capture", action="store_true", help="真正启动一次 bounded capture worker；默认只返回 advice")
 
     capture_watchdog = sub.add_parser(
         "visual-capture-watchdog",
@@ -808,10 +701,6 @@ def main():
         cmd_setup(args)
     elif args.cmd == "db":
         cmd_db(args)
-    elif args.cmd == "visual-one":
-        cmd_visual_one(args)
-    elif args.cmd == "visual-run":
-        cmd_visual_run(args)
     elif args.cmd == "visual-plan-day":
         cmd_visual_plan_day(args)
     elif args.cmd == "visual-session-run":
@@ -824,12 +713,8 @@ def main():
         cmd_visual_session_lease(args)
     elif args.cmd == "visual-scheduler-status":
         cmd_visual_scheduler_status(args)
-    elif args.cmd == "visual-auto-tick":
-        cmd_visual_auto_tick(args)
     elif args.cmd == "visual-heartbeat":
         cmd_visual_heartbeat(args)
-    elif args.cmd == "visual-automation-tick":
-        cmd_visual_automation_tick(args)
     elif args.cmd == "visual-capture-watchdog":
         cmd_visual_capture_watchdog(args)
     elif args.cmd == "visual-control":

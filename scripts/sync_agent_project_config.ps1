@@ -20,15 +20,6 @@ $MidsceneAllowedTools = @(
     "computer_disconnect",
     "computer_list_displays",
     "take_screenshot",
-    "Tap",
-    "DoubleClick",
-    "RightClick",
-    "MouseMove",
-    "Input",
-    "Scroll",
-    "KeyboardPress",
-    "DragAndDrop",
-    "ClearInput",
     "act",
     "assert"
 )
@@ -48,7 +39,6 @@ args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$($McpLauncher -re
 enabled = true
 startup_timeout_sec = 30
 tool_timeout_sec = 180
-default_tools_approval_mode = "approve"
 
 $toolBlocks
 "@
@@ -124,11 +114,12 @@ if (-not (Test-Path -LiteralPath $LocalEnv)) {
     $runDir = (Join-Path $RootDir "local\midscene-run") -replace '\\', '/'
     @"
 # Local Midscene computer VLM config. Gitignored; do not commit.
-export MIDSCENE_MODEL_NAME="glm-4.6v-flash"
+export MIDSCENE_MODEL_NAME="glm-4.6v-flashx"
 export MIDSCENE_MODEL_API_KEY=""
 export MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"
 export MIDSCENE_MODEL_FAMILY="glm-v"
 export MIDSCENE_MODEL_REASONING_ENABLED="false"
+export MIDSCENE_MODEL_TEMPERATURE="0"
 export MIDSCENE_RUN_DIR="$runDir"
 export MIDSCENE_REPORT_QUIET="true"
 "@ | Set-Content -LiteralPath $LocalEnv -Encoding UTF8

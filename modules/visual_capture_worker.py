@@ -47,6 +47,7 @@ CAPTURED_STATUSES = {"captured"}
 CAPTURABLE_PAGE_STATES = {
     VISIBLE_READY,
     EMPTY_RESULT,
+    "results_end",
     "results_page",
     "search_results",
     "visible_results",
@@ -411,20 +412,17 @@ def _capture_keyword_with_mcp(
         _raise_if_keyword_timeout(started, timeout_seconds, keyword)
         if not allow_act:
             raise RuntimeError("midscene_act_disabled_for_real_capture")
-        search_result = _call_act(
-            client,
-            _keyword_search_prompt(keyword=keyword, scroll_distance=scroll_distance),
+        search_diagnostics = _perform_keyword_search(
+            client=client,
+            keyword=keyword,
+            scroll_distance=scroll_distance,
             interrupt_check=interrupt_check,
             keyword_deadline=keyword_deadline,
-            keyword=keyword,
             timeout_seconds=mcp_timeout_seconds,
         )
-        _merge_diagnostics_in_place(
-            diagnostics,
-            {"keyword_search_act": _midscene_text_diagnostics(search_result, client=client)},
-        )
-        _raise_if_rate_limited_diagnostics(diagnostics.get("keyword_search_act"), "keyword_search")
-        _raise_if_abnormal_act(search_result, default_context="keyword_search")
+        _merge_diagnostics_in_place(diagnostics, {"keyword_search": search_diagnostics})
+        for step_name, step_diagnostics in search_diagnostics.get("steps", {}).items():
+            _raise_if_rate_limited_diagnostics(step_diagnostics, f"keyword_search:{step_name}")
         _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_keyword_search_act")
         _interruptible_sleep(
             page_load_wait,
@@ -471,38 +469,79 @@ def _capture_keyword_with_mcp(
                 notes=search_verification["page_state"].get("reason") or "post_act_keyword_verification",
             )
         if not search_verification["ok"]:
-            raise MidsceneActionAbnormal(
-                reason=search_verification["stop_reason"],
-                rough_state=search_verification["rough_state"],
-                message=search_verification["message"],
-                diagnostics={"post_act_verification": search_verification["diagnostics"]},
+            retry_verification = _retry_search_submit_once(
+                client=client,
+                task=task,
+                capture_plan=capture_plan,
+                evidence_dir=evidence_dir,
+                keyword=keyword,
+                search_verification=search_verification,
+                contract=contract,
+                tools=tools,
+                run_id=run_id,
+                session_index=session_index,
+                task_dir=task_dir,
+                screenshots=screenshots,
+                diagnostics=diagnostics,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                timeout_seconds=mcp_timeout_seconds,
             )
+            if retry_verification:
+                search_verification = retry_verification
+                if search_verification["ok"]:
+                    screenshots[-1] = search_verification["screenshot"]
+                else:
+                    screenshots[-1] = search_verification["screenshot"]
+            if search_verification["ok"]:
+                _merge_diagnostics_in_place(
+                    diagnostics,
+                    {
+                        "post_act_submit_retry": {
+                            "status": "recovered",
+                            "recovered": {
+                                "status": "recovered",
+                                "message": (
+                                    "A single bounded act retry submitted the visible search "
+                                    "and produced a capturable state."
+                                ),
+                            },
+                            "message": (
+                                "A single bounded act retry submitted the visible search "
+                                "and produced a capturable state."
+                            ),
+                        }
+                    },
+                )
+            else:
+                raise MidsceneActionAbnormal(
+                    reason=search_verification["stop_reason"],
+                    rough_state=search_verification["rough_state"],
+                    message=search_verification["message"],
+                    diagnostics={"post_act_verification": search_verification["diagnostics"]},
+                )
 
         for tile_index in range(1, max_tiles):
             _raise_if_controlled(run_id, session_index)
             _raise_if_keyword_timeout(started, timeout_seconds, keyword)
             _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"before_scroll_{tile_index}")
-            scroll_result = _call_act(
-                client,
-                _next_tile_prompt(
-                    keyword=keyword,
-                    tile_index=tile_index,
-                    scroll_distance=scroll_distance,
-                ),
+            scroll_result = _perform_page_scroll(
+                client=client,
+                keyword=keyword,
+                tile_index=tile_index,
+                scroll_distance=scroll_distance,
                 interrupt_check=interrupt_check,
                 keyword_deadline=keyword_deadline,
-                keyword=keyword,
                 timeout_seconds=mcp_timeout_seconds,
             )
             _merge_diagnostics_in_place(
                 diagnostics,
-                {f"scroll_tile_{tile_index}_act": _midscene_text_diagnostics(scroll_result, client=client)},
+                {f"scroll_tile_{tile_index}": scroll_result},
             )
             _raise_if_rate_limited_diagnostics(
-                diagnostics.get(f"scroll_tile_{tile_index}_act"),
+                diagnostics.get(f"scroll_tile_{tile_index}"),
                 f"scroll_tile_{tile_index}",
             )
-            _raise_if_abnormal_act(scroll_result, default_context=f"scroll_tile_{tile_index}")
             _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_act_{tile_index}")
             tile_id = f"tile_{tile_index:02d}"
             tile_path = _tile_path(capture_plan, evidence_dir, tile_index)
@@ -554,6 +593,18 @@ def _capture_keyword_with_mcp(
                 notes=page_state.get("reason") or "captured_by_midscene_computer_mcp",
             )
             review_reason = _page_state_review_reason(page_state)
+            if (
+                review_reason == "manual_review_needed"
+                and page_state.get("status") == UNKNOWN
+                and _has_capturable_screenshot(screenshots[:-1])
+            ):
+                diagnostics[f"{tile_id}_page_state"] = page_state
+                diagnostics["partial_capture_stop"] = {
+                    "tile_id": tile_id,
+                    "reason": "later_tile_unknown_after_capturable_tiles",
+                    "message": "Stopped scrolling after an inconclusive later tile; earlier result-page evidence is retained.",
+                }
+                break
             if review_reason:
                 raise MidsceneActionAbnormal(
                     reason=review_reason,
@@ -561,6 +612,13 @@ def _capture_keyword_with_mcp(
                     message=f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
                     diagnostics={f"{tile_id}_page_state": page_state},
                 )
+            if page_state.get("status") == "results_end":
+                diagnostics["capture_stop"] = {
+                    "tile_id": tile_id,
+                    "reason": "results_end",
+                    "message": "Visible page-state probe reported the bottom/end of results; retained this tile and moved to the next keyword.",
+                }
+                break
 
         elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
@@ -580,6 +638,31 @@ def _capture_keyword_with_mcp(
         )
     except WorkerControlInterrupt as exc:
         elapsed = round(time.monotonic() - started, 3)
+        if _has_capturable_screenshot(screenshots):
+            diagnostics["partial_capture_stop"] = {
+                "reason": "supervisor_interrupt_after_capturable_tiles",
+                "message": "Capture was interrupted by supervisor control after result-page evidence had already been captured.",
+                "control_reason": exc.reason,
+                "control_status": exc.status,
+            }
+            return _write_keyword_result(
+                task=task,
+                run_id=run_id,
+                session_index=session_index,
+                task_dir=task_dir,
+                fallback_index=fallback_index,
+                mode="real",
+                status="captured",
+                rough_state="visible_results_unverified",
+                stop_reason="captured_partial_supervisor_interrupt",
+                notes=(
+                    "Captured viewport tiles before supervisor control interrupted the keyword; "
+                    "product extraction is deferred to retained screenshot evidence."
+                ),
+                screenshots=screenshots,
+                elapsed_seconds=elapsed,
+                diagnostics=_merge_diagnostics(diagnostics, _midscene_exception_diagnostics(exc)),
+            )
         return _write_keyword_result(
             task=task,
             run_id=run_id,
@@ -596,6 +679,30 @@ def _capture_keyword_with_mcp(
             diagnostics=_merge_diagnostics(diagnostics, _midscene_exception_diagnostics(exc)),
         )
     except KeywordTimeout as exc:
+        elapsed = round(time.monotonic() - started, 3)
+        if _has_capturable_screenshot(screenshots):
+            diagnostics["partial_capture_stop"] = {
+                "reason": "keyword_timeout_after_capturable_tiles",
+                "message": "Keyword timed out after result-page evidence had already been captured.",
+            }
+            return _write_keyword_result(
+                task=task,
+                run_id=run_id,
+                session_index=session_index,
+                task_dir=task_dir,
+                fallback_index=fallback_index,
+                mode="real",
+                status="captured",
+                rough_state="visible_results_unverified",
+                stop_reason="captured_partial_keyword_timeout",
+                notes=(
+                    "Captured viewport tiles before the keyword timeout; product extraction is deferred "
+                    "to retained screenshot evidence."
+                ),
+                screenshots=screenshots,
+                elapsed_seconds=elapsed,
+                diagnostics=_merge_diagnostics(diagnostics, _midscene_exception_diagnostics(exc)),
+            )
         abnormal_screenshot = _capture_abnormal_screenshot(
             client,
             task,
@@ -603,7 +710,6 @@ def _capture_keyword_with_mcp(
             evidence_dir,
             timeout_seconds=0.5,
         )
-        elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
             task=task,
             run_id=run_id,
@@ -642,6 +748,32 @@ def _capture_keyword_with_mcp(
             diagnostics=_merge_diagnostics(diagnostics, _midscene_exception_diagnostics(exc)),
         )
     except MidsceneActionAbnormal as exc:
+        if exc.reason == "midscene_mcp_action_failed" and _has_capturable_screenshot(screenshots):
+            diagnostics["partial_capture_stop"] = {
+                "reason": "mcp_action_failed_after_capturable_tiles",
+                "message": (
+                    "A later Midscene action failed after result-page evidence had already been captured."
+                ),
+            }
+            elapsed = round(time.monotonic() - started, 3)
+            return _write_keyword_result(
+                task=task,
+                run_id=run_id,
+                session_index=session_index,
+                task_dir=task_dir,
+                fallback_index=fallback_index,
+                mode="real",
+                status="captured",
+                rough_state="visible_results_unverified",
+                stop_reason="captured_partial_mcp_action_failed",
+                notes=(
+                    "Captured viewport tiles before a later Midscene action failed; "
+                    "product extraction is deferred to retained screenshot evidence."
+                ),
+                screenshots=screenshots,
+                elapsed_seconds=elapsed,
+                diagnostics=_merge_diagnostics(diagnostics, exc.diagnostics),
+            )
         abnormal_screenshot = _capture_abnormal_screenshot(client, task, capture_plan, evidence_dir)
         elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
@@ -662,6 +794,35 @@ def _capture_keyword_with_mcp(
         )
     except Exception as exc:
         classification = classify_midscene_exception(exc)
+        if (
+            classification["stop_reason"] == "midscene_mcp_action_failed"
+            and _has_capturable_screenshot(screenshots)
+        ):
+            diagnostics["partial_capture_stop"] = {
+                "reason": "mcp_action_failed_after_capturable_tiles",
+                "message": (
+                    "A later Midscene action failed after result-page evidence had already been captured."
+                ),
+            }
+            elapsed = round(time.monotonic() - started, 3)
+            return _write_keyword_result(
+                task=task,
+                run_id=run_id,
+                session_index=session_index,
+                task_dir=task_dir,
+                fallback_index=fallback_index,
+                mode="real",
+                status="captured",
+                rough_state="visible_results_unverified",
+                stop_reason="captured_partial_mcp_action_failed",
+                notes=(
+                    "Captured viewport tiles before a later Midscene action failed; "
+                    "product extraction is deferred to retained screenshot evidence."
+                ),
+                screenshots=screenshots,
+                elapsed_seconds=elapsed,
+                diagnostics=_merge_diagnostics(diagnostics, _midscene_exception_diagnostics(exc)),
+            )
         abnormal_screenshot = _capture_abnormal_screenshot(client, task, capture_plan, evidence_dir)
         elapsed = round(time.monotonic() - started, 3)
         return _write_keyword_result(
@@ -682,6 +843,104 @@ def _capture_keyword_with_mcp(
         )
 
 
+def _has_capturable_screenshot(screenshots: List[Dict[str, Any]]) -> bool:
+    for screenshot in screenshots:
+        page_state = screenshot.get("page_state") or {}
+        if page_state.get("status") in CAPTURABLE_PAGE_STATES:
+            return True
+    return False
+
+
+def _retry_search_submit_once(
+    client: "MidsceneStdioClient",
+    task: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    evidence_dir: str,
+    keyword: str,
+    search_verification: Dict[str, Any],
+    contract: Dict[str, Any],
+    tools: List[str],
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+    screenshots: List[Dict[str, Any]],
+    diagnostics: Dict[str, Any],
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Optional[Dict[str, Any]]:
+    if not _should_retry_search_submit(search_verification):
+        return None
+    result = _call_act(
+        client,
+        _keyword_search_submit_prompt(keyword),
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        keyword=keyword,
+        timeout_seconds=timeout_seconds,
+    )
+    retry_diagnostics = _midscene_text_diagnostics(result, client=client)
+    _raise_if_rate_limited_diagnostics(retry_diagnostics, "keyword_search_submit_retry")
+    _raise_if_abnormal_act(result, default_context="keyword_search_submit_retry")
+    diagnostics["post_act_submit_retry"] = {
+        "status": "attempted",
+        "attempted": {
+            "status": "attempted",
+            "steps": {"act": retry_diagnostics},
+        },
+        "steps": {"act": retry_diagnostics},
+    }
+    _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_search_submit_retry")
+    retry_verification = _verify_keyword_after_act(
+        client=client,
+        task=task,
+        capture_plan=capture_plan,
+        evidence_dir=evidence_dir,
+        keyword=keyword,
+        tools=tools,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        mcp_timeout_seconds=timeout_seconds,
+        contract=contract,
+    )
+    if retry_verification.get("screenshot"):
+        if screenshots:
+            screenshots[-1] = retry_verification["screenshot"]
+        else:
+            screenshots.append(retry_verification["screenshot"])
+        _refresh_capture_runtime(
+            run_id,
+            session_index,
+            "",
+            current_keyword=keyword,
+            progress_event="tile_captured",
+            tile_id="tile_00",
+            captured_tiles=len(screenshots),
+        )
+        write_tile_summary(
+            task_dir=task_dir,
+            run_id=run_id,
+            keyword=keyword,
+            tile_id="tile_00",
+            scroll_distance_px=0,
+            rough_state=retry_verification["page_state"]["status"],
+            image_path=retry_verification["screenshot"]["path"],
+            image_retained=True,
+            notes=retry_verification["page_state"].get("reason") or "post_act_submit_retry_verification",
+        )
+    return retry_verification
+
+
+def _should_retry_search_submit(search_verification: Dict[str, Any]) -> bool:
+    stop_reason = str(search_verification.get("stop_reason") or "")
+    rough_state = str(search_verification.get("rough_state") or "")
+    page_state = search_verification.get("page_state") or {}
+    status = str(page_state.get("status") or rough_state or "")
+    if stop_reason in HARD_ABNORMAL_REASONS - {"manual_review_needed", "page_state_detection_failed"}:
+        return False
+    return stop_reason in {"manual_review_needed", "search_submit_unconfirmed"} and status in {UNKNOWN, ""}
+
+
 def _sleep_between_keywords(
     contract: Dict[str, Any],
     run_id: str,
@@ -690,7 +949,7 @@ def _sleep_between_keywords(
     task: Dict[str, Any],
 ) -> None:
     behavior = contract.get("visual_behavior") or {}
-    bounds = behavior.get("inter_keyword_pause_seconds") or [30, 60]
+    bounds = behavior.get("inter_keyword_pause_seconds") or [8, 18]
     try:
         low, high = float(bounds[0]), float(bounds[1])
     except Exception:
@@ -731,9 +990,9 @@ def _sleep_micro_pause(
 
 def _sample_micro_pause_seconds(behavior: Dict[str, Any]) -> float:
     distribution = behavior.get("micro_pause_distribution") or {
-        "short": "0.8,3,0.82",
-        "medium": "3,6,0.14",
-        "long": "6,10,0.04",
+        "short": "0.2,0.8,0.90",
+        "medium": "0.8,1.5,0.08",
+        "long": "1.5,2.5,0.02",
     }
     segments = []
     for value in distribution.values():
@@ -744,7 +1003,7 @@ def _sample_micro_pause_seconds(behavior: Dict[str, Any]) -> float:
         except Exception:
             continue
     if not segments:
-        segments = [(0.8, 3.0, 1.0)]
+        segments = [(0.2, 0.8, 1.0)]
     total = sum(item[2] for item in segments)
     pick = random.uniform(0, total)
     acc = 0.0
@@ -1103,35 +1362,6 @@ def _verify_keyword_after_act(
             "diagnostics": diagnostics,
         }
 
-    assertion = _assert_visible_keyword(
-        client=client,
-        keyword=keyword,
-        interrupt_check=interrupt_check,
-        keyword_deadline=keyword_deadline,
-        timeout_seconds=mcp_timeout_seconds,
-    )
-    diagnostics["keyword_assertion"] = assertion
-    if assertion["status"] == "mismatch":
-        return {
-            "ok": False,
-            "stop_reason": "visible_keyword_mismatch",
-            "rough_state": "keyword_mismatch",
-            "message": assertion["message"],
-            "screenshot": screenshot_payload,
-            "page_state": page_state,
-            "diagnostics": diagnostics,
-        }
-    if assertion["status"] != "matched":
-        return {
-            "ok": False,
-            "stop_reason": "manual_review_needed",
-            "rough_state": page_state.get("status") or UNKNOWN,
-            "message": assertion["message"],
-            "screenshot": screenshot_payload,
-            "page_state": page_state,
-            "diagnostics": diagnostics,
-        }
-
     review_reason = _page_state_review_reason(page_state)
     if review_reason:
         return {
@@ -1155,65 +1385,6 @@ def _verify_keyword_after_act(
     }
 
 
-def _assert_visible_keyword(
-    client: "MidsceneStdioClient",
-    keyword: str,
-    interrupt_check: Optional[Callable[[], None]],
-    keyword_deadline: float,
-    timeout_seconds: float,
-) -> Dict[str, Any]:
-    prompt = (
-        "Using only the current visible screenshot, assert whether the Taobao "
-        f"search input box visibly contains exactly this keyword: {keyword!r}. "
-        "Return true only if the visible text in the search box matches exactly. "
-        "If a different keyword is visible, or if the text cannot be read, return false."
-    )
-    try:
-        result = client.call_tool(
-            "assert",
-            {"prompt": prompt},
-            timeout_seconds=timeout_seconds,
-            interrupt_check=interrupt_check,
-            keyword_deadline=keyword_deadline,
-            keyword=keyword,
-        )
-    except Exception as exc:
-        return {
-            "status": "unknown",
-            "message": f"Post-act keyword assertion failed: {exc}",
-            "raw_text": "",
-        }
-
-    text = _tool_text(result)
-    normalized = " ".join(text.lower().split())
-    if result.get("isError"):
-        return {
-            "status": "unknown",
-            "message": text or "Post-act keyword assertion returned an MCP error.",
-            "raw_text": text,
-        }
-    if _assertion_text_is_true(normalized):
-        return {
-            "status": "matched",
-            "message": "Visible search keyword matched current keyword.",
-            "raw_text": text,
-        }
-    if _assertion_text_is_false(normalized):
-        return {
-            "status": "mismatch",
-            "message": (
-                "Visible search keyword did not match current keyword after Midscene act complete; "
-                "session stopped to avoid evidence pollution."
-            ),
-            "raw_text": text,
-        }
-    return {
-        "status": "unknown",
-        "message": "Post-act keyword assertion was inconclusive.",
-        "raw_text": text,
-    }
-
-
 def _assertion_text_is_true(normalized_text: str) -> bool:
     positives = [
         '"success":true',
@@ -1226,7 +1397,7 @@ def _assertion_text_is_true(normalized_text: str) -> bool:
         "匹配",
         "一致",
     ]
-    negatives = ["false", "not match", "不匹配", "不一致", "无法", "不能", "未"]
+    negatives = ["false", "not match", "不匹配", "不一致", "不是", "并非", "无法", "不能", "未"]
     return any(item in normalized_text for item in positives) and not any(
         item in normalized_text for item in negatives
     )
@@ -1244,6 +1415,8 @@ def _assertion_text_is_false(normalized_text: str) -> bool:
         "different keyword",
         "不匹配",
         "不一致",
+        "不是",
+        "并非",
         "不同",
     ]
     return any(item in normalized_text for item in negatives)
@@ -1282,6 +1455,17 @@ def _classify_screenshot_with_optional_probe(
             "metrics": {},
             "source": "midscene_assert_probe",
             "raw_text": probe["raw_text"],
+        }
+    if probe.get("fallback_reason") == "probe_rate_limited":
+        return {
+            "status": "rate_limited",
+            "confidence": 0.1,
+            "reason": "midscene_page_state_probe_rate_limited",
+            "metrics": {},
+            "source": "midscene_assert_probe",
+            "raw_text": probe.get("raw_text", ""),
+            "fallback_reason": "probe_rate_limited",
+            "probe_diagnostics": probe,
         }
 
     state = _classify_screenshot(path, contract)
@@ -1336,18 +1520,18 @@ def _probe_midscene_page_state(
     keyword_deadline: float,
     timeout_seconds: float,
 ) -> Dict[str, Any]:
-    allowed_states = (
-        "visible_ready, visible_results, search_results, results_page, "
-        "empty_result, login_required, captcha_required, risk_suspected, "
-        "white_skeleton, popup_blocked, unknown"
-    )
     prompt = (
-        "Using only the current visible screenshot, classify the Taobao page into "
-        f"one operational state for {tile_id} and keyword {keyword!r}. Allowed "
-        f"states: {allowed_states}. Treat security verification, account risk, "
-        "or unusual-account pages as risk_suspected. Do not output product rows, "
-        "prices, shop names, item titles, business filtering, or price trust "
-        "decisions. Return only JSON like {\"state\":\"visible_ready\"}."
+        "Using only the current visible screenshot, classify the operational state of the Taobao page. "
+        "Return only a compact JSON object like "
+        '{"state":"visible_results","confidence":0.82,"reason":"readable listings visible"}. '
+        "The state must be exactly one of: captcha_required, login_required, risk_suspected, "
+        "popup_blocked, white_skeleton, empty_result, results_end, visible_results, search_results, "
+        "results_page, visible_ready, unknown. Treat login, captcha, security/risk warnings, "
+        "blocking popups, and white skeleton/loading pages as higher priority than visible listings. "
+        "Use results_end only when the current viewport is a readable results page and also clearly "
+        "shows the bottom/end/no-more-results area. "
+        f"For result states, the current keyword is {keyword!r}. Do not output product rows, prices, "
+        "shop names, item titles, business filtering, or price trust decisions."
     )
     try:
         result = client.call_tool(
@@ -1359,31 +1543,137 @@ def _probe_midscene_page_state(
             keyword=keyword,
         )
     except Exception as exc:
+        text = str(exc)
         return {
             "status": "fallback",
-            "fallback_reason": f"probe_exception:{exc}",
-            "raw_text": "",
+            "fallback_reason": "probe_rate_limited" if _is_rate_limited_text(text) else "probe_unavailable",
+            "raw_text": text,
+            "checks": [
+                {
+                    "tile_id": tile_id,
+                    "status": "error",
+                    "raw_text": text,
+                    "rate_limited": _is_rate_limited_text(text),
+                }
+            ],
         }
 
     text = _tool_text(result)
-    if result.get("isError"):
+    parsed_payload = _parse_page_state_probe_payload(text)
+    parsed = parsed_payload.get("state") or _parse_page_state_probe_text(text)
+    diagnostics = [
+        {
+            "tile_id": tile_id,
+            "status": "classified" if parsed else "unknown",
+            "raw_text": text,
+            "parsed_state": parsed,
+            "rate_limited": _is_rate_limited_text(text),
+        }
+    ]
+    if result.get("isError") or _is_rate_limited_text(text):
         return {
             "status": "fallback",
-            "fallback_reason": "probe_tool_error",
+            "fallback_reason": "probe_rate_limited" if _is_rate_limited_text(text) else "probe_unavailable",
             "raw_text": text,
+            "checks": diagnostics,
         }
-    parsed = _parse_page_state_probe_text(text)
     if not parsed:
         return {
             "status": "fallback",
             "fallback_reason": "probe_unparseable",
-            "raw_text": text,
+            "raw_text": json.dumps({"checks": diagnostics}, ensure_ascii=False),
+            "checks": diagnostics,
         }
+
+    confidence = parsed_payload.get("confidence")
+    if not isinstance(confidence, (int, float)):
+        confidence = 0.82 if parsed != UNKNOWN else 0.35
     return {
         "status": "parsed",
         "page_state": parsed,
-        "confidence": 0.82 if parsed != UNKNOWN else 0.35,
+        "confidence": float(confidence),
+        "raw_text": json.dumps(
+            {
+                "state": parsed,
+                "confidence": float(confidence),
+                "reason": parsed_payload.get("reason") or "midscene_page_state_probe",
+                "raw_text": text,
+            },
+            ensure_ascii=False,
+        ),
+        "checks": diagnostics,
+    }
+
+
+def _assert_page_state_candidate(
+    client: "MidsceneStdioClient",
+    state: str,
+    assertion: str,
+    keyword: str,
+    tile_id: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    prompt = (
+        f"Using only the current visible screenshot, assert whether {assertion}. "
+        "Return true if the assertion is clearly correct. Return false if it is not clearly correct. "
+        "Do not output product rows, prices, shop names, item titles, business filtering, or price trust decisions."
+    )
+    try:
+        result = client.call_tool(
+            "assert",
+            {"prompt": prompt},
+            timeout_seconds=timeout_seconds,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
+        )
+    except Exception as exc:
+        text = str(exc)
+        return {
+            "state": state,
+            "tile_id": tile_id,
+            "status": "not_matched",
+            "raw_text": text,
+            "rate_limited": _is_rate_limited_text(text),
+        }
+
+    text = _tool_text(result)
+    normalized = " ".join(text.lower().split())
+    parsed = _parse_page_state_probe_text(text)
+    if parsed:
+        matched = parsed == state or (state == "visible_results" and parsed in CAPTURABLE_PAGE_STATES)
+        return {
+            "state": state,
+            "tile_id": tile_id,
+            "status": "matched" if matched else "not_matched",
+            "raw_text": text,
+            "parsed_state": parsed,
+            "rate_limited": _is_rate_limited_text(text),
+        }
+    if result.get("isError") or _assertion_text_is_false(normalized):
+        return {
+            "state": state,
+            "tile_id": tile_id,
+            "status": "not_matched",
+            "raw_text": text,
+            "rate_limited": _is_rate_limited_text(text),
+        }
+    if _assertion_text_is_true(normalized):
+        return {
+            "state": state,
+            "tile_id": tile_id,
+            "status": "matched",
+            "raw_text": text,
+            "rate_limited": _is_rate_limited_text(text),
+        }
+    return {
+        "state": state,
+        "tile_id": tile_id,
+        "status": "unknown",
         "raw_text": text,
+        "rate_limited": _is_rate_limited_text(text),
     }
 
 
@@ -1406,6 +1696,30 @@ def _parse_page_state_probe_text(text: str) -> str:
     return _normalize_page_state_probe_value(normalized, allow_alias_substrings=False)
 
 
+def _parse_page_state_probe_payload(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    state = _normalize_page_state_probe_value(
+        str(parsed.get("state") or parsed.get("status") or "").strip().lower()
+    )
+    payload: Dict[str, Any] = {"state": state} if state else {}
+    try:
+        payload["confidence"] = float(parsed.get("confidence"))
+    except (TypeError, ValueError):
+        pass
+    reason = str(parsed.get("reason") or "").strip()
+    if reason:
+        payload["reason"] = reason
+    return payload
+
+
 def _normalize_page_state_probe_value(value: str, allow_alias_substrings: bool = True) -> str:
     text = str(value or "").strip().lower()
     if not text:
@@ -1417,6 +1731,7 @@ def _normalize_page_state_probe_value(value: str, allow_alias_substrings: bool =
         ("popup_blocked", ["popup_blocked", "popup", "permission", "弹窗", "权限"]),
         (WHITE_SKELETON, [WHITE_SKELETON, "white skeleton", "skeleton", "blank", "白屏", "骨架"]),
         (EMPTY_RESULT, [EMPTY_RESULT, "no result", "no_results", "empty", "没有结果", "未找到"]),
+        ("results_end", ["results_end", "end_of_results", "bottom", "end of results", "到底", "底部", "没有更多"]),
         ("visible_results", ["visible_results", "visible listings", "visible listing"]),
         ("search_results", ["search_results", "search results"]),
         ("results_page", ["results_page", "results page"]),
@@ -1436,7 +1751,7 @@ def _normalize_page_state_probe_value(value: str, allow_alias_substrings: bool =
 def _page_state_review_reason(page_state: Dict[str, Any]) -> str:
     status = str(page_state.get("status") or UNKNOWN)
     reason = str(page_state.get("reason") or "")
-    if status in {LOGIN_REQUIRED, CAPTCHA_REQUIRED, WHITE_SKELETON, "risk_suspected", "popup_blocked"}:
+    if status in {LOGIN_REQUIRED, CAPTCHA_REQUIRED, WHITE_SKELETON, "risk_suspected", "popup_blocked", "rate_limited"}:
         return status
     if reason.startswith("page_state_detection_failed"):
         return "page_state_detection_failed"
@@ -1768,6 +2083,55 @@ def _call_act(
     )
 
 
+def _perform_keyword_search(
+    client: MidsceneStdioClient,
+    keyword: str,
+    scroll_distance: int,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    search_result = _call_act(
+        client,
+        _keyword_search_prompt(keyword=keyword, scroll_distance=scroll_distance),
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        keyword=keyword,
+        timeout_seconds=timeout_seconds,
+    )
+    act_diagnostics = _midscene_text_diagnostics(search_result, client=client)
+    _raise_if_rate_limited_diagnostics(act_diagnostics, "keyword_search")
+    _raise_if_abnormal_act(search_result, default_context="keyword_search")
+    return {"mode": "bounded_act_search", "steps": {"act": act_diagnostics}}
+
+
+def _perform_page_scroll(
+    client: MidsceneStdioClient,
+    keyword: str,
+    tile_index: int,
+    scroll_distance: int,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    result = _call_act(
+        client,
+        _next_tile_prompt(
+            keyword=keyword,
+            tile_index=tile_index,
+            scroll_distance=scroll_distance,
+        ),
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        keyword=keyword,
+        timeout_seconds=timeout_seconds,
+    )
+    diagnostics = _midscene_text_diagnostics(result, client=client)
+    _raise_if_rate_limited_diagnostics(diagnostics, f"scroll_tile_{tile_index}")
+    _raise_if_abnormal_act(result, default_context=f"scroll_tile_{tile_index}")
+    return {"mode": "bounded_act_scroll", "steps": {"act": diagnostics}}
+
+
 def _raise_if_abnormal_act(result: Dict[str, Any], default_context: str) -> None:
     classification = classify_midscene_act_result(result, default_context=default_context)
     if classification["abnormal"]:
@@ -1922,6 +2286,21 @@ def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
         "more with Enter. Wait until visible search results settle. Leave the "
         "page positioned at the first results viewport. Do not output product rows. "
         f"Later tile captures will use about {scroll_distance} px between viewports."
+    )
+
+
+def _keyword_search_submit_prompt(keyword: str) -> str:
+    return (
+        "You are continuing a bounded Taobao search act using only the current "
+        "visible screen and system mouse/keyboard actions. Do not read DOM, HTML, "
+        "network, cookies, storage, selector maps, page source, or JS evaluated "
+        "data. The intended keyword is "
+        f"{keyword!r}. If a Taobao results page for this keyword is already loading "
+        "or visible, leave the page alone. Otherwise, use the visible Taobao search "
+        "box and search button/Enter key to submit this exact keyword once, then "
+        "wait for visible results or a clear abnormal state. Do not scroll, do not "
+        "open product detail pages, do not output product rows, and do not change "
+        "account state."
     )
 
 

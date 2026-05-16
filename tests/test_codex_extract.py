@@ -157,6 +157,20 @@ class CodexExtractTests(unittest.TestCase):
             self.assertEqual(updated["stale_reason"], "ttl_exceeded")
             self.assertIn("stale_detected_at", updated)
 
+    def test_zombie_launch_does_not_count_as_active(self):
+        with mock.patch.object(codex_extract.os, "kill"), \
+            mock.patch.object(codex_extract.subprocess, "run") as run:
+            run.return_value = mock.Mock(stdout="Z+\n")
+
+            active = codex_extract._launch_active({"status": "running", "pid": "12345"})
+
+        self.assertFalse(active)
+
+    def test_invalid_launch_pid_does_not_count_as_active(self):
+        active = codex_extract._launch_active({"status": "running", "pid": "not-a-pid"})
+
+        self.assertFalse(active)
+
     def test_dispatch_advises_when_old_running_state_is_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
             session_dir = os.path.join(tmp, "data", "tasks", "plan", "sessions", "session_01")

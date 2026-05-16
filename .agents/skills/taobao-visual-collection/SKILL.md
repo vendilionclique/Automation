@@ -20,7 +20,7 @@ Use this skill for project-specific Taobao collection work in this repository. I
 
 1. Read `AGENTS.md` for current project policy and status.
 2. Run `python harness.py setup` when environment readiness is unclear.
-3. Use `python harness.py visual-plan-day` for ledger-driven planning; `visual-auto-tick` is retained as a compatibility helper, not the current documented mainline.
+3. Use `python harness.py visual-plan-day` for ledger-driven planning; legacy auto-tick CLIs are no longer exposed.
 4. Prefer `python harness.py visual-heartbeat --mode prepare|dispatch|sync|all` for the local short-lived scheduler heartbeat. It may prepare contracts and return worker commands, but it must not open Chrome or touch Taobao.
 5. Use `python harness.py visual-control status|pause|resume|stop|cooldown|lock|unlock --plan-id ...` as the Codex/human supervisor control plane. Codex should not be the long-running heartbeat.
 6. Use `python harness.py visual-session-run <plan_id> --session <N>` when a bounded session contract must be prepared directly.
@@ -49,11 +49,12 @@ Use this skill for project-specific Taobao collection work in this repository. I
   coordinate click, keyboard input, and scroll actions; locating the Taobao
   search box, confirming result pages, recognizing abnormal states, and deciding
   visible-screen progress all require a reliable VLM.
-- `glm-4.6v-flash` is the tracked free/default development fallback after
-  `glm-4.6v-flashx` quota was exhausted. It can be useful for local testing, but
-  observed free-tier `429` traffic pressure means it must not be treated as the
-  unattended production SLA. If it fails, stop as `needs_review`/`cooldown` and
-  retain evidence instead of pretending capture succeeded.
+- `glm-4.6v-flashx` is the tracked paid high-speed GLM mainline for Midscene
+  grounding. Use `MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`,
+  `MIDSCENE_MODEL_FAMILY=glm-v`, `MIDSCENE_MODEL_REASONING_ENABLED=false`, and
+  `MIDSCENE_MODEL_TEMPERATURE=0`. Kimi/Moonshot has been abandoned for this
+  workflow and is not the mainline. GLM-5V-Turbo is reserved only for later A/B
+  evaluation.
 - Do not make a long-lived Codex chat session the real-time visual controller.
   Codex remains the supervisor/control-plane and the short-lived screenshot
   extract worker. It may judge low-frequency abnormal states, but it should not
@@ -98,11 +99,11 @@ bash scripts/start_taobao_visual_chrome.sh
 
 ## Codex/Midscene Permission Setup
 
-- Unattended cron/session runs must pre-approve the Midscene computer MCP server and its bounded visual tools. On macOS, run `bash scripts/sync_agent_project_config.sh`. Windows PowerShell helpers are retained for future/experimental work and are not part of the current business mainline.
+- Unattended cron/session runs must pre-approve only the Midscene computer MCP tools needed by the bounded act mainline. On macOS, run `bash scripts/sync_agent_project_config.sh`. Windows PowerShell helpers are retained for future/experimental work and are not part of the current business mainline.
 - The same sync scripts create Codex profiles named `taobao_visual_cron` and `taobao_visual_extract` with `model = "gpt-5.5"`, `sandbox_mode = "danger-full-access"`, and `approval_policy = "never"`. Run Taobao visual cron jobs with `taobao_visual_cron`; run short-lived Codex extract workers with `taobao_visual_extract`. Both profiles are intended to avoid unattended automation pausing for tool approvals.
 - Codex extract dispatch must use CLI options supported by the bundled Codex CLI: use `-c sandbox_mode=...` and `-c approval_policy=...`, add `--ignore-rules` by default, attach screenshots with `-i`, and pass the worker prompt through stdin instead of as the final CLI argument so image varargs do not consume the prompt.
 - On macOS, run `bash scripts/check_taobao_visual_cron_permissions.sh` from the repository root before relying on an unattended cron. It must be able to see Chrome with `pgrep` when Chrome is running and save a system screenshot with `screencapture`.
-- The sync scripts write Codex-side `default_tools_approval_mode = "approve"` and per-tool `approval_mode = "approve"` for the actual Midscene tool names: `computer_connect`, `computer_disconnect`, `computer_list_displays`, `ListDisplays`, `take_screenshot`, `Tap`, `DoubleClick`, `RightClick`, `MouseMove`, `Input`, `Scroll`, `KeyboardPress`, `DragAndDrop`, `ClearInput`, `act`, and `assert`.
+- The sync scripts write Codex-side per-tool `approval_mode = "approve"` only for the bounded act mainline tools: `computer_connect`, `computer_disconnect`, `computer_list_displays`, `ListDisplays`, `take_screenshot`, `act`, and `assert`. Short action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`, and `ClearInput` remain manual/debug fallback capabilities, not unattended cron pre-approvals.
 - If a cron worker still asks for these approvals, or if shell `pgrep`/`screencapture` fails under ordinary sandboxing, treat it as project setup drift: rerun the sync script, use the `taobao_visual_cron` profile or equivalent app setting, and restart Codex if the app cached MCP settings. Do not proceed by manually approving one tool at a time for unattended collection.
 - If the run reaches macOS Accessibility/System Settings, or any prompt asking for GUI automation/screen recording permission, stop the session as `needs_review`/`setup_drift`. Do not keep switching windows or use Computer Use as a workaround.
 

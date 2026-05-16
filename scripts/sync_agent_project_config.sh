@@ -25,15 +25,6 @@ tools = [
     "computer_disconnect",
     "computer_list_displays",
     "take_screenshot",
-    "Tap",
-    "DoubleClick",
-    "RightClick",
-    "MouseMove",
-    "Input",
-    "Scroll",
-    "KeyboardPress",
-    "DragAndDrop",
-    "ClearInput",
     "act",
     "assert",
 ]
@@ -50,7 +41,6 @@ server_block = (
     "startup_timeout_sec = 30\n"
     "tool_timeout_sec = 180\n"
     "enabled = true\n\n"
-    'default_tools_approval_mode = "approve"\n\n'
     f"{tool_blocks}"
 )
 
@@ -123,11 +113,12 @@ if [[ ! -f "${LOCAL_ENV}" ]]; then
   mkdir -p "$(dirname "${LOCAL_ENV}")"
   cat > "${LOCAL_ENV}" <<EOF
 # Local Midscene computer VLM config. Gitignored; do not commit.
-export MIDSCENE_MODEL_NAME="glm-4.6v-flash"
+export MIDSCENE_MODEL_NAME="glm-4.6v-flashx"
 export MIDSCENE_MODEL_API_KEY=""
 export MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"
 export MIDSCENE_MODEL_FAMILY="glm-v"
 export MIDSCENE_MODEL_REASONING_ENABLED="false"
+export MIDSCENE_MODEL_TEMPERATURE="0"
 export MIDSCENE_RUN_DIR="${ROOT_DIR}/local/midscene-run"
 export MIDSCENE_REPORT_QUIET="true"
 EOF

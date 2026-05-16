@@ -1032,10 +1032,27 @@ def _launch_active(state: Dict[str, Any], stale_after_seconds: Optional[float] =
     if _launch_stale_reason(state, stale_after_seconds):
         return False
     try:
-        os.kill(int(pid), 0)
+        pid_int = int(pid)
+        os.kill(pid_int, 0)
+        if _pid_is_zombie(pid_int):
+            return False
         return True
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return False
+
+
+def _pid_is_zombie(pid: int) -> bool:
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=2,
+        )
+    except Exception:
+        return False
+    return "Z" in (proc.stdout or "").strip().upper()
 
 
 def _active_launch_count(
