@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import random
+import re
 import subprocess
 import threading
 import time
@@ -511,7 +512,18 @@ def _capture_keyword_with_mcp(
                 keyword_deadline=keyword_deadline,
                 keyword=keyword,
             )
-            page_state = _classify_screenshot(tile_path, contract)
+            page_state = _classify_screenshot_with_optional_probe(
+                client=client,
+                path=tile_path,
+                contract=contract,
+                capture_plan=capture_plan,
+                tools=tools,
+                tile_id=tile_id,
+                keyword=keyword,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                timeout_seconds=mcp_timeout_seconds,
+            )
             screenshots.append(
                 {
                     "tile_id": tile_id,
@@ -547,6 +559,7 @@ def _capture_keyword_with_mcp(
                     reason=review_reason,
                     rough_state=page_state["status"],
                     message=f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
+                    diagnostics={f"{tile_id}_page_state": page_state},
                 )
 
         elapsed = round(time.monotonic() - started, 3)
@@ -1013,7 +1026,18 @@ def _verify_keyword_after_act(
         keyword_deadline=keyword_deadline,
         keyword=keyword,
     )
-    page_state = _classify_screenshot(tile_path, contract)
+    page_state = _classify_screenshot_with_optional_probe(
+        client=client,
+        path=tile_path,
+        contract=contract,
+        capture_plan=capture_plan,
+        tools=tools,
+        tile_id="tile_00",
+        keyword=keyword,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=mcp_timeout_seconds,
+    )
     screenshot_payload = {
         "tile_id": "tile_00",
         "path": tile_path,
@@ -1223,6 +1247,190 @@ def _assertion_text_is_false(normalized_text: str) -> bool:
         "不同",
     ]
     return any(item in normalized_text for item in negatives)
+
+
+def _classify_screenshot_with_optional_probe(
+    client: "MidsceneStdioClient",
+    path: str,
+    contract: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    tools: List[str],
+    tile_id: str,
+    keyword: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    if not _allow_midscene_page_state_probe(contract, capture_plan):
+        return _heuristic_page_state_with_probe_fallback(path, contract, "probe_disabled")
+    if "assert" not in set(tools or []):
+        return _heuristic_page_state_with_probe_fallback(path, contract, "assert_tool_missing")
+
+    probe = _probe_midscene_page_state(
+        client=client,
+        keyword=keyword,
+        tile_id=tile_id,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+    )
+    if probe["status"] == "parsed":
+        return {
+            "status": probe["page_state"],
+            "confidence": probe["confidence"],
+            "reason": "midscene_page_state_probe",
+            "metrics": {},
+            "source": "midscene_assert_probe",
+            "raw_text": probe["raw_text"],
+        }
+
+    state = _classify_screenshot(path, contract)
+    state["source"] = "heuristic"
+    state["raw_text"] = probe.get("raw_text", "")
+    state["fallback_reason"] = probe.get("fallback_reason") or "probe_unavailable"
+    state["probe_diagnostics"] = probe
+    return state
+
+
+def _allow_midscene_page_state_probe(contract: Dict[str, Any], capture_plan: Dict[str, Any]) -> bool:
+    page_sampling = contract.get("page_sampling") or {}
+    if "allow_midscene_page_state_probe" in page_sampling:
+        return _config_bool(page_sampling.get("allow_midscene_page_state_probe"))
+    if "allow_midscene_page_state_probe" in capture_plan:
+        return _config_bool(capture_plan.get("allow_midscene_page_state_probe"))
+    return False
+
+
+def _config_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled", ""}:
+        return False
+    return False
+
+
+def _heuristic_page_state_with_probe_fallback(
+    path: str,
+    contract: Dict[str, Any],
+    fallback_reason: str,
+) -> Dict[str, Any]:
+    state = _classify_screenshot(path, contract)
+    state["source"] = "heuristic"
+    state["raw_text"] = ""
+    state["fallback_reason"] = fallback_reason
+    return state
+
+
+def _probe_midscene_page_state(
+    client: "MidsceneStdioClient",
+    keyword: str,
+    tile_id: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    allowed_states = (
+        "visible_ready, visible_results, search_results, results_page, "
+        "empty_result, login_required, captcha_required, risk_suspected, "
+        "white_skeleton, popup_blocked, unknown"
+    )
+    prompt = (
+        "Using only the current visible screenshot, classify the Taobao page into "
+        f"one operational state for {tile_id} and keyword {keyword!r}. Allowed "
+        f"states: {allowed_states}. Treat security verification, account risk, "
+        "or unusual-account pages as risk_suspected. Do not output product rows, "
+        "prices, shop names, item titles, business filtering, or price trust "
+        "decisions. Return only JSON like {\"state\":\"visible_ready\"}."
+    )
+    try:
+        result = client.call_tool(
+            "assert",
+            {"prompt": prompt},
+            timeout_seconds=timeout_seconds,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
+        )
+    except Exception as exc:
+        return {
+            "status": "fallback",
+            "fallback_reason": f"probe_exception:{exc}",
+            "raw_text": "",
+        }
+
+    text = _tool_text(result)
+    if result.get("isError"):
+        return {
+            "status": "fallback",
+            "fallback_reason": "probe_tool_error",
+            "raw_text": text,
+        }
+    parsed = _parse_page_state_probe_text(text)
+    if not parsed:
+        return {
+            "status": "fallback",
+            "fallback_reason": "probe_unparseable",
+            "raw_text": text,
+        }
+    return {
+        "status": "parsed",
+        "page_state": parsed,
+        "confidence": 0.82 if parsed != UNKNOWN else 0.35,
+        "raw_text": text,
+    }
+
+
+def _parse_page_state_probe_text(text: str) -> str:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return ""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            value = str(parsed.get("state") or parsed.get("status") or "").strip().lower()
+            mapped = _normalize_page_state_probe_value(value)
+            if mapped:
+                return mapped
+    except Exception:
+        pass
+    state_match = re.search(r'\b(?:state|status)\s*[:=]\s*["\']?([a-z_]+)', normalized)
+    if state_match:
+        return _normalize_page_state_probe_value(state_match.group(1))
+    return _normalize_page_state_probe_value(normalized, allow_alias_substrings=False)
+
+
+def _normalize_page_state_probe_value(value: str, allow_alias_substrings: bool = True) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    aliases = [
+        ("captcha_required", ["captcha_required", "captcha", "验证码", "滑块"]),
+        ("login_required", ["login_required", "login", "sign in", "请登录", "登录"]),
+        ("risk_suspected", ["risk_suspected", "security", "risk", "风控", "风险", "安全验证", "安全检查"]),
+        ("popup_blocked", ["popup_blocked", "popup", "permission", "弹窗", "权限"]),
+        (WHITE_SKELETON, [WHITE_SKELETON, "white skeleton", "skeleton", "blank", "白屏", "骨架"]),
+        (EMPTY_RESULT, [EMPTY_RESULT, "no result", "no_results", "empty", "没有结果", "未找到"]),
+        ("visible_results", ["visible_results", "visible listings", "visible listing"]),
+        ("search_results", ["search_results", "search results"]),
+        ("results_page", ["results_page", "results page"]),
+        (VISIBLE_READY, [VISIBLE_READY]),
+        (UNKNOWN, [UNKNOWN]),
+    ]
+    for status, needles in aliases:
+        if allow_alias_substrings:
+            matched = any(needle in text for needle in needles)
+        else:
+            matched = any(needle == text for needle in needles)
+        if matched:
+            return status
+    return ""
 
 
 def _page_state_review_reason(page_state: Dict[str, Any]) -> str:
@@ -1708,8 +1916,11 @@ def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
         "captcha, security verification, risk warning, unusual account state, "
         "or an automation permission panel is visible, stop and report failure. "
         "From the visible Taobao search box, search exactly this keyword: "
-        f"{keyword!r}. Wait until visible search results settle. Leave the page "
-        "positioned at the first results viewport. Do not output product rows. "
+        f"{keyword!r}. After the search box visibly contains the keyword, submit "
+        "the search by pressing Enter or clicking the visible search button. If "
+        "the input contains the keyword but no search is triggered, submit once "
+        "more with Enter. Wait until visible search results settle. Leave the "
+        "page positioned at the first results viewport. Do not output product rows. "
         f"Later tile captures will use about {scroll_distance} px between viewports."
     )
 
@@ -1718,7 +1929,10 @@ def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> st
     return (
         "You are continuing the bounded Taobao capture session using only "
         "visible-screen reasoning and system mouse/keyboard/scroll actions. The "
-        f"current keyword is {keyword!r}. If login, captcha, security/risk, "
+        f"current keyword is {keyword!r}. Bring the existing Chrome window with "
+        "the dedicated Taobao profile to the foreground if Codex, Terminal, "
+        "Cursor, VS Code, or another app is visible; do not type or scroll in "
+        "that app. If Chrome/Taobao is unavailable, or login, captcha, security/risk, "
         "unusual account state, white skeleton, or a permission panel is visible, "
         "stop and report failure. Otherwise move to the next visible results "
         f"viewport for tile_{tile_index:02d}; use a normal page-level downward "

@@ -322,10 +322,6 @@ def heartbeat_daily_collection(
 
     plan_id = plan_id or _today_plan_id()
     control = load_control_state(plan_id)
-    plan_block = control_blocks_dispatch(control)
-    if plan_block.get("blocked"):
-        return _heartbeat_paused(plan_id, session_index, control, plan_block)
-
     result: Dict[str, Any] = {
         "ok": True,
         "action": "noop",
@@ -349,6 +345,10 @@ def heartbeat_daily_collection(
             if result["action"] == "noop":
                 result["action"] = "stale_recovered"
             result["reason"] = stale[0].get("reason", "capture_worker_stale")
+
+    plan_block = control_blocks_dispatch(control)
+    if plan_block.get("blocked"):
+        return _heartbeat_paused(plan_id, session_index, control, plan_block, result)
 
     if mode in {"prepare", "all"}:
         tick = auto_tick_daily_collection(
@@ -430,6 +430,7 @@ def _heartbeat_paused(
     session_index: Optional[int],
     control: Dict[str, Any],
     block: Dict[str, Any],
+    partial_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if session_index is not None:
         _write_heartbeat_runtime(
@@ -438,7 +439,7 @@ def _heartbeat_paused(
             "paused",
             {"block": block, "control": control},
         )
-    return {
+    result = {
         "ok": True,
         "action": "paused",
         "plan_id": plan_id,
@@ -448,6 +449,11 @@ def _heartbeat_paused(
         "block": block,
         "status": _status_if_plan_exists(plan_id),
     }
+    if partial_result:
+        for key in ("mode", "sync", "prepare", "dispatch", "stale_workers", "runtime"):
+            if key in partial_result:
+                result[key] = partial_result[key]
+    return result
 
 
 def _sync_existing_worker_results(

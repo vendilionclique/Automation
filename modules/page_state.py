@@ -59,7 +59,7 @@ def detect_page_state(image_path: str, manual_state: Optional[str] = None) -> Pa
     width, height = img.size
     crop_top = int(height * 0.28)
     content = img.crop((0, crop_top, width, height))
-    pixels = list(content.getdata())
+    pixels = _image_pixels(content)
     total = max(1, len(pixels))
 
     orange_red = 0
@@ -97,6 +97,26 @@ def detect_page_state(image_path: str, manual_state: Optional[str] = None) -> Pa
             metrics=metrics,
         )
 
+    # A full-page screenshot can include a large white footer, which dilutes the
+    # price-color ratio even when the visible listing grid is healthy. Re-check
+    # the likely results band and require price-like color to be spread across
+    # several columns so a single login/captcha/security button is not enough.
+    listing_metrics = _listing_band_metrics(img)
+    metrics.update(listing_metrics)
+    if (
+        metrics["listing_orange_red_ratio"] > 0.006
+        and metrics["listing_dark_ratio"] > 0.055
+        and metrics["listing_variance"] > 1200
+        and metrics["listing_orange_bucket_count"] >= 4
+        and metrics["listing_dark_bucket_count"] >= 4
+    ):
+        return PageState(
+            status=VISIBLE_READY,
+            confidence=0.70,
+            reason="detected_distributed_price_text_in_listing_region",
+            metrics=metrics,
+        )
+
     # Skeleton pages trend very light/gray with low orange price signal.
     if metrics["light_ratio"] > 0.62 and metrics["grayish_ratio"] > 0.05 and metrics["orange_red_ratio"] < 0.003:
         return PageState(
@@ -112,6 +132,61 @@ def detect_page_state(image_path: str, manual_state: Optional[str] = None) -> Pa
         reason="heuristics_inconclusive",
         metrics=metrics,
     )
+
+
+def _listing_band_metrics(img) -> Dict[str, float]:
+    width, height = img.size
+    left = int(width * 0.04)
+    top = int(height * 0.23)
+    right = int(width * 0.96)
+    bottom = int(height * 0.58)
+    crop = img.crop((left, top, right, bottom))
+    crop_width, crop_height = crop.size
+    pixels = _image_pixels(crop)
+    total = max(1, len(pixels))
+
+    orange_red = 0
+    dark = 0
+    bucket_count = 12
+    orange_buckets = [0] * bucket_count
+    dark_buckets = [0] * bucket_count
+    for index, (r, g, b) in enumerate(pixels):
+        x = index % crop_width if crop_width else 0
+        bucket = min(bucket_count - 1, x * bucket_count // max(1, crop_width))
+        if r > 190 and 45 <= g <= 150 and b < 90:
+            orange_red += 1
+            orange_buckets[bucket] += 1
+        if r < 90 and g < 90 and b < 90:
+            dark += 1
+            dark_buckets[bucket] += 1
+
+    try:
+        from PIL import ImageStat
+
+        variance = sum(ImageStat.Stat(crop).var) / 3.0
+    except Exception:
+        variance = 0.0
+
+    orange_bucket_threshold = total * 0.00015
+    dark_bucket_threshold = total * 0.001
+    return {
+        "listing_orange_red_ratio": orange_red / total,
+        "listing_dark_ratio": dark / total,
+        "listing_variance": float(variance),
+        "listing_orange_bucket_count": float(
+            sum(1 for value in orange_buckets if value > orange_bucket_threshold)
+        ),
+        "listing_dark_bucket_count": float(
+            sum(1 for value in dark_buckets if value > dark_bucket_threshold)
+        ),
+    }
+
+
+def _image_pixels(img):
+    getter = getattr(img, "get_flattened_data", None)
+    if getter:
+        return list(getter())
+    return list(img.getdata())
 
 
 def verify_visible_keyword(

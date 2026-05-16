@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -18,12 +19,20 @@ class FakeClient:
         self.assert_result = assert_result
         self.stderr_tail = stderr_tail
         self.calls = []
+        if isinstance(assert_result, list):
+            self.assert_results = list(assert_result)
+        else:
+            self.assert_results = None
 
     def call_tool(self, name, arguments, **kwargs):
         self.calls.append({"name": name, "arguments": arguments, "kwargs": kwargs})
         if name == "act":
             return self.act_result
         if name == "assert":
+            if self.assert_results is not None:
+                if self.assert_results:
+                    return self.assert_results.pop(0)
+                return {"content": [{"type": "text", "text": "true"}]}
             return self.assert_result or {"content": [{"type": "text", "text": "true"}]}
         raise AssertionError(f"unexpected tool: {name}")
 
@@ -87,6 +96,16 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertFalse(classified["abnormal"])
         self.assertEqual(classified["stop_reason"], "")
         self.assertEqual(classified["rough_state"], "act_completed")
+
+    def test_search_and_scroll_prompts_keep_search_submission_and_foreground_rules(self):
+        search_prompt = worker._keyword_search_prompt("万智牌 中止", 560)
+        scroll_prompt = worker._next_tile_prompt("万智牌 中止", 1, 560)
+
+        self.assertIn("submit the search", search_prompt)
+        self.assertIn("pressing Enter", search_prompt)
+        self.assertIn("search button", search_prompt)
+        self.assertIn("Bring the existing Chrome window", scroll_prompt)
+        self.assertIn("do not type or scroll in that app", scroll_prompt)
 
     def test_keyword_capture_does_not_mark_abnormal_act_as_captured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,6 +384,294 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(progress_calls[0].args[:4], ("run", 1, "capture", "running"))
             self.assertEqual(progress_calls[0].kwargs["current_keyword"], "万智牌 中止")
             self.assertEqual(progress_calls[0].kwargs["tile_id"], "tile_00")
+
+    def test_page_state_probe_visible_listings_allows_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            client = FakeClient(
+                {"content": [{"type": "text", "text": "search completed"}]},
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": "true"}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None), \
+                mock.patch.object(worker, "_classify_screenshot") as heuristic:
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(payload["screenshots"][0]["page_state"]["status"], "visible_results")
+            self.assertEqual(payload["screenshots"][0]["page_state"]["source"], "midscene_assert_probe")
+            heuristic.assert_not_called()
+
+    def test_page_state_probe_captcha_stops_for_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "abnormal_screenshot_path": os.path.join(tmp, "evidence", "abnormal.png"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            client = FakeClient(
+                {"content": [{"type": "text", "text": "search completed"}]},
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"captcha_required"}'}]},
+                    {"content": [{"type": "text", "text": "true"}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "needs_review")
+            self.assertEqual(result["stop_reason"], "captcha_required")
+            self.assertEqual(payload["rough_state"], "captcha_required")
+            self.assertEqual(payload["screenshots"][0]["page_state"]["raw_text"], '{"state":"captcha_required"}')
+
+    def test_page_state_probe_unparseable_falls_back_to_heuristic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            client = FakeClient(
+                {"content": [{"type": "text", "text": "search completed"}]},
+                assert_result=[
+                    {"content": [{"type": "text", "text": "I can see a shopping page"}]},
+                    {"content": [{"type": "text", "text": "true"}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None), \
+                mock.patch.object(
+                    worker,
+                    "_classify_screenshot",
+                    return_value={
+                        "status": "visible_ready",
+                        "confidence": 0.72,
+                        "reason": "test_visible_results",
+                        "visible_search_keyword": "万智牌 中止",
+                        "metrics": {},
+                    },
+                ):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            page_state = payload["screenshots"][0]["page_state"]
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(page_state["status"], "visible_ready")
+            self.assertEqual(page_state["source"], "heuristic")
+            self.assertEqual(page_state["fallback_reason"], "probe_unparseable")
+            self.assertEqual(page_state["raw_text"], "I can see a shopping page")
+
+    def test_page_state_probe_disabled_does_not_call_assert_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {"capture_plan": {"max_tiles_per_keyword": 1}}
+            client = FakeClient({"content": [{"type": "text", "text": "unused"}]})
+
+            with mock.patch.object(
+                worker,
+                "_classify_screenshot",
+                return_value={
+                    "status": "visible_ready",
+                    "confidence": 0.72,
+                    "reason": "test_visible_results",
+                    "metrics": {},
+                },
+            ):
+                page_state = worker._classify_screenshot_with_optional_probe(
+                    client=client,
+                    path=os.path.join(tmp, "tile_00.png"),
+                    contract={"page_sampling": {"allow_midscene_page_state_probe": False}},
+                    capture_plan=task["capture_plan"],
+                    tools=["assert"],
+                    tile_id="tile_00",
+                    keyword="万智牌 中止",
+                    interrupt_check=None,
+                    keyword_deadline=time.monotonic() + 30,
+                    timeout_seconds=1.0,
+                )
+
+            self.assertEqual(page_state["source"], "heuristic")
+            self.assertEqual(page_state["fallback_reason"], "probe_disabled")
+            self.assertEqual([call["name"] for call in client.calls], [])
+
+    def test_page_state_probe_string_false_disables_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = FakeClient({"content": [{"type": "text", "text": "unused"}]})
+
+            with mock.patch.object(
+                worker,
+                "_classify_screenshot",
+                return_value={
+                    "status": "visible_ready",
+                    "confidence": 0.72,
+                    "reason": "test_visible_results",
+                    "metrics": {},
+                },
+            ):
+                page_state = worker._classify_screenshot_with_optional_probe(
+                    client=client,
+                    path=os.path.join(tmp, "tile_00.png"),
+                    contract={"page_sampling": {"allow_midscene_page_state_probe": "false"}},
+                    capture_plan={},
+                    tools=["assert"],
+                    tile_id="tile_00",
+                    keyword="万智牌 中止",
+                    interrupt_check=None,
+                    keyword_deadline=time.monotonic() + 30,
+                    timeout_seconds=1.0,
+                )
+
+            self.assertEqual(page_state["fallback_reason"], "probe_disabled")
+            self.assertEqual([call["name"] for call in client.calls], [])
+
+    def test_page_state_probe_abnormal_states_do_not_capture(self):
+        for state in ("unknown", "login_required", "risk_suspected"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                task = {
+                    "task_id": "task-1",
+                    "keyword_index": 1,
+                    "keyword": "万智牌 中止",
+                    "evidence_dir": os.path.join(tmp, "evidence"),
+                    "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                    "abnormal_screenshot_path": os.path.join(tmp, "evidence", "abnormal.png"),
+                    "capture_plan": {
+                        "max_tiles_per_keyword": 1,
+                        "tile_scroll_distance_px": 500,
+                        "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                    },
+                }
+                contract = {
+                    "run_id": "run",
+                    "session_index": 1,
+                    "task_dir": tmp,
+                    "model_boundary": {"allow_midscene_act": True},
+                    "page_sampling": {"allow_midscene_page_state_probe": True},
+                    "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+                }
+                client = FakeClient(
+                    {"content": [{"type": "text", "text": "search completed"}]},
+                    assert_result=[
+                        {"content": [{"type": "text", "text": f'{{"state":"{state}"}}'}]},
+                        {"content": [{"type": "text", "text": "true"}]},
+                    ],
+                )
+
+                with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                    mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                    mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                    result = worker._capture_keyword_with_mcp(
+                        client=client,
+                        task=task,
+                        contract=contract,
+                        run_id="run",
+                        session_index=1,
+                        task_dir=tmp,
+                        fallback_index=1,
+                        tools=["act", "take_screenshot", "assert"],
+                    )
+
+                payload = worker._read_json(task["result_path"])
+                self.assertEqual(result["status"], "needs_review")
+                self.assertNotEqual(payload["status"], "captured")
+                self.assertEqual(payload["screenshots"][0]["page_state"]["status"], state)
+                if state == "unknown":
+                    self.assertEqual(result["stop_reason"], "manual_review_needed")
+                else:
+                    self.assertEqual(result["stop_reason"], state)
+
+    def test_page_state_probe_natural_language_is_unparseable(self):
+        self.assertEqual(
+            worker._parse_page_state_probe_text("The page is not login_required and no captcha is visible."),
+            "",
+        )
 
     def test_midscene_429_stderr_stops_as_rate_limited(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -688,6 +995,85 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             updated_runtime = worker._read_json(os.path.join(session_dir, "capture_worker_runtime.json"))
             self.assertEqual(updated_runtime["status"], "failed_recoverable")
             self.assertEqual(updated_runtime["stale_reason"], "ttl_exceeded")
+
+    def test_heartbeat_sync_runs_even_when_control_is_cooling_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_id = "plan"
+            task_dir = os.path.join(tmp, "data", "tasks", run_id)
+            evidence_dir = os.path.join(task_dir, "evidence", "kw")
+            session_dir = os.path.join(task_dir, "sessions", "session_01")
+            os.makedirs(evidence_dir, exist_ok=True)
+            os.makedirs(session_dir, exist_ok=True)
+            manifest = {
+                "run_id": run_id,
+                "records": [
+                    {
+                        "keyword": "万智牌 中止",
+                        "status": "needs_midscene_computer",
+                        "failure_reason": None,
+                        "evidence_dir": evidence_dir,
+                        "extra": {"daily_session_index": 1},
+                    }
+                ],
+            }
+            plan = {
+                "plan_id": run_id,
+                "selected_count": 1,
+                "daily_keyword_budget": 1,
+                "daily_session_count": 1,
+                "task_dir": task_dir,
+                "manifest_path": os.path.join(task_dir, "visual_tasks.json"),
+            }
+            control = {
+                "schema": "taobao_visual_control_v1",
+                "plan_id": run_id,
+                "status": "cooling_down",
+                "reason": "capture_worker:manual_review_needed",
+                "stop_requested": False,
+                "locked": False,
+                "cooldown_until": (datetime.now() + timedelta(minutes=30)).isoformat(timespec="seconds"),
+                "sessions": {
+                    "1": {
+                        "status": "cooling_down",
+                        "reason": "capture_worker:manual_review_needed",
+                    }
+                },
+            }
+            keyword_result = {
+                "schema": "taobao_visual_capture_keyword_result_v1",
+                "keyword": "万智牌 中止",
+                "status": "needs_review",
+                "rough_state": "unknown",
+                "stop_reason": "manual_review_needed",
+                "screenshots": [],
+            }
+            worker._write_json(os.path.join(task_dir, "visual_tasks.json"), manifest)
+            worker._write_json(os.path.join(task_dir, "daily_plan.json"), plan)
+            worker._write_json(os.path.join(task_dir, "control.json"), control)
+            worker._write_json(os.path.join(evidence_dir, "keyword_result.json"), keyword_result)
+            worker._write_json(
+                os.path.join(session_dir, "session_worker_result.json"),
+                {"status": "needs_review", "stop_reason": "manual_review_needed"},
+            )
+
+            with mock.patch.object(visual_scheduler, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_control, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_pipeline, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_scheduler, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(visual_control, "session_dir_for", return_value=session_dir), \
+                mock.patch("modules.visual_pipeline.session_dir_for", return_value=session_dir):
+                result = visual_scheduler.heartbeat_daily_collection(
+                    plan_id=run_id,
+                    session_index=1,
+                    mode="sync",
+                )
+
+            self.assertEqual(result["action"], "paused")
+            self.assertEqual(result["reason"], "cooling_down")
+            self.assertEqual(result["sync"][0]["updated"], 1)
+            updated_manifest = worker._read_json(os.path.join(task_dir, "visual_tasks.json"))
+            self.assertEqual(updated_manifest["records"][0]["status"], "needs_review")
+            self.assertEqual(updated_manifest["records"][0]["failure_reason"], "manual_review_needed")
 
     def test_heartbeat_dispatch_does_not_advise_duplicate_capture_when_worker_active(self):
         with tempfile.TemporaryDirectory() as tmp:
