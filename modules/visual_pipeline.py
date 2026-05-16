@@ -3,6 +3,7 @@ Visual collection orchestration.
 """
 import json
 import os
+import tempfile
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -45,16 +46,51 @@ def load_visual_manifest(run_id: str) -> Dict:
     path = os.path.join(task_dir, "visual_tasks.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"未找到视觉任务清单: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"读取视觉任务清单 JSON 失败: {path}: {exc.msg} "
+            f"(line {exc.lineno}, column {exc.colno})"
+        ) from exc
 
 
 def save_visual_manifest(run_id: str, manifest: Dict) -> str:
     task_dir = task_dir_for_run(run_id)
     path = os.path.join(task_dir, "visual_tasks.json")
     ensure_dir(task_dir)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=task_dir,
+            prefix="visual_tasks.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            tmp_path = f.name
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
+        try:
+            dir_fd = os.open(task_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     return path
 
 

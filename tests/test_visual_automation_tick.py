@@ -52,6 +52,7 @@ class VisualAutomationTickTests(unittest.TestCase):
         watchdog.assert_called_once_with(
             plan_id="daily_20260516",
             session_index=2,
+            raw_input_file=None,
             start=True,
             config_file="config/settings.ini",
         )

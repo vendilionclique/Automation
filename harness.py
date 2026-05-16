@@ -386,6 +386,7 @@ def cmd_visual_capture_watchdog(args):
         result = run_capture_watchdog(
             args.plan_id,
             args.session,
+            raw_input_file=args.raw_input,
             config_file=args.config,
             start=args.start,
             poll_seconds=args.poll_seconds,
@@ -706,6 +707,7 @@ def main():
         "visual-capture-watchdog",
         help="Session 级 bounded capture watchdog：监督并按规则恢复一个 capture worker",
     )
+    capture_watchdog.add_argument("--raw-input", help="整本原始输入台账；heartbeat prepare 需要时使用")
     capture_watchdog.add_argument("--plan-id", required=True, help="daily plan id / run_id")
     capture_watchdog.add_argument("--session", type=int, required=True, help="session 编号")
     capture_watchdog.add_argument("--start", action="store_true", help="真正启动/恢复 capture worker；默认只做建议循环")

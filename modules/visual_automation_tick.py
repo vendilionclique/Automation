@@ -70,6 +70,7 @@ def run_visual_automation_tick(
             watchdog_result = run_capture_watchdog(
                 plan_id=str(resolved_plan_id),
                 session_index=int(resolved_session_index),
+                raw_input_file=raw_input_file,
                 start=True,
                 config_file=config_file,
             )

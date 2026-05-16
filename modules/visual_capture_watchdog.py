@@ -60,6 +60,7 @@ PidExistsFn = Callable[[int], bool]
 def run_capture_watchdog(
     plan_id: str,
     session_index: int,
+    raw_input_file: Optional[str] = None,
     start: bool = False,
     poll_seconds: Optional[float] = None,
     idle_timeout_seconds: Optional[float] = None,
@@ -78,6 +79,8 @@ def run_capture_watchdog(
     Args:
         plan_id: Daily visual plan id.
         session_index: One-based session number inside the plan.
+        raw_input_file: Optional ledger path used when heartbeat needs to
+            prepare a session contract for an existing plan.
         start: If false, run one heartbeat cycle and exit without starting a worker.
         poll_seconds: Worker polling interval while a child process is alive.
             Defaults to [CAPTURE_WATCHDOG] poll_seconds.
@@ -176,6 +179,7 @@ def run_capture_watchdog(
         while True:
             runtime["cycles"] = int(runtime.get("cycles") or 0) + 1
             heartbeat = visual_scheduler.heartbeat_daily_collection(
+                raw_input_file=raw_input_file,
                 plan_id=plan_id,
                 session_index=session_index,
                 config_file=config_path,
@@ -236,6 +240,7 @@ def run_capture_watchdog(
                 worker_stdout = None
                 worker_stderr = None
                 sync_result = visual_scheduler.heartbeat_daily_collection(
+                    raw_input_file=raw_input_file,
                     plan_id=plan_id,
                     session_index=session_index,
                     config_file=config_path,
