@@ -1606,8 +1606,9 @@ def classify_midscene_act_result(result: Dict[str, Any], default_context: str = 
             "message": text or f"Midscene act failed during {default_context}.",
         }
 
+    security_negated = _is_security_abnormal_negated(normalized)
     patterns = [
-        ("captcha_required", ["captcha", "验证码", "滑块", "验证", "security verification", "安全验证"]),
+        ("captcha_required", ["captcha", "验证码", "滑块", "security verification", "安全验证"]),
         ("login_required", ["login required", "please login", "sign in", "登录", "请登录", "重新登录"]),
         ("risk_suspected", ["risk", "风控", "风险", "unusual account", "异常账号", "账号异常", "安全检查"]),
         ("popup_blocked", ["permission panel", "automation permission", "权限", "弹窗", "blocked", "拦截"]),
@@ -1616,6 +1617,8 @@ def classify_midscene_act_result(result: Dict[str, Any], default_context: str = 
         ("midscene_reported_failure", ["stop and report failure", "report failure", "failed to", "cannot", "unable to"]),
     ]
     for reason, needles in patterns:
+        if reason in {"captcha_required", "login_required", "risk_suspected"} and security_negated:
+            continue
         if any(needle in normalized for needle in needles):
             rough_state = "captcha_required" if reason == "captcha_required" else reason
             if reason == "midscene_reported_failure":
@@ -1633,6 +1636,32 @@ def classify_midscene_act_result(result: Dict[str, Any], default_context: str = 
         "stop_reason": "",
         "message": text,
     }
+
+
+def _is_security_abnormal_negated(normalized: str) -> bool:
+    """Avoid treating 'no captcha/login/security prompt' success text as abnormal."""
+    text = str(normalized or "")
+    if not text:
+        return False
+    negative_markers = [
+        "无登录",
+        "无验证码",
+        "无安全提示",
+        "无其他安全提示",
+        "没有登录",
+        "没有验证码",
+        "没有安全提示",
+        "未出现登录",
+        "未出现验证码",
+        "未出现安全提示",
+        "no login",
+        "no captcha",
+        "no security",
+        "without login",
+        "without captcha",
+        "without security",
+    ]
+    return any(marker in text for marker in negative_markers)
 
 
 def _is_rate_limited_text(text: str) -> bool:

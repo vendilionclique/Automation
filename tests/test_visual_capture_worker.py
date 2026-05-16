@@ -70,6 +70,24 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertEqual(classified["stop_reason"], "captcha_required")
         self.assertEqual(classified["rough_state"], "captcha_required")
 
+    def test_midscene_act_no_captcha_text_is_not_abnormal(self):
+        result = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Task finished, message: 页面显示正常，无登录、验证码或其他安全提示出现"
+                    ),
+                }
+            ]
+        }
+
+        classified = worker.classify_midscene_act_result(result, default_context="scroll")
+
+        self.assertFalse(classified["abnormal"])
+        self.assertEqual(classified["stop_reason"], "")
+        self.assertEqual(classified["rough_state"], "act_completed")
+
     def test_keyword_capture_does_not_mark_abnormal_act_as_captured(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = {
