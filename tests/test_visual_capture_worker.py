@@ -123,6 +123,42 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("do not type or scroll in that app", scroll_prompt)
         self.assertIn("login, captcha, security/risk", scroll_prompt)
         self.assertIn("next visible results viewport", scroll_prompt)
+        self.assertIn("results end is visible", scroll_prompt)
+        self.assertIn("pagination row", scroll_prompt)
+        self.assertIn("copyright/ICP", scroll_prompt)
+        self.assertIn("page count with current/total pages", scroll_prompt)
+        self.assertNotIn("1/100", scroll_prompt)
+
+    def test_page_state_probe_prompt_describes_taobao_bottom_signals(self):
+        client = FakeClient(
+            {"content": [{"type": "text", "text": "ok"}]},
+            assert_result={
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"state":"results_end","confidence":0.91,"reason":"pagination and footer visible"}',
+                    }
+                ]
+            },
+        )
+
+        result = worker._probe_midscene_page_state(
+            client=client,
+            keyword="万智牌 中止",
+            tile_id="tile_03",
+            interrupt_check=None,
+            keyword_deadline=time.monotonic() + 30,
+            timeout_seconds=5,
+        )
+
+        prompt = client.calls[-1]["arguments"]["prompt"]
+        self.assertEqual(result["page_state"], "results_end")
+        self.assertIn("Taobao bottom indicators", prompt)
+        self.assertIn("previous/next page buttons", prompt)
+        self.assertIn("copyright/ICP", prompt)
+        self.assertIn("literal no-more-results label is not required", prompt)
+        self.assertIn("page count with current/total pages", prompt)
+        self.assertNotIn("1/100", prompt)
 
     def test_search_and_scroll_use_bounded_act(self):
         client = FakeClient({"content": [{"type": "text", "text": "focused search input"}]})
@@ -716,6 +752,98 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 payload["diagnostics"]["partial_capture_stop"]["reason"],
                 "later_tile_unknown_after_capturable_tiles",
             )
+
+    def test_highly_similar_adjacent_tile_stops_and_removes_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 3,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+
+            class ImageClient(FakeClient):
+                def capture_screenshot(self, path, **kwargs):
+                    from PIL import Image
+
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    Image.new("RGB", (80, 60), (240, 240, 240)).save(path)
+                    return {"path": path, "mime_type": "image/png"}
+
+            client = ImageClient(
+                {"content": [{"type": "text", "text": "search completed"}]},
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            duplicate_path = os.path.join(tmp, "evidence", "tile_01.png")
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(len(payload["screenshots"]), 1)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "evidence", "tile_00.png")))
+            self.assertFalse(os.path.exists(duplicate_path))
+            self.assertEqual(payload["diagnostics"]["capture_stop"]["reason"], "similar_adjacent_tile")
+            self.assertEqual(payload["diagnostics"]["capture_stop"]["previous_tile_id"], "tile_00")
+            self.assertGreaterEqual(payload["diagnostics"]["capture_stop"]["similarity"], 0.985)
+
+    def test_similar_tile_helper_keeps_non_capturable_current_screenshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from PIL import Image
+
+            previous_path = os.path.join(tmp, "tile_00.png")
+            current_path = os.path.join(tmp, "tile_01.png")
+            Image.new("RGB", (80, 60), (240, 240, 240)).save(previous_path)
+            Image.new("RGB", (80, 60), (240, 240, 240)).save(current_path)
+            diagnostics = {}
+
+            result = worker._maybe_stop_for_similar_adjacent_tile(
+                previous={
+                    "tile_id": "tile_00",
+                    "path": previous_path,
+                    "page_state": {"status": "visible_results"},
+                },
+                current={
+                    "tile_id": "tile_01",
+                    "path": current_path,
+                    "page_state": {"status": "unknown"},
+                },
+                capture_plan={},
+                diagnostics=diagnostics,
+            )
+
+            self.assertFalse(result["stopped"])
+            self.assertTrue(os.path.exists(current_path))
+            self.assertNotIn("capture_stop", diagnostics)
 
     def test_keyword_timeout_after_visible_results_keeps_keyword_captured(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from modules.page_sampling import write_task_event, write_tile_summary
 from modules.page_state import (
@@ -612,6 +612,26 @@ def _capture_keyword_with_mcp(
                     message=f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
                     diagnostics={f"{tile_id}_page_state": page_state},
                 )
+            similar_stop = _maybe_stop_for_similar_adjacent_tile(
+                previous=screenshots[-2] if len(screenshots) >= 2 else None,
+                current=screenshots[-1],
+                capture_plan=capture_plan,
+                diagnostics=diagnostics,
+            )
+            if similar_stop.get("stopped"):
+                screenshots.pop()
+                write_tile_summary(
+                    task_dir=task_dir,
+                    run_id=run_id,
+                    keyword=keyword,
+                    tile_id=tile_id,
+                    scroll_distance_px=0 if tile_index == 0 else scroll_distance,
+                    rough_state=page_state["status"],
+                    image_path=tile_path,
+                    image_retained=False,
+                    notes="Removed highly similar adjacent tile after retaining the previous screenshot.",
+                )
+                break
             if page_state.get("status") == "results_end":
                 diagnostics["capture_stop"] = {
                     "tile_id": tile_id,
@@ -849,6 +869,87 @@ def _has_capturable_screenshot(screenshots: List[Dict[str, Any]]) -> bool:
         if page_state.get("status") in CAPTURABLE_PAGE_STATES:
             return True
     return False
+
+
+def _maybe_stop_for_similar_adjacent_tile(
+    previous: Optional[Dict[str, Any]],
+    current: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    diagnostics: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not previous:
+        return {"stopped": False, "reason": "no_previous_tile"}
+    previous_state = (previous.get("page_state") or {}).get("status")
+    current_state = (current.get("page_state") or {}).get("status")
+    if previous_state not in CAPTURABLE_PAGE_STATES or current_state not in CAPTURABLE_PAGE_STATES:
+        return {"stopped": False, "reason": "non_capturable_state"}
+    comparison = _compare_screenshot_similarity(
+        str(previous.get("path") or ""),
+        str(current.get("path") or ""),
+        threshold=float(capture_plan.get("similar_tile_stop_threshold") or 0.985),
+    )
+    diagnostics[f"{current.get('tile_id')}_adjacent_similarity"] = comparison
+    if not comparison.get("similar"):
+        return {"stopped": False, "reason": "below_threshold", "comparison": comparison}
+
+    removed = _remove_file_if_exists(str(current.get("path") or ""))
+    diagnostics["capture_stop"] = {
+        "tile_id": current.get("tile_id"),
+        "reason": "similar_adjacent_tile",
+        "message": (
+            "Stopped scrolling because the latest tile was highly similar to the previous "
+            "capturable tile; retained the first screenshot and removed the duplicate."
+        ),
+        "previous_tile_id": previous.get("tile_id"),
+        "removed_path": current.get("path") if removed else "",
+        "similarity": comparison.get("similarity"),
+        "threshold": comparison.get("threshold"),
+    }
+    return {"stopped": True, "comparison": comparison, "removed": removed}
+
+
+def _compare_screenshot_similarity(
+    previous_path: str,
+    current_path: str,
+    threshold: float = 0.985,
+    sample_size: Tuple[int, int] = (64, 64),
+) -> Dict[str, Any]:
+    if not previous_path or not current_path:
+        return {"similar": False, "reason": "missing_path", "threshold": threshold}
+    try:
+        from PIL import Image
+    except Exception as exc:
+        return {"similar": False, "reason": "pillow_unavailable", "error": str(exc), "threshold": threshold}
+    try:
+        with Image.open(previous_path) as previous_img, Image.open(current_path) as current_img:
+            previous_sample = previous_img.convert("L").resize(sample_size)
+            current_sample = current_img.convert("L").resize(sample_size)
+            previous_pixels = previous_sample.tobytes()
+            current_pixels = current_sample.tobytes()
+    except Exception as exc:
+        return {"similar": False, "reason": "image_read_failed", "error": str(exc), "threshold": threshold}
+    if not previous_pixels or len(previous_pixels) != len(current_pixels):
+        return {"similar": False, "reason": "sample_mismatch", "threshold": threshold}
+
+    mean_abs_delta = sum(abs(a - b) for a, b in zip(previous_pixels, current_pixels)) / len(previous_pixels)
+    similarity = max(0.0, min(1.0, 1.0 - (mean_abs_delta / 255.0)))
+    return {
+        "similar": similarity >= threshold,
+        "similarity": round(similarity, 6),
+        "mean_abs_delta": round(mean_abs_delta, 6),
+        "threshold": threshold,
+        "sample_size": list(sample_size),
+    }
+
+
+def _remove_file_if_exists(path: str) -> bool:
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
 
 
 def _retry_search_submit_once(
@@ -1528,8 +1629,13 @@ def _probe_midscene_page_state(
         "popup_blocked, white_skeleton, empty_result, results_end, visible_results, search_results, "
         "results_page, visible_ready, unknown. Treat login, captcha, security/risk warnings, "
         "blocking popups, and white skeleton/loading pages as higher priority than visible listings. "
-        "Use results_end only when the current viewport is a readable results page and also clearly "
-        "shows the bottom/end/no-more-results area. "
+        "Use results_end when the current viewport is a readable results page and clearly shows "
+        "the bottom/end/no-more-results area. Taobao bottom indicators include a long pagination "
+        "row in the middle or lower part of the viewport, previous/next page buttons, a page jump "
+        "input or page count with current/total pages, a horizontal separator followed by footer columns, "
+        "rules/agreements/help links, copyright/ICP/license/filing text, partner/friend links, "
+        "or a scrollbar at the bottom. A literal no-more-results label is not required when these "
+        "footer/pagination/bottom-scrollbar signals are visible. "
         f"For result states, the current keyword is {keyword!r}. Do not output product rows, prices, "
         "shop names, item titles, business filtering, or price trust decisions."
     )
@@ -2313,7 +2419,12 @@ def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> st
         "Cursor, VS Code, or another app is visible; do not type or scroll in "
         "that app. If Chrome/Taobao is unavailable, or login, captcha, security/risk, "
         "unusual account state, white skeleton, or a permission panel is visible, "
-        "stop and report failure. Otherwise move to the next visible results "
+        "stop and report failure. If the visible page already appears to be at the bottom of "
+        "Taobao results, do not keep trying to scroll; report that the results end is visible. "
+        "Bottom signals include a long pagination row, previous/next page buttons, page jump "
+        "input, page count with current/total pages, footer columns, rules/agreements/help links, copyright/ICP/"
+        "license/filing text, partner/friend links, or the scrollbar already at the bottom. "
+        "Otherwise move to the next visible results "
         f"viewport for tile_{tile_index:02d}; use a normal page-level downward "
         f"scroll of about {scroll_distance} px if appropriate, then wait for "
         "visible content to settle. Do not output product rows and do not change "
