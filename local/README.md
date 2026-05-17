@@ -49,6 +49,13 @@ the unattended capture approval surface. The approval is scoped to the Midscene
 computer MCP action surface; it does not add DOM, HTML, network, cookie,
 storage, clipboard, or CDP extraction tools.
 
+For screenshot state checks, the capture mainline treats each retained screenshot
+as a single VLM/page-state decision point. One coarse state probe must provide
+the fields needed for both verification and state advancement, such as state,
+visible search keyword, keyword match, confidence, and reason. Do not add a
+second yes/no visual assertion over the same screenshot to decide how to advance
+the worker.
+
 For external VLM grounding, copy:
 
 ```bash

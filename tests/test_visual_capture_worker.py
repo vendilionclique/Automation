@@ -118,11 +118,13 @@ class VisualCaptureWorkerTests(unittest.TestCase):
 
         self.assertIn("search exactly this keyword", search_prompt)
         self.assertIn("'万智牌 中止'", search_prompt)
-        self.assertIn("submit the search", search_prompt)
-        self.assertIn("pressing Enter", search_prompt)
-        self.assertIn("search button", search_prompt)
-        self.assertIn("no search is triggered", search_prompt)
-        self.assertIn("submit once more", search_prompt)
+        self.assertIn("fresh empty visible search box", search_prompt)
+        self.assertIn("mouse-clicking the visible search button", search_prompt)
+        self.assertIn("Use Enter only as a fallback", search_prompt)
+        self.assertIn("submission_method=search_button", search_prompt)
+        self.assertIn("submission_method=enter_fallback", search_prompt)
+        self.assertNotIn("pressing Enter or clicking", search_prompt)
+        self.assertNotIn("submit once more with Enter", search_prompt)
         self.assertIn("Wait until visible search results settle", search_prompt)
         self.assertIn("Bring the existing Chrome window", scroll_prompt)
         self.assertIn("do not type or scroll in that app", scroll_prompt)
@@ -139,10 +141,53 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("Close only the current Taobao results tab", reset_prompt)
         self.assertIn("fresh empty visible Taobao home search box", reset_prompt)
         self.assertIn("'万智牌 中止'", reset_prompt)
+        self.assertIn("mouse-clicking the visible search button", reset_prompt)
+        self.assertIn("Use Enter only as a fallback", reset_prompt)
+        self.assertIn("submission_method=search_button", reset_prompt)
+        self.assertIn("submission_method=enter_fallback", reset_prompt)
+        self.assertNotIn("submit with Enter or the visible search button", reset_prompt)
         self.assertIn("Do not read DOM, HTML, network", reset_prompt)
         self.assertIn("or clipboard contents", reset_prompt)
         self.assertIn("Do not use short action APIs", reset_prompt)
         self.assertIn("Tap, Input, KeyboardPress, Scroll, or ClearInput", reset_prompt)
+
+    def test_parse_reported_search_submission_method_requires_explicit_token(self):
+        self.assertEqual(
+            worker._parse_reported_search_submission_method(
+                "search submitted submission_method=search_button"
+            ),
+            "search_button",
+        )
+        self.assertEqual(
+            worker._parse_reported_search_submission_method(
+                "search submitted submission_method: enter_fallback"
+            ),
+            "enter_fallback",
+        )
+        self.assertEqual(
+            worker._parse_reported_search_submission_method(
+                "search submitted submission method enter fallback"
+            ),
+            "enter_fallback",
+        )
+        self.assertEqual(
+            worker._parse_reported_search_submission_method(
+                "search submitted submission-method-search-button"
+            ),
+            "search_button",
+        )
+        self.assertEqual(
+            worker._parse_reported_search_submission_method(
+                "I did not use search_button and did not click the visible search button."
+            ),
+            "",
+        )
+        self.assertEqual(
+            worker._parse_reported_search_submission_method(
+                "clicked the visible search button after seeing the keyword"
+            ),
+            "",
+        )
 
     def test_search_reset_retry_predicate_is_boundary_only_and_excludes_hard_blocks(self):
         self.assertTrue(
@@ -234,7 +279,12 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIs(payload["keyword_match"], False)
 
     def test_search_and_scroll_use_bounded_act(self):
-        client = FakeClient({"content": [{"type": "text", "text": "focused search input"}]})
+        client = FakeClient(
+            [
+                {"content": [{"type": "text", "text": "search submitted submission_method=search_button"}]},
+                {"content": [{"type": "text", "text": "scrolled to next results viewport"}]},
+            ]
+        )
 
         search_result = worker._perform_keyword_search(
             client=client,
@@ -259,8 +309,14 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
         self.assertIn("search exactly this keyword", client.calls[0]["arguments"]["prompt"])
         self.assertIn("'万智牌 中止'", client.calls[0]["arguments"]["prompt"])
-        self.assertIn("submit once more", client.calls[0]["arguments"]["prompt"])
+        self.assertIn("mouse-clicking the visible search button", client.calls[0]["arguments"]["prompt"])
+        self.assertIn("Use Enter only as a fallback", client.calls[0]["arguments"]["prompt"])
         self.assertIn("Wait until visible search results settle", client.calls[0]["arguments"]["prompt"])
+        self.assertEqual(
+            search_result["steps"]["act"]["submission_policy"]["preferred"],
+            "visible_search_button_click",
+        )
+        self.assertEqual(search_result["steps"]["act"]["reported_submission_method"], "search_button")
         self.assertIn("next visible results viewport", client.calls[1]["arguments"]["prompt"])
         self.assertIn("about 560 px", client.calls[1]["arguments"]["prompt"])
 
@@ -822,6 +878,66 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(payload["screenshots"][0]["page_state"]["visible_search_keyword"], "万智牌 中止")
             self.assertEqual([call["name"] for call in client.calls], ["act", "assert"])
             heuristic.assert_not_called()
+
+    def test_post_act_success_uses_one_probe_then_continues_to_scroll_tiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 2,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "search completed submission_method=search_button"}]},
+                    {"content": [{"type": "text", "text": "scrolled to next results viewport"}]},
+                ],
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","confidence":0.86,"reason":"normal middle results tile"}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(len(payload["screenshots"]), 2)
+            self.assertEqual(payload["screenshots"][0]["page_state"]["status"], "visible_results")
+            self.assertEqual(payload["screenshots"][1]["page_state"]["status"], "visible_results")
+            self.assertEqual([call["name"] for call in client.calls], ["act", "assert", "act", "assert"])
+            post_act_asserts = [
+                call
+                for call in client.calls[:2]
+                if call["name"] == "assert"
+            ]
+            self.assertEqual(len(post_act_asserts), 1)
 
     def test_non_bottom_scroll_tile_without_readable_search_keyword_keeps_capturing(self):
         with tempfile.TemporaryDirectory() as tmp:

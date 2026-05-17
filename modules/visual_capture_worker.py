@@ -1008,7 +1008,7 @@ def _reset_and_retry_keyword_search_once(
         keyword=keyword,
         timeout_seconds=timeout_seconds,
     )
-    reset_diagnostics = _midscene_text_diagnostics(result, client=client)
+    reset_diagnostics = _search_submission_diagnostics(result, client=client)
     _raise_if_rate_limited_diagnostics(reset_diagnostics, "keyword_search_reset_retry")
     _raise_if_abnormal_act(result, default_context="keyword_search_reset_retry")
     diagnostics["post_act_reset_retry"] = {
@@ -1438,6 +1438,36 @@ def _midscene_text_diagnostics(
         "http_429_detected": True,
         "rate_limit_diagnostics": rate_limit_sources,
     }
+
+
+def _search_submission_diagnostics(
+    result: Optional[Dict[str, Any]] = None,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    diagnostics = _midscene_text_diagnostics(result=result, client=client)
+    diagnostics["submission_policy"] = {
+        "preferred": "visible_search_button_click",
+        "enter_fallback_allowed_only_when": "visible_search_button_unavailable_or_not_clickable",
+        "reported_method_hint": "act prompt asks for submission_method=search_button or submission_method=enter_fallback",
+    }
+    reported_method = _parse_reported_search_submission_method(_tool_text(result or {}))
+    if reported_method:
+        diagnostics["reported_submission_method"] = reported_method
+    return diagnostics
+
+
+def _parse_reported_search_submission_method(text: str) -> str:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return ""
+    match = re.search(
+        r"\bsubmission[_ -]?method(?:\s*[:=]\s*|\s+|-)"
+        r"(search[_ -]?button|enter[_ -]?fallback)\b",
+        normalized,
+    )
+    if match:
+        return match.group(1).strip().replace("-", "_").replace(" ", "_")
+    return ""
 
 
 def _midscene_exception_diagnostics(exc: BaseException) -> Dict[str, Any]:
@@ -2379,7 +2409,7 @@ def _perform_keyword_search(
         keyword=keyword,
         timeout_seconds=timeout_seconds,
     )
-    act_diagnostics = _midscene_text_diagnostics(search_result, client=client)
+    act_diagnostics = _search_submission_diagnostics(search_result, client=client)
     _raise_if_rate_limited_diagnostics(act_diagnostics, "keyword_search")
     _raise_if_abnormal_act(search_result, default_context="keyword_search")
     return {"mode": "bounded_act_search", "steps": {"act": act_diagnostics}}
@@ -2559,12 +2589,17 @@ def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
         "keyword into that app. If Chrome/Taobao is unavailable, or login, "
         "captcha, security verification, risk warning, unusual account state, "
         "or an automation permission panel is visible, stop and report failure. "
-        "From the visible Taobao search box, search exactly this keyword: "
-        f"{keyword!r}. After the search box visibly contains the keyword, submit "
-        "the search by pressing Enter or clicking the visible search button. If "
-        "the input contains the keyword but no search is triggered, submit once "
-        "more with Enter. Wait until visible search results settle. Leave the "
-        "page positioned at the first results viewport. Do not output product rows. "
+        "Prefer starting from a Taobao home page with a fresh empty visible search "
+        "box. If the current page is an old results page or stale keyword boundary, "
+        "leave that page or open/use a Taobao home tab before searching. Then search "
+        f"exactly this keyword: {keyword!r}. After the fresh search box visibly "
+        "contains the keyword, submit by mouse-clicking the visible search button "
+        "as the preferred method. Use Enter only as a fallback when the search "
+        "button is not visible or cannot be clicked. In the final action message, "
+        "include submission_method=search_button or submission_method=enter_fallback "
+        "so diagnostics can trace whether Enter was used as a downgrade. Wait until "
+        "visible search results settle. Leave the page positioned at the first "
+        "results viewport. Do not output product rows. "
         f"Later tile captures will use about {scroll_distance} px between viewports."
     )
 
@@ -2585,9 +2620,14 @@ def _keyword_search_reset_prompt(keyword: str) -> str:
         "is visible, open Taobao home in a normal browser tab. Use the fresh empty "
         "visible Taobao home search box to search exactly this keyword: "
         f"{keyword!r}. After the search box visibly contains exactly this keyword, "
-        "submit with Enter or the visible search button and wait until the first "
-        "visible results viewport settles. Do not open product detail pages, do "
-        "not scroll, do not output product rows, and do not change account state."
+        "submit by mouse-clicking the visible search button as the preferred method. "
+        "Use Enter only as a fallback when the search button is not visible or "
+        "cannot be clicked. In the final action message, include "
+        "submission_method=search_button or submission_method=enter_fallback so "
+        "diagnostics can trace whether Enter was used as a downgrade. Wait until "
+        "the first visible results viewport settles. Do not open product detail "
+        "pages, do not scroll, do not output product rows, and do not change "
+        "account state."
     )
 
 
