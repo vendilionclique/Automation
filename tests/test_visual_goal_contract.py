@@ -29,6 +29,10 @@ class VisualGoalContractTests(unittest.TestCase):
                 "page_kind": "results_page",
                 "keyword_match": "matched",
                 "visible_search_keyword": "MTG Counterspell",
+                "search_box_text_kind": "actual_input",
+                "search_submitted": True,
+                "is_home_feed": False,
+                "result_page_evidence": ["sort/filter bar"],
                 "recommended_next": "accept",
                 "confidence": 0.9,
             }
@@ -37,6 +41,34 @@ class VisualGoalContractTests(unittest.TestCase):
         decision = gate_evidence_check(check, contract, stage="BOUNDARY_VERIFY")
 
         self.assertEqual(decision["action"], ACCEPT)
+
+    def test_boundary_verify_requires_submitted_search_not_home_feed(self):
+        contract = build_goal_contract(keyword="MTG Counterspell")
+        check = build_evidence_check(
+            {
+                "keyword": "MTG Counterspell",
+                "goal_state": "BOUNDARY_VERIFY",
+                "observation": {
+                    "page_state": {
+                        "status": "visible_results",
+                        "visible_search_keyword": "MTG Counterspell",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": False,
+                        "is_home_feed": True,
+                        "result_page_evidence": [],
+                    },
+                    "verification": {"screenshot_keyword": {"status": "matched"}},
+                },
+            }
+        )
+
+        decision = gate_evidence_check(check, contract, stage="BOUNDARY_VERIFY")
+
+        self.assertFalse(check["goal_met"])
+        self.assertEqual(check["recommended_next"], REPAIR)
+        self.assertEqual(check["reason"], "search_submit_unconfirmed")
+        self.assertNotEqual(decision["action"], ACCEPT)
 
     def test_old_keyword_repairs_once_then_stops(self):
         contract = build_goal_contract(keyword="MTG Counterspell")
@@ -153,6 +185,10 @@ class VisualGoalContractTests(unittest.TestCase):
                         "status": "visible_results",
                         "visible_search_keyword": "MTG Counterspell",
                         "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["sort/filter bar"],
                     },
                     "verification": {"screenshot_keyword": {"status": "matched"}},
                 },
@@ -170,6 +206,7 @@ class VisualGoalContractTests(unittest.TestCase):
                 "page_kind": "search_results",
                 "keyword_match": True,
                 "visible_search_keyword": "MTG Black Lotus",
+                "search_box_text_kind": "actual_input",
                 "blocking_reason": "none",
                 "recommended_next": "accept",
                 "confidence": "0.91",
@@ -193,6 +230,7 @@ class VisualGoalContractTests(unittest.TestCase):
                 "page_kind": "search_results",
                 "keyword_match": True,
                 "visible_search_keyword": "MTG Black Lotus",
+                "search_box_text_kind": "actual_input",
                 "blocking_reason": "none",
                 "recommended_next": "accept",
                 "confidence": 0.2,

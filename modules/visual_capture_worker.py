@@ -87,6 +87,8 @@ HARD_ABNORMAL_REASONS = {
     "keyword_mismatch",
     "visible_keyword_mismatch",
     "visible_keyword_unverified",
+    "search_submit_unconfirmed",
+    "search_results_structure_unverified",
     "rate_limited",
     "manual_review_needed",
     "page_state_detection_failed",
@@ -1715,6 +1717,37 @@ def _search_box_text_kind(page_state: Dict[str, Any]) -> str:
     return ""
 
 
+def _boundary_search_submission_issue(page_state: Dict[str, Any]) -> str:
+    """Return the tile_00 boundary reason when submitted search structure is unproven."""
+    search_submitted = (page_state or {}).get("search_submitted")
+    is_home_feed = (page_state or {}).get("is_home_feed")
+    if is_home_feed is None:
+        is_home_feed = (page_state or {}).get("home_feed")
+    if is_home_feed is True:
+        return "search_submit_unconfirmed"
+    if search_submitted is not True:
+        return "search_submit_unconfirmed"
+    if _search_box_text_kind(page_state) != "actual_input":
+        return "search_submit_unconfirmed"
+    result_evidence = _page_state_text_list(page_state.get("result_page_evidence"))
+    url_evidence = _page_state_text_list(page_state.get("url_or_page_evidence"))
+    if not result_evidence and not url_evidence:
+        return "search_results_structure_unverified"
+    return ""
+
+
+def _page_state_text_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, tuple):
+        raw_items = list(value)
+    elif value is None:
+        raw_items = []
+    else:
+        raw_items = [value]
+    return [str(item or "").strip() for item in raw_items if str(item or "").strip()]
+
+
 def _should_retry_pre_keyword_home_entry(review_reason: str, page_state: Dict[str, Any]) -> bool:
     if review_reason in HARD_ABNORMAL_REASONS:
         return False
@@ -1787,13 +1820,22 @@ def _should_reset_retry_search(
         "page_state_detection_failed",
         "visible_keyword_mismatch",
         "visible_keyword_unverified",
+        "search_submit_unconfirmed",
+        "search_results_structure_unverified",
     }
     if stop_reason in hard_reset_blockers or status in hard_reset_blockers:
         return False
-    if stop_reason in {"visible_keyword_mismatch", "visible_keyword_unverified", "search_submit_unconfirmed"}:
+    if stop_reason in {
+        "visible_keyword_mismatch",
+        "visible_keyword_unverified",
+        "search_submit_unconfirmed",
+        "search_results_structure_unverified",
+    }:
         return status in CAPTURABLE_PAGE_STATES or rough_state in {
             "keyword_mismatch",
             "keyword_unverified",
+            "search_submit_unconfirmed",
+            "search_results_structure_unverified",
         }
     if stop_reason in {"manual_review_needed", "page_state_detection_failed"}:
         return status in CAPTURABLE_PAGE_STATES and screenshot_keyword_status in {"mismatch", "unknown"}
@@ -2314,6 +2356,37 @@ def _verify_keyword_after_act(
                 "Visible screenshot did not confirm the current keyword after Midscene act complete; "
                 "a bounded reset/retry is required before trusting this keyword evidence."
             ),
+            "screenshot": screenshot_payload,
+            "page_state": page_state,
+            "diagnostics": verification_diagnostics,
+        }
+
+    submission_issue = _boundary_search_submission_issue(page_state)
+    if submission_issue:
+        verification_diagnostics["reason"] = submission_issue
+        verification_diagnostics["search_submission_gate"] = {
+            "search_submitted": page_state.get("search_submitted"),
+            "is_home_feed": page_state.get("is_home_feed"),
+            "search_box_text_kind": _search_box_text_kind(page_state),
+            "result_page_evidence": _page_state_text_list(page_state.get("result_page_evidence")),
+            "url_or_page_evidence": _page_state_text_list(page_state.get("url_or_page_evidence")),
+        }
+        if page_state.get("is_home_feed") is True:
+            verification_diagnostics["search_submission_gate"]["home_feed_blocked"] = True
+        message = (
+            "Visible screenshot confirmed the keyword text, but did not prove the search was submitted "
+            "into a Taobao results-page structure; a bounded home-entry retry is required before capture."
+        )
+        if submission_issue == "search_results_structure_unverified":
+            message = (
+                "Visible screenshot confirmed the keyword text and submitted-search flag, but did not show "
+                "explicit Taobao results-page structure evidence; a bounded home-entry retry is required."
+            )
+        return {
+            "ok": False,
+            "stop_reason": submission_issue,
+            "rough_state": submission_issue,
+            "message": message,
             "screenshot": screenshot_payload,
             "page_state": page_state,
             "diagnostics": verification_diagnostics,
@@ -3110,6 +3183,7 @@ def _fallback_capture_decision(
             "visible_keyword_mismatch",
             "visible_keyword_unverified",
             "search_submit_unconfirmed",
+            "search_results_structure_unverified",
             "manual_review_needed",
             "page_state_detection_failed",
         }:
@@ -4529,7 +4603,16 @@ def _keyword_search_home_entry_prompt(
         f"exactly this keyword: {keyword!r}. After the search box visibly contains "
         "exactly this keyword, submit by mouse-clicking the visible search button "
         "as the preferred method. Use Enter only as a fallback when the search "
-        "button is not visible or cannot be clicked. In the final action message, "
+        "button is not visible or cannot be clicked. After submitting, wait until "
+        "the page visibly becomes a Taobao search results structure, such as a search "
+        "results URL/address cue, a results sort/filter bar like 综合/销量/价格/区间/筛选, "
+        "or pagination/previous/next/jump controls. Do not scroll the homepage "
+        "recommendation feed, hot recommendations, channels, campaigns, or 猜你喜欢. "
+        "Do not report success merely because the search box contains the keyword or "
+        "because product cards are visible on the homepage. If clicking the search "
+        "button fails and the page remains a homepage/search-entry feed, stop and "
+        "report search_submit_failed or submission_method=unconfirmed instead of "
+        "starting capture. In the final action message, "
         "include home_entry_used=true, bookmark_home_entry_used=true or false, "
         "and submission_method=search_button or submission_method=enter_fallback "
         "so diagnostics can trace the boundary. "
@@ -4573,7 +4656,15 @@ def _keyword_search_home_entry_retry_after_exception_prompt(
         "homepage/search-entry search box is visible, search exactly this keyword: "
         f"{keyword!r}. After the box visibly contains exactly this keyword, submit "
         "by mouse-clicking the visible search button as the preferred method; use "
-        "Enter only if the button is not visible or cannot be clicked. In the final "
+        "Enter only if the button is not visible or cannot be clicked. After submitting, "
+        "wait until the page visibly becomes a Taobao search results structure, such as "
+        "a search results URL/address cue, a results sort/filter bar like 综合/销量/价格/"
+        "区间/筛选, or pagination/previous/next/jump controls. Do not scroll the "
+        "homepage recommendation feed, hot recommendations, channels, campaigns, or 猜你喜欢. "
+        "Do not report success merely because the search box contains the keyword or "
+        "because homepage product cards are visible. If clicking the search button fails "
+        "and the page remains a homepage/search-entry feed, stop and report search_submit_failed "
+        "or submission_method=unconfirmed instead of starting capture. In the final "
         "action message include home_entry_used=true, recovered_from_old_results=true, "
         "bookmark_home_entry_used=true or false, and submission_method=search_button "
         "or submission_method=enter_fallback. "

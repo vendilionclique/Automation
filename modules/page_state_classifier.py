@@ -11,7 +11,7 @@ import ssl
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 CLASSIFIER_STATES = {
@@ -139,7 +139,8 @@ def _request_payload(model: str, image_path: Path, keyword: str, temperature: fl
     prompt = (
         "Using only this saved screenshot image, classify the coarse operational state of the visible page. "
         "Return only a valid JSON object with exactly these fields: state, confidence, reason, "
-        "visible_search_keyword, keyword_match, search_box_text_kind. "
+        "visible_search_keyword, keyword_match, search_box_text_kind, search_submitted, "
+        "is_home_feed, result_page_evidence, url_or_page_evidence. "
         "state must be one of: chrome_not_foreground, captcha_required, login_required, risk_suspected, "
         "popup_blocked, closeable_popup_overlay, white_skeleton, empty_result, results_end, "
         "visible_results, search_results, results_page, visible_ready, unknown. "
@@ -162,6 +163,15 @@ def _request_payload(model: str, image_path: Path, keyword: str, temperature: fl
         "false when it clearly differs, or null when it is not visible or unreadable. Keep the compatible "
         "search_box_text_kind field as actual_input, placeholder, suggestion, hot_search, unreadable, none, "
         "or an empty string if the distinction is not useful. "
+        "The first post-search screenshot must not be accepted just because the search box contains the "
+        "expected keyword or because product cards are visible. Taobao homepage recommendation feeds can "
+        "show product cards under a correctly typed keyword before the search button is actually submitted. "
+        "Set search_submitted true only when visible evidence shows the page has changed into a Taobao "
+        "search results structure, such as s.taobao.com/search evidence, sort/filter controls like 综合/销量/"
+        "价格/区间/筛选, pagination/previous/next/jump controls, or a clear search-results layout rather "
+        "than homepage channels, campaigns, hot recommendations, or 猜你喜欢. Put short visible cues in "
+        "result_page_evidence and address/page evidence in url_or_page_evidence when available. Set "
+        "is_home_feed true for a homepage recommendation feed; product cards alone do not prove submitted search. "
         "Do not output product rows, prices, shop names, item titles, business filtering, or price decisions."
     )
     return {
@@ -297,6 +307,10 @@ def _normalize_classifier_payload(payload: Dict[str, Any], *, raw_text: str) -> 
             keyword_match = None
     if not isinstance(keyword_match, bool):
         keyword_match = None
+    search_submitted = _optional_bool(payload.get("search_submitted"))
+    is_home_feed = _optional_bool(payload.get("is_home_feed"))
+    if is_home_feed is None:
+        is_home_feed = _optional_bool(payload.get("home_feed"))
     return {
         "status": state,
         "confidence": confidence,
@@ -307,7 +321,49 @@ def _normalize_classifier_payload(payload: Dict[str, Any], *, raw_text: str) -> 
         "visible_search_keyword": str(payload.get("visible_search_keyword") or "").strip(),
         "keyword_match": keyword_match,
         "search_box_text_kind": _normalize_search_box_text_kind(payload.get("search_box_text_kind")),
+        "search_submitted": search_submitted,
+        "is_home_feed": is_home_feed,
+        "result_page_evidence": _normalize_text_list(payload.get("result_page_evidence")),
+        "url_or_page_evidence": _normalize_text_list(payload.get("url_or_page_evidence")),
     }
+
+
+def _optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    text = str(value).strip().lower()
+    if text in {"true", "yes", "1", "y", "on", "submitted"}:
+        return True
+    if text in {"false", "no", "0", "n", "off", "unsubmitted"}:
+        return False
+    if text in {"", "null", "none", "unknown", "unreadable"}:
+        return None
+    return None
+
+
+def _normalize_text_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, tuple):
+        raw_items = list(value)
+    elif value is None:
+        raw_items = []
+    else:
+        raw_items = [value]
+    items: List[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
 
 
 def _normalize_search_box_text_kind(value: Any) -> str:

@@ -180,6 +180,18 @@ def _parse_test_page_state_payload(text):
     search_box_text_kind = str(parsed.get("search_box_text_kind") or "").strip()
     if search_box_text_kind:
         payload["search_box_text_kind"] = search_box_text_kind
+    if "search_submitted" in parsed:
+        parsed_search_submitted = _parse_test_optional_bool(parsed.get("search_submitted"))
+        if parsed_search_submitted is not None:
+            payload["search_submitted"] = parsed_search_submitted
+    if "is_home_feed" in parsed or "home_feed" in parsed:
+        parsed_home_feed = _parse_test_optional_bool(parsed.get("is_home_feed", parsed.get("home_feed")))
+        if parsed_home_feed is not None:
+            payload["is_home_feed"] = parsed_home_feed
+    if "result_page_evidence" in parsed:
+        payload["result_page_evidence"] = parsed.get("result_page_evidence")
+    if "url_or_page_evidence" in parsed:
+        payload["url_or_page_evidence"] = parsed.get("url_or_page_evidence")
     return payload
 
 
@@ -234,6 +246,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             payload = _parse_test_page_state_payload(text)
             state = payload.get("state")
             if state:
+                if state in {"visible_results", "search_results", "results_page", "results_end"} and payload.get("keyword_match") is True:
+                    payload.setdefault("search_box_text_kind", "actual_input")
+                    payload.setdefault("search_submitted", True)
+                    payload.setdefault("is_home_feed", False)
+                    payload.setdefault("result_page_evidence", ["test_results_layout"])
                 return {
                     "status": state,
                     "confidence": float(payload.get("confidence") or (0.35 if state == "unknown" else 0.9)),
@@ -245,6 +262,14 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     "keyword_match": payload.get("keyword_match"),
                     "search_box_text_kind": page_state_classifier._normalize_search_box_text_kind(
                         payload.get("search_box_text_kind")
+                    ),
+                    "search_submitted": payload.get("search_submitted"),
+                    "is_home_feed": payload.get("is_home_feed"),
+                    "result_page_evidence": page_state_classifier._normalize_text_list(
+                        payload.get("result_page_evidence")
+                    ),
+                    "url_or_page_evidence": page_state_classifier._normalize_text_list(
+                        payload.get("url_or_page_evidence")
                     ),
                 }
             if text.strip().lower() not in {"true", "ok"}:
@@ -258,6 +283,10 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             "raw_text": '{"state":"visible_results"}',
             "visible_search_keyword": keyword,
             "keyword_match": True if keyword else None,
+            "search_box_text_kind": "actual_input" if keyword else "",
+            "search_submitted": True if keyword else None,
+            "is_home_feed": False if keyword else None,
+            "result_page_evidence": ["test_results_layout"] if keyword else [],
         }
 
     def test_midscene_act_stop_failure_text_is_abnormal(self):
@@ -313,6 +342,10 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("Use Enter only as a fallback", search_prompt)
         self.assertIn("submission_method=search_button", search_prompt)
         self.assertIn("submission_method=enter_fallback", search_prompt)
+        self.assertIn("Taobao search results structure", search_prompt)
+        self.assertIn("Do not scroll the homepage recommendation feed", search_prompt)
+        self.assertIn("Do not report success merely because the search box contains the keyword", search_prompt)
+        self.assertIn("search_submit_failed", search_prompt)
         self.assertNotIn("pressing Enter or clicking", search_prompt)
         self.assertNotIn("submit once more with Enter", search_prompt)
         self.assertIn("Wait until visible search results settle", search_prompt)
@@ -344,6 +377,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("Use Enter only as a fallback", reset_prompt)
         self.assertIn("submission_method=search_button", reset_prompt)
         self.assertIn("submission_method=enter_fallback", reset_prompt)
+        self.assertIn("Taobao search results structure", reset_prompt)
+        self.assertIn("Do not scroll the homepage recommendation feed", reset_prompt)
+        self.assertIn("search_submit_failed", reset_prompt)
         self.assertNotIn("submit with Enter or the visible search button", reset_prompt)
         self.assertIn("Do not read DOM, HTML, network", reset_prompt)
         self.assertIn("or clipboard contents", reset_prompt)
@@ -427,6 +463,24 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     "stop_reason": "visible_keyword_unverified",
                     "rough_state": "keyword_unverified",
                     "page_state": {"status": "results_end"},
+                }
+            )
+        )
+        self.assertTrue(
+            worker._should_reset_retry_search(
+                {
+                    "stop_reason": "search_submit_unconfirmed",
+                    "rough_state": "search_submit_unconfirmed",
+                    "page_state": {"status": "visible_results"},
+                }
+            )
+        )
+        self.assertTrue(
+            worker._should_reset_retry_search(
+                {
+                    "stop_reason": "search_results_structure_unverified",
+                    "rough_state": "search_results_structure_unverified",
+                    "page_state": {"status": "results_page"},
                 }
             )
         )
@@ -732,6 +786,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "confidence": 0.72,
                         "reason": "test_visible_results",
                         "visible_search_keyword": "万智牌 中止",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["test_results_layout"],
                         "metrics": {},
                     },
                 ):
@@ -804,6 +863,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "confidence": 0.72,
                         "reason": "test_visible_results",
                         "visible_search_keyword": "万智牌 中止",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["test_results_layout"],
                         "metrics": {},
                     },
                 ):
@@ -1191,6 +1255,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "confidence": 0.72,
                         "reason": "test_visible_results",
                         "visible_search_keyword": "万智牌 中止",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["test_results_layout"],
                         "metrics": {},
                     },
                 ):
@@ -1391,6 +1460,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "confidence": 0.72,
                         "reason": "test_visible_results",
                         "visible_search_keyword": "万智牌 撼地灵",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["test_results_layout"],
                         "metrics": {},
                     },
                 ):
@@ -2070,6 +2144,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                             "confidence": 0.72,
                             "reason": "test_visible_results",
                             "visible_search_keyword": "万智牌 闪电击",
+                            "keyword_match": False,
+                            "search_box_text_kind": "actual_input",
+                            "search_submitted": True,
+                            "is_home_feed": False,
+                            "result_page_evidence": ["test_results_layout"],
                             "metrics": {},
                         },
                         {
@@ -2077,6 +2156,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                             "confidence": 0.72,
                             "reason": "reset_visible_results",
                             "visible_search_keyword": "万智牌 撼地灵",
+                            "keyword_match": True,
+                            "search_box_text_kind": "actual_input",
+                            "search_submitted": True,
+                            "is_home_feed": False,
+                            "result_page_evidence": ["test_results_layout"],
                             "metrics": {},
                         },
                     ],
@@ -2153,6 +2237,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                             "confidence": 0.82,
                             "reason": "retry_visible_results",
                             "visible_search_keyword": "万智牌 中止",
+                            "keyword_match": True,
+                            "search_box_text_kind": "actual_input",
+                            "search_submitted": True,
+                            "is_home_feed": False,
+                            "result_page_evidence": ["test_results_layout"],
                             "metrics": {},
                         },
                     ],
@@ -2218,6 +2307,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "confidence": 0.72,
                         "reason": "test_visible_results",
                         "visible_search_keyword": "万智牌 中止",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["test_results_layout"],
                         "metrics": {},
                     },
                 ):
@@ -2283,6 +2377,10 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "raw_text": '{"state":"visible_results"}',
                         "visible_search_keyword": "万智牌 中止",
                         "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["sort/filter bar"],
                     },
                 ) as classifier:
                 result = worker._capture_keyword_with_mcp(
@@ -2304,6 +2402,88 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual([call["name"] for call in client.calls], ["act"])
             classifier.assert_called()
             heuristic.assert_not_called()
+
+    def test_tile_00_home_feed_without_search_submission_does_not_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_page_state_json_classifier": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "home_entry_used=true submission_method=search_button"}]},
+                    {"content": [{"type": "text", "text": "home_entry_used=true submission_method=search_button"}]},
+                ],
+                classifier_result=[
+                    {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    '{"state":"visible_results","visible_search_keyword":"万智牌 中止",'
+                                    '"keyword_match":true,"search_box_text_kind":"actual_input",'
+                                    '"search_submitted":false,"is_home_feed":true,'
+                                    '"reason":"homepage recommendation feed product cards are visible"}'
+                                ),
+                            }
+                        ]
+                    },
+                    {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    '{"state":"visible_results","visible_search_keyword":"万智牌 中止",'
+                                    '"keyword_match":true,"search_box_text_kind":"actual_input",'
+                                    '"search_submitted":false,"is_home_feed":true,'
+                                    '"reason":"homepage recommendation feed still visible"}'
+                                ),
+                            }
+                        ]
+                    },
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "needs_review")
+            self.assertEqual(result["stop_reason"], "search_submit_unconfirmed")
+            self.assertNotEqual(payload["status"], "captured")
+            self.assertEqual(payload["screenshots"][0]["page_state"]["search_submitted"], False)
+            self.assertEqual(payload["screenshots"][0]["page_state"]["is_home_feed"], True)
+            self.assertEqual(
+                payload["diagnostics"]["post_act_verification_initial"]["failed_screenshot_preservation"]["status"],
+                "preserved",
+            )
 
     def test_post_act_success_uses_one_probe_then_continues_to_scroll_tiles(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2741,6 +2921,10 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     "raw_text": "{}",
                     "visible_search_keyword": keyword,
                     "keyword_match": True,
+                    "search_box_text_kind": "actual_input",
+                    "search_submitted": True,
+                    "is_home_feed": False,
+                    "result_page_evidence": ["test_results_layout"],
                 }
 
             with mock.patch.object(worker, "classify_screenshot_json", side_effect=fake_classifier):
@@ -3521,6 +3705,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "confidence": 0.72,
                         "reason": "test_visible_results",
                         "visible_search_keyword": "万智牌 中止",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["test_results_layout"],
                         "metrics": {},
                     },
                 ):
@@ -3743,6 +3932,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "confidence": 0.72,
                         "reason": "test_visible_results",
                         "visible_search_keyword": "万智牌 中止",
+                        "keyword_match": True,
+                        "search_box_text_kind": "actual_input",
+                        "search_submitted": True,
+                        "is_home_feed": False,
+                        "result_page_evidence": ["test_results_layout"],
                         "metrics": {},
                     },
                 ):

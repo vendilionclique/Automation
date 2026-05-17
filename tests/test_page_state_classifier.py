@@ -50,6 +50,10 @@ class PageStateClassifierTests(unittest.TestCase):
                 "visible_search_keyword": "万智牌 中止",
                 "keyword_match": "yes",
                 "search_box_text_kind": "typed_value",
+                "search_submitted": "true",
+                "is_home_feed": "false",
+                "result_page_evidence": ["sort bar 综合/销量/价格"],
+                "url_or_page_evidence": "s.taobao.com/search",
             },
             raw_text="{}",
         )
@@ -59,6 +63,10 @@ class PageStateClassifierTests(unittest.TestCase):
         self.assertEqual(payload["visible_search_keyword"], "万智牌 中止")
         self.assertTrue(payload["keyword_match"])
         self.assertEqual(payload["search_box_text_kind"], "actual_input")
+        self.assertTrue(payload["search_submitted"])
+        self.assertFalse(payload["is_home_feed"])
+        self.assertEqual(payload["result_page_evidence"], ["sort bar 综合/销量/价格"])
+        self.assertEqual(payload["url_or_page_evidence"], ["s.taobao.com/search"])
 
     def test_normalize_classifier_payload_accepts_closeable_popup_overlay(self):
         payload = page_state_classifier._normalize_classifier_payload(
@@ -94,9 +102,14 @@ class PageStateClassifierTests(unittest.TestCase):
         self.assertIn("gray X close control", prompt)
         self.assertIn("Do not use closeable_popup_overlay for login", prompt)
         self.assertIn("search_box_text_kind", prompt)
+        self.assertIn("search_submitted", prompt)
+        self.assertIn("is_home_feed", prompt)
+        self.assertIn("result_page_evidence", prompt)
+        self.assertIn("url_or_page_evidence", prompt)
         self.assertIn("normal homepage/search-entry surface", prompt)
         self.assertIn("should not prevent visible_ready", prompt)
         self.assertIn("keyword content mainly matters on results/search_results/results_end", prompt)
+        self.assertIn("product cards alone do not prove submitted search", prompt)
 
     def test_extract_message_content_accepts_text_parts(self):
         content = page_state_classifier._extract_message_content(

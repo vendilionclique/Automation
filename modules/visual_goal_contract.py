@@ -31,6 +31,11 @@ EVIDENCE_FIELDS = (
     "page_kind",
     "keyword_match",
     "visible_search_keyword",
+    "search_box_text_kind",
+    "search_submitted",
+    "is_home_feed",
+    "result_page_evidence",
+    "url_or_page_evidence",
     "blocking_reason",
     "recommended_next",
     "confidence",
@@ -54,6 +59,8 @@ USER_BLOCKING_REASONS = {
     "chrome_not_foreground",
     "popup_blocked",
     "white_skeleton",
+    "search_submit_unconfirmed",
+    "search_results_structure_unverified",
 }
 
 HARD_GATE_BLOCKERS = {
@@ -140,6 +147,7 @@ def build_goal_contract(
             "chrome_or_taobao_related_foreground",
             "taobao_results_or_empty_results_page",
             "visible evidence belongs to current keyword",
+            "tile_00 proves the search was submitted into a results-page structure and not a homepage feed",
             "no login captcha risk white skeleton permission panel or account-state-changing popup",
         ],
         "forbidden": [
@@ -172,10 +180,14 @@ def build_evidence_check(request: Optional[Dict[str, Any]] = None, **kwargs: Any
     page_kind = _page_kind_from_state(str(page_state.get("status") or verification.get("rough_state") or "unknown"))
     keyword_match = _keyword_match_from_page_state(page_state, keyword_status)
     blocking_reason = _blocking_reason_from_page_kind(page_kind)
+    boundary_issue = ""
+    if goal_state == "BOUNDARY_VERIFY" and page_kind in CAPTURABLE_PAGE_KINDS and keyword_match == "matched":
+        boundary_issue = _boundary_search_submission_issue(page_state)
     goal_met = (
         goal_state == "BOUNDARY_VERIFY"
         and page_kind in CAPTURABLE_PAGE_KINDS
         and keyword_match == "matched"
+        and not boundary_issue
         and not blocking_reason
     ) or (
         goal_state == "CAPTURING"
@@ -187,6 +199,8 @@ def build_evidence_check(request: Optional[Dict[str, Any]] = None, **kwargs: Any
         recommended_next = ACCEPT_END
     elif goal_met:
         recommended_next = ACCEPT
+    elif boundary_issue:
+        recommended_next = REPAIR
     elif blocking_reason in BLOCKING_STOP_REASONS or page_kind == "unknown":
         recommended_next = STOP
     else:
@@ -198,10 +212,15 @@ def build_evidence_check(request: Optional[Dict[str, Any]] = None, **kwargs: Any
             "page_kind": page_kind,
             "keyword_match": keyword_match,
             "visible_search_keyword": page_state.get("visible_search_keyword") or "",
+            "search_box_text_kind": _normalize_search_box_text_kind(page_state.get("search_box_text_kind")),
+            "search_submitted": page_state.get("search_submitted"),
+            "is_home_feed": _is_home_feed_value(page_state),
+            "result_page_evidence": _normalize_text_list(page_state.get("result_page_evidence")),
+            "url_or_page_evidence": _normalize_text_list(page_state.get("url_or_page_evidence")),
             "blocking_reason": blocking_reason,
             "recommended_next": recommended_next,
             "confidence": page_state.get("confidence", 0.8 if page_kind != "unknown" else 0.0),
-            "reason": _evidence_reason(keyword, page_kind, keyword_match, blocking_reason),
+            "reason": boundary_issue or _evidence_reason(keyword, page_kind, keyword_match, blocking_reason),
         }
     )
     check["keyword"] = keyword
@@ -270,6 +289,8 @@ def build_evidence_check_prompt(
         "Return only compact JSON with this exact schema: "
         '{"schema":"taobao_goal_evidence_check_v1","goal_met":false,'
         '"page_kind":"unknown","keyword_match":false,"visible_search_keyword":"",'
+        '"search_box_text_kind":"",'
+        '"search_submitted":false,"is_home_feed":false,"result_page_evidence":[],"url_or_page_evidence":[],'
         '"blocking_reason":"unknown","recommended_next":"needs_review","confidence":0.0,"reason":""}. '
         "page_kind must be one of chrome_not_foreground, results_page, results_end, empty_result, "
         "login_required, captcha_required, risk_suspected, popup_blocked, closeable_popup_overlay, white_skeleton, "
@@ -370,6 +391,11 @@ def normalize_evidence_check(payload: Dict[str, Any], raw_text: str = "") -> Dic
         "page_kind": page_kind,
         "keyword_match": keyword_match,
         "visible_search_keyword": str(payload.get("visible_search_keyword") or ""),
+        "search_box_text_kind": _normalize_search_box_text_kind(payload.get("search_box_text_kind")),
+        "search_submitted": _optional_bool(payload.get("search_submitted")),
+        "is_home_feed": _is_home_feed_value(payload),
+        "result_page_evidence": _normalize_text_list(payload.get("result_page_evidence")),
+        "url_or_page_evidence": _normalize_text_list(payload.get("url_or_page_evidence")),
         "blocking_reason": blocking_reason,
         "recommended_next": recommended_next,
         "confidence": confidence,
@@ -394,11 +420,20 @@ def gate_evidence_check(
     valid = bool(check.get("valid", True))
 
     if not valid:
-            return _decision(STOP, "invalid_evidence_check_json", stage, terminal_status=NEEDS_REVIEW)
+        return _decision(STOP, "invalid_evidence_check_json", stage, terminal_status=NEEDS_REVIEW)
     if confidence < min_confidence:
         return _decision(STOP, "low_confidence_evidence_check", stage, terminal_status=NEEDS_REVIEW)
     if blocking_reason in BLOCKING_STOP_REASONS or page_kind in BLOCKING_STOP_REASONS:
         return _decision(STOP, blocking_reason or page_kind, stage, terminal_status=NEEDS_REVIEW)
+    boundary_issue = ""
+    if stage == "BOUNDARY_VERIFY" and page_kind in CAPTURABLE_PAGE_KINDS and str(check.get("keyword_match") or "") == "matched":
+        boundary_issue = _boundary_search_submission_issue(check)
+    if boundary_issue:
+        repair_action = REPAIR_HOME_ENTRY
+        key = _budget_key(repair_action)
+        if counts.get(key, 0) < int(budget.get(key, 0)):
+            return _decision(REPAIR, f"repair_allowed:{repair_action}:{boundary_issue}", stage, repair_action=repair_action)
+        return _decision(STOP, f"repair_budget_exhausted:{repair_action}:{boundary_issue}", stage, terminal_status=NEEDS_REVIEW)
     if stage == "BOUNDARY_VERIFY" and page_kind == "results_end" and not check.get("goal_met"):
         repair_action = REPAIR_HOME_ENTRY
         key = _budget_key(repair_action)
@@ -548,6 +583,74 @@ def _keyword_match_from_page_state(page_state: Dict[str, Any], keyword_status: s
     return "not_visible" if not visible_keyword else "unreadable"
 
 
+def _boundary_search_submission_issue(payload: Dict[str, Any]) -> str:
+    if _is_home_feed_value(payload) is True:
+        return "search_submit_unconfirmed"
+    if _optional_bool(payload.get("search_submitted")) is not True:
+        return "search_submit_unconfirmed"
+    if _normalize_search_box_text_kind(payload.get("search_box_text_kind")) != "actual_input":
+        return "search_submit_unconfirmed"
+    result_evidence = _normalize_text_list(payload.get("result_page_evidence"))
+    url_evidence = _normalize_text_list(payload.get("url_or_page_evidence"))
+    if not result_evidence and not url_evidence:
+        return "search_results_structure_unverified"
+    return ""
+
+
+def _is_home_feed_value(payload: Dict[str, Any]) -> Optional[bool]:
+    value = _optional_bool(payload.get("is_home_feed"))
+    if value is None:
+        value = _optional_bool(payload.get("home_feed"))
+    return value
+
+
+def _optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _normalize_text_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, tuple):
+        raw_items = list(value)
+    elif value is None:
+        raw_items = []
+    else:
+        raw_items = [value]
+    return [str(item or "").strip() for item in raw_items if str(item or "").strip()]
+
+
+def _normalize_search_box_text_kind(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "actual": "actual_input",
+        "typed": "actual_input",
+        "typed_value": "actual_input",
+        "input": "actual_input",
+        "query": "actual_input",
+        "submitted_query": "actual_input",
+    }
+    text = aliases.get(text, text)
+    if text in {"actual_input", "placeholder", "suggestion", "hot_search", "unreadable", "none"}:
+        return text
+    return ""
+
+
 def _evidence_reason(keyword: str, page_kind: str, keyword_match: str, blocking_reason: str) -> str:
     if blocking_reason:
         return blocking_reason
@@ -597,6 +700,11 @@ def normalize_evidence_check_json(raw: Any) -> Dict[str, Any]:
                 "page_kind": "unknown",
                 "keyword_match": False,
                 "visible_search_keyword": "",
+                "search_box_text_kind": "",
+                "search_submitted": False,
+                "is_home_feed": False,
+                "result_page_evidence": [],
+                "url_or_page_evidence": [],
                 "blocking_reason": "json_invalid",
                 "recommended_next": NEEDS_REVIEW,
                 "confidence": 0.0,
@@ -615,6 +723,11 @@ def normalize_evidence_check_json(raw: Any) -> Dict[str, Any]:
         "page_kind": _normalize_gate_token(normalized.get("page_kind") or "unknown"),
         "keyword_match": normalized.get("keyword_match") == "matched" or normalized.get("keyword_match") is True,
         "visible_search_keyword": str(normalized.get("visible_search_keyword") or ""),
+        "search_box_text_kind": _normalize_search_box_text_kind(normalized.get("search_box_text_kind")),
+        "search_submitted": _optional_bool(normalized.get("search_submitted")),
+        "is_home_feed": _is_home_feed_value(normalized),
+        "result_page_evidence": _normalize_text_list(normalized.get("result_page_evidence")),
+        "url_or_page_evidence": _normalize_text_list(normalized.get("url_or_page_evidence")),
         "blocking_reason": blocking_reason,
         "recommended_next": recommended_next,
         "confidence": _float_or_zero(normalized.get("confidence")),
@@ -635,6 +748,14 @@ def validate_evidence_check(check: Dict[str, Any]) -> tuple:
         errors.append("goal_met_not_bool")
     if not isinstance(check.get("keyword_match"), bool):
         errors.append("keyword_match_not_bool")
+    if check.get("search_submitted") is not None and not isinstance(check.get("search_submitted"), bool):
+        errors.append("search_submitted_not_optional_bool")
+    if check.get("is_home_feed") is not None and not isinstance(check.get("is_home_feed"), bool):
+        errors.append("is_home_feed_not_optional_bool")
+    if not isinstance(check.get("result_page_evidence"), list):
+        errors.append("result_page_evidence_not_list")
+    if not isinstance(check.get("url_or_page_evidence"), list):
+        errors.append("url_or_page_evidence_not_list")
     if check.get("blocking_reason") not in USER_BLOCKING_REASONS:
         errors.append("blocking_reason_invalid")
     if check.get("recommended_next") not in {ACCEPT, REPAIR, STOP, NEEDS_REVIEW, "continue", "end", ACCEPT_END}:

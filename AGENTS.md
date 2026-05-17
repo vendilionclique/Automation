@@ -500,8 +500,10 @@ python3 harness.py db
   保留一个 Chrome 标签页时才允许关闭，不能关闭最后一个标签页。
 - Chrome 前台恢复必须 bounded：每个关键词最多 2 次尝试把焦点恢复到既有 Chrome 采集窗口；2 次后仍不是 Chrome/淘宝相关画面，必须停为 `needs_review` 或 `paused_needs_human`，保留截图和原因，不得无人值守循环抢焦点。
 - 新关键词 `tile_00` / post-act 必须做首屏关键词边界硬验收；只有能证明当前关键词已经进入可采集淘宝结果页，才允许继续滚动并最终标记 `captured`。
+- 2026-05-17 首页清场测试后新增硬规则：`tile_00` 不能只凭“搜索框里是当前关键词”和“页面有商品卡片”通过；必须同时证明 `search_submitted=true`、`search_box_text_kind=actual_input`、`is_home_feed` 不是 true，并有 `result_page_evidence` / `url_or_page_evidence` 等搜索结果页结构证据。若仍是首页推荐流、猜你喜欢、频道/活动流，或点击搜索未真正提交，应写 `search_submit_unconfirmed` / `search_results_structure_unverified`，先走一次 home-entry retry，仍失败则停为人工复核并保留 `tile_00_initial_failed.png`。
 - 旧页面不能按新关键词 `captured`：读到旧关键词、读不清关键词且没有强证据、非 Chrome 前台、未知中间态、底部旧结果页或任何登录/验证码/风控/弹窗/白屏状态，都必须进入 `needs_review`、`cooldown` 或人工介入，不能为了推进 session 放宽为成功。
 - extract 是截图落盘后的可选后处理；本轮 capture 重建不得因为 extract 未自动 drain 而改变 capture 的成功边界。
+- `config/settings.example.ini` 必须保留可直接迁移的非敏感默认值；API key、数据库/SSH 主机账号密码、本机 Excel 路径等敏感或机器本地项留空，调度、capture、page sampling、watchdog、视觉行为等非敏感参数不要空着，方便新机器复制为 `config/settings.ini` 后只补敏感信息。
 - 本地练习场由开发线程提供并先验收：至少覆盖非 Chrome 前台、Chrome 前台恢复 2 次失败、每关键词回首页、旧关键词页防误判、登录/验证码/风控/弹窗/白屏/未知状态停机；真实淘宝恢复前必须先用练习场证明这些边界。
 - 如果页面显示登录提示，但人工明确确认当前采集 profile 已登录，允许仅刷新当前可见页面一次做状态复核；刷新后仍显示登录/风险状态则立即暂停并记录 `login_required` 或对应异常。
 - 不抓接口、不读 cookies/storage、不读隐藏 DOM/HTML，不用 JS eval/DOMSnapshot/AX tree 提取页面结构或商品数据。
