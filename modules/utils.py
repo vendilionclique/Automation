@@ -220,6 +220,7 @@ class ConfigManager:
             'foreground_recovery_attempts_per_event': '3',
             'foreground_recovery_events_per_keyword': '2',
             'allow_bookmark_home_entry_repair': 'true',
+            'require_initial_home_entry': 'true',
             'min_rows_per_keyword': '5',
             'screenshot_prefixes': 'initial,results,scroll_1',
         }
@@ -290,6 +291,8 @@ class ConfigManager:
         config['PAGE_SAMPLING'] = {
             'target_listings_per_keyword': '48',
             'max_tiles_per_keyword': '6',
+            'min_retained_tiles_per_keyword': '3',
+            'max_tile_scroll_distance_px': '360',
             'tile_scroll_viewport_ratio': '0.80',
             'tile_overlap_ratio': '0.20',
             'min_new_rows_per_tile': '2',

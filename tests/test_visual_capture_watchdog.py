@@ -108,6 +108,30 @@ def heartbeat_allowed(reason=""):
     }
 
 
+def heartbeat_allowed_with_old_paused_result():
+    heartbeat = heartbeat_allowed("session_result:paused_needs_supervisor")
+    heartbeat["dispatch"]["capture_worker_liveness"] = {
+        "active": False,
+        "session_result_status": "paused_needs_supervisor",
+        "session_result_success": False,
+        "session_result_payload": {
+            "status": "paused_needs_supervisor",
+            "stop_reason": "paused",
+        },
+    }
+    heartbeat["dispatch"]["manifest_recovery_state"] = {
+        "runnable_count": 1,
+        "by_status": {"paused_needs_supervisor": 1, "needs_midscene_computer": 1},
+    }
+    return heartbeat
+
+
+def heartbeat_allowed_but_control_paused():
+    heartbeat = heartbeat_allowed("paused")
+    heartbeat["action"] = "paused"
+    return heartbeat
+
+
 def heartbeat_blocked(reason, action="dispatch_advised", status=None):
     return {
         "ok": True,
@@ -239,6 +263,31 @@ class VisualCaptureWatchdogTests(unittest.TestCase):
         self.assertIn("visual-capture-worker", args)
         self.assertIn("--contract", args)
         self.assertTrue(os.path.isdir(kwargs.get("cwd")))
+
+    def test_allowed_capture_starts_despite_old_paused_session_result(self):
+        heartbeat = HeartbeatScript(
+            heartbeat_allowed_with_old_paused_result(),
+            heartbeat_blocked("capture_worker_active"),
+            heartbeat_sync("session_complete"),
+            heartbeat_done("session_complete"),
+        )
+        popen = PopenFactory(FakeProcess(returncode=0))
+
+        result = self.run_watchdog(heartbeat, popen=popen)
+
+        self.assertEqual(len(popen.calls), 1)
+        self.assertEqual(result["reason"], "session_complete")
+        self.assertEqual(heartbeat.modes, ["all", "all", "sync", "all"])
+
+    def test_control_pause_still_wins_even_if_dispatch_claims_capture_allowed(self):
+        heartbeat = HeartbeatScript(heartbeat_allowed_but_control_paused())
+        popen = PopenFactory()
+
+        result = self.run_watchdog(heartbeat, popen=popen)
+
+        self.assertEqual(len(popen.calls), 0)
+        self.assertEqual(result["reason"], "paused")
+        self.assertEqual(heartbeat.modes, ["all"])
 
     def test_worker_exits_recoverable_restarts_once_after_sync(self):
         heartbeat = HeartbeatScript(

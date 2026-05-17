@@ -203,8 +203,15 @@ def run_capture_watchdog(
                 capture_start_allowed=bool(dispatch.get("capture_start_allowed")),
             )
 
+            capture_command = (dispatch.get("worker_commands") or {}).get("capture")
+            can_start_capture = bool(dispatch.get("capture_start_allowed")) and bool(capture_command)
             terminal = _terminal_reason(heartbeat, dispatch)
-            if terminal:
+            if terminal and not _should_ignore_terminal_for_allowed_capture(
+                terminal,
+                heartbeat,
+                dispatch,
+                can_start_capture=can_start_capture,
+            ):
                 finish_reason = terminal
                 break
 
@@ -253,8 +260,7 @@ def run_capture_watchdog(
                 last_progress_at = now_fn()
                 continue
 
-            capture_command = (dispatch.get("worker_commands") or {}).get("capture")
-            if bool(dispatch.get("capture_start_allowed")) and capture_command:
+            if can_start_capture and capture_command:
                 if worker_started_once and int(runtime.get("restart_count") or 0) >= max_restarts:
                     finish_reason = "max_restarts_reached"
                     finish_status = "needs_review"
@@ -402,7 +408,9 @@ def _terminal_reason(heartbeat: Dict[str, Any], dispatch: Dict[str, Any]) -> str
     reason = _heartbeat_reason(heartbeat, dispatch)
     if action == "paused":
         return reason or "control_blocked"
-    if _matches_any(reason, HUMAN_OR_CONTROL_REASONS):
+    if reason.startswith("session_result:"):
+        pass
+    elif _matches_any(reason, HUMAN_OR_CONTROL_REASONS):
         return reason
 
     liveness = dispatch.get("capture_worker_liveness") or {}
@@ -421,6 +429,39 @@ def _terminal_reason(heartbeat: Dict[str, Any], dispatch: Dict[str, Any]) -> str
     if any(_matches_any(str(status), HUMAN_OR_CONTROL_REASONS) for status in by_status):
         return "manual_or_control_blocked"
     return ""
+
+
+def _should_ignore_terminal_for_allowed_capture(
+    terminal: str,
+    heartbeat: Dict[str, Any],
+    dispatch: Dict[str, Any],
+    can_start_capture: bool,
+) -> bool:
+    if not can_start_capture:
+        return False
+    action = str(heartbeat.get("action") or "")
+    if action == "paused":
+        return False
+    reason = _heartbeat_reason(heartbeat, dispatch).strip().lower()
+    if _matches_any(reason, HUMAN_OR_CONTROL_REASONS) and not reason.startswith("session_result:"):
+        return False
+    liveness = dispatch.get("capture_worker_liveness") or {}
+    session_status = str(liveness.get("session_result_status") or "").strip().lower()
+    session_payload = liveness.get("session_result_payload") or {}
+    payload_status = str(session_payload.get("status") or "").strip().lower()
+    failure_reason = str(session_payload.get("failure_reason") or "").strip().lower()
+    manifest_state = dispatch.get("manifest_recovery_state") or {}
+    by_status = manifest_state.get("by_status") or {}
+    stale_session_result_values = {session_status, payload_status, failure_reason}
+    if terminal in stale_session_result_values:
+        return True
+    if reason.startswith("session_result:") and reason.split(":", 1)[1] == terminal:
+        return True
+    if terminal == "manual_or_control_blocked" and any(
+        _matches_any(str(status), HUMAN_OR_CONTROL_REASONS) for status in by_status
+    ):
+        return True
+    return False
 
 
 def _no_work_reason(heartbeat: Dict[str, Any], dispatch: Dict[str, Any]) -> str:

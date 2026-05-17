@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from modules.page_sampling import write_task_event, write_tile_summary
 from modules.page_state import (
     CAPTCHA_REQUIRED,
+    CLOSEABLE_POPUP_OVERLAY,
     EMPTY_RESULT,
     LOGIN_REQUIRED,
     UNKNOWN,
@@ -318,6 +319,21 @@ def _run_real_capture_contract(
                     last_stop_reason=keyword_result.get("stop_reason"),
                     processed_keywords=len(keyword_results),
                 )
+                if _should_run_post_keyword_cleanup(keyword_result, has_next=fallback_index < len(keyword_tasks)):
+                    cleanup_payload = _post_keyword_cleanup_after_success(
+                        client=client,
+                        task=task,
+                        contract=contract,
+                        run_id=run_id,
+                        session_index=session_index,
+                        task_dir=task_dir,
+                        tools=tools,
+                    )
+                    _append_keyword_result_diagnostic(
+                        keyword_result,
+                        "post_keyword_cleanup",
+                        cleanup_payload,
+                    )
                 status = str(keyword_result.get("status") or "")
                 reason = str(keyword_result.get("stop_reason") or "")
                 if status in CAPTURED_STATUSES:
@@ -416,6 +432,151 @@ def _capture_keyword_with_mcp(
     )
 
 
+def _should_run_post_keyword_cleanup(keyword_result: Dict[str, Any], *, has_next: bool) -> bool:
+    if not has_next:
+        return False
+    return (
+        str(keyword_result.get("status") or "") == "captured"
+        and str(keyword_result.get("stop_reason") or "") == "captured"
+    )
+
+
+def _require_initial_home_entry(contract: Dict[str, Any]) -> bool:
+    hard_stop = contract.get("hard_stop_policy") or {}
+    config = contract.get("config") or {}
+    return bool(hard_stop.get("require_initial_home_entry") or config.get("require_initial_home_entry"))
+
+
+def _post_keyword_cleanup_after_success(
+    client: "MidsceneStdioClient",
+    task: Dict[str, Any],
+    contract: Dict[str, Any],
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+    tools: List[str],
+) -> Dict[str, Any]:
+    keyword = str(task.get("keyword") or "")
+    keyword_index = int(task.get("keyword_index") or task.get("index") or 0)
+    evidence_dir = str(task.get("evidence_dir") or "")
+    if not evidence_dir:
+        evidence_dir = os.path.join(task_dir, "evidence", f"keyword_{keyword_index:03d}")
+    ensure_dir(evidence_dir)
+    capture_plan = task.get("capture_plan") or {}
+    timeout_seconds = _mcp_request_timeout_seconds(contract)
+    keyword_deadline = time.monotonic() + timeout_seconds
+    diagnostics: Dict[str, Any] = {}
+    foreground_recovery: Dict[str, Any] = {"events_used": 0}
+
+    def interrupt_check() -> None:
+        _raise_if_controlled(run_id, session_index)
+
+    try:
+        result = _call_act_with_foreground_recovery(
+            client=client,
+            contract=contract,
+            prompt=_post_keyword_cleanup_prompt(keyword=keyword, contract=contract),
+            stage="post_keyword_cleanup",
+            keyword=keyword,
+            capture_plan=capture_plan,
+            tools=tools,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
+        action_diagnostics = _home_entry_action_diagnostics(result, client=client)
+        _record_action_trace(
+            evidence_dir=evidence_dir,
+            keyword=keyword,
+            action="post_keyword_cleanup",
+            tile_id="post_keyword_cleanup",
+            payload=action_diagnostics,
+            diagnostics=diagnostics,
+        )
+        _raise_if_rate_limited_diagnostics(action_diagnostics, "post_keyword_cleanup")
+        _raise_if_abnormal_act(result, default_context="post_keyword_cleanup")
+        _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_post_keyword_cleanup")
+
+        verification_path = os.path.join(evidence_dir, "post_keyword_cleanup.png")
+        screenshot, page_state = _capture_and_classify_with_foreground_recovery(
+            client=client,
+            contract=contract,
+            capture_plan=capture_plan,
+            tools=tools,
+            path=verification_path,
+            tile_id="post_keyword_cleanup",
+            keyword=keyword,
+            evidence_dir=evidence_dir,
+            stage="post_keyword_cleanup_verification",
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
+        review_reason = _home_entry_review_reason(page_state)
+        return {
+            "status": "verified" if not review_reason else "blocked",
+            "mode": "post_keyword_cleanup",
+            "stop_reason": review_reason,
+            "steps": {"act": action_diagnostics},
+            "verification_screenshot": verification_path,
+            "screenshot": {
+                "path": verification_path,
+                "mime_type": screenshot.get("mime_type") or "image/png",
+            },
+            "page_state": page_state,
+            "diagnostics": diagnostics,
+            "gate": _home_entry_gate_policy(),
+        }
+    except WorkerControlInterrupt:
+        raise
+    except MidsceneActionAbnormal as exc:
+        return {
+            "status": "blocked",
+            "mode": "post_keyword_cleanup",
+            "stop_reason": exc.reason or "post_keyword_cleanup_failed",
+            "rough_state": exc.rough_state,
+            "message": exc.message,
+            "diagnostics": _merge_diagnostics(diagnostics, exc.diagnostics),
+            "gate": _home_entry_gate_policy(),
+        }
+    except Exception as exc:
+        classification = classify_midscene_exception(exc)
+        return {
+            "status": "blocked",
+            "mode": "post_keyword_cleanup",
+            "stop_reason": classification.get("stop_reason") or "post_keyword_cleanup_failed",
+            "rough_state": classification.get("rough_state") or UNKNOWN,
+            "message": f"Post-keyword cleanup failed after captured evidence was saved: {exc}",
+            "diagnostics": _merge_diagnostics(diagnostics, _midscene_exception_diagnostics(exc)),
+            "gate": _home_entry_gate_policy(),
+        }
+
+
+def _append_keyword_result_diagnostic(
+    keyword_result: Dict[str, Any],
+    key: str,
+    payload: Dict[str, Any],
+) -> None:
+    diagnostics = keyword_result.setdefault("diagnostics", {})
+    diagnostics[key] = payload
+    result_path = str(keyword_result.get("result_path") or "")
+    if not result_path:
+        return
+    try:
+        stored = _read_json(result_path)
+        diagnostics = stored.setdefault("diagnostics", {})
+        diagnostics[key] = payload
+        stored["updated_at"] = _now()
+        _write_json(result_path, stored)
+    except Exception:
+        return
+
+
 def _capture_keyword_from_home_with_mcp(
     client: "MidsceneStdioClient",
     task: Dict[str, Any],
@@ -449,6 +610,8 @@ def _capture_keyword_from_home_with_mcp(
     )
     max_tiles = int(capture_plan.get("max_tiles_per_keyword") or 1)
     max_tiles = max(1, max_tiles)
+    min_retained_tiles = int(capture_plan.get("min_retained_tiles_per_keyword") or 3)
+    min_retained_tiles = max(1, min(min_retained_tiles, max_tiles))
     scroll_distance = int(capture_plan.get("tile_scroll_distance_px") or 0)
     scroll_distance = max(1, scroll_distance)
     page_load_wait = float((contract.get("config") or {}).get("page_load_wait") or 8.0)
@@ -479,6 +642,25 @@ def _capture_keyword_from_home_with_mcp(
             timeout_seconds=mcp_timeout_seconds,
         )
         diagnostics["initial_foreground_recovery"] = foreground_record
+        if fallback_index > 1 or _require_initial_home_entry(contract):
+            home_entry_diagnostics = _prepare_home_entry_before_keyword(
+                client=client,
+                contract=contract,
+                task=task,
+                capture_plan=capture_plan,
+                keyword=keyword,
+                tools=tools,
+                diagnostics=diagnostics,
+                foreground_recovery=foreground_recovery,
+                evidence_dir=evidence_dir,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                timeout_seconds=mcp_timeout_seconds,
+                run_id=run_id,
+                session_index=session_index,
+                task_dir=task_dir,
+            )
+            _merge_diagnostics_in_place(diagnostics, {"pre_keyword_home_entry": home_entry_diagnostics})
         search_diagnostics = _perform_keyword_search(
             client=client,
             contract=contract,
@@ -762,26 +944,6 @@ def _capture_keyword_from_home_with_mcp(
                     message=f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
                     diagnostics={f"{tile_id}_page_state": page_state},
                 )
-            similar_stop = _maybe_stop_for_similar_adjacent_tile(
-                previous=screenshots[-2] if len(screenshots) >= 2 else None,
-                current=screenshots[-1],
-                capture_plan=capture_plan,
-                diagnostics=diagnostics,
-            )
-            if similar_stop.get("stopped"):
-                screenshots.pop()
-                write_tile_summary(
-                    task_dir=task_dir,
-                    run_id=run_id,
-                    keyword=keyword,
-                    tile_id=tile_id,
-                    scroll_distance_px=0 if tile_index == 0 else scroll_distance,
-                    rough_state=page_state["status"],
-                    image_path=tile_path,
-                    image_retained=False,
-                    notes="Removed highly similar adjacent tile after retaining the previous screenshot.",
-                )
-                break
             if page_state.get("status") == "results_end":
                 boundary_verification = _verify_results_end_keyword_boundary(
                     tile_path=tile_path,
@@ -806,6 +968,28 @@ def _capture_keyword_from_home_with_mcp(
                         "and moved to the next keyword without resetting the current keyword."
                     ),
                 }
+                break
+            similar_stop = _maybe_stop_for_similar_adjacent_tile(
+                previous=screenshots[-2] if len(screenshots) >= 2 else None,
+                current=screenshots[-1],
+                capture_plan=capture_plan,
+                diagnostics=diagnostics,
+                retained_count=len(screenshots),
+                min_retained_tiles=min_retained_tiles,
+            )
+            if similar_stop.get("stopped"):
+                screenshots.pop()
+                write_tile_summary(
+                    task_dir=task_dir,
+                    run_id=run_id,
+                    keyword=keyword,
+                    tile_id=tile_id,
+                    scroll_distance_px=0 if tile_index == 0 else scroll_distance,
+                    rough_state=page_state["status"],
+                    image_path=tile_path,
+                    image_retained=False,
+                    notes="Removed highly similar adjacent tile after retaining the previous screenshot.",
+                )
                 break
 
         elapsed = round(time.monotonic() - started, 3)
@@ -1057,11 +1241,15 @@ def _maybe_stop_for_similar_adjacent_tile(
     current: Dict[str, Any],
     capture_plan: Dict[str, Any],
     diagnostics: Dict[str, Any],
+    retained_count: Optional[int] = None,
+    min_retained_tiles: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not previous:
         return {"stopped": False, "reason": "no_previous_tile"}
     previous_state = (previous.get("page_state") or {}).get("status")
     current_state = (current.get("page_state") or {}).get("status")
+    if current_state == "results_end":
+        return {"stopped": False, "reason": "results_end_tile_retained"}
     if previous_state not in CAPTURABLE_PAGE_STATES or current_state not in CAPTURABLE_PAGE_STATES:
         return {"stopped": False, "reason": "non_capturable_state"}
     comparison = _compare_screenshot_similarity(
@@ -1072,6 +1260,17 @@ def _maybe_stop_for_similar_adjacent_tile(
     diagnostics[f"{current.get('tile_id')}_adjacent_similarity"] = comparison
     if not comparison.get("similar"):
         return {"stopped": False, "reason": "below_threshold", "comparison": comparison}
+    retained = int(retained_count if retained_count is not None else 2)
+    minimum = int(min_retained_tiles or capture_plan.get("min_retained_tiles_per_keyword") or 3)
+    minimum = max(1, minimum)
+    if retained - 1 < minimum:
+        return {
+            "stopped": False,
+            "reason": "min_retained_tiles_not_met",
+            "comparison": comparison,
+            "retained_count": retained,
+            "min_retained_tiles": minimum,
+        }
 
     removed = _remove_file_if_exists(str(current.get("path") or ""))
     diagnostics["capture_stop"] = {
@@ -1085,6 +1284,8 @@ def _maybe_stop_for_similar_adjacent_tile(
         "removed_path": current.get("path") if removed else "",
         "similarity": comparison.get("similarity"),
         "threshold": comparison.get("threshold"),
+        "min_retained_tiles": minimum,
+        "retained_count_before_removal": retained,
     }
     return {"stopped": True, "comparison": comparison, "removed": removed}
 
@@ -1167,7 +1368,7 @@ def _reset_and_retry_keyword_search_once(
     result = _call_act_with_foreground_recovery(
         client=client,
         contract=contract,
-        prompt=_keyword_search_home_entry_prompt(keyword, contract=contract),
+        prompt=_keyword_search_home_entry_retry_after_exception_prompt(keyword, contract=contract),
         stage="post_act_home_entry_retry",
         keyword=keyword,
         capture_plan=capture_plan,
@@ -1257,6 +1458,274 @@ def _reset_and_retry_keyword_search_once(
             notes=retry_verification["page_state"].get("reason") or "post_act_reset_retry_verification",
         )
     return retry_verification
+
+
+def _prepare_home_entry_before_keyword(
+    client: "MidsceneStdioClient",
+    contract: Dict[str, Any],
+    task: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    keyword: str,
+    tools: List[str],
+    diagnostics: Dict[str, Any],
+    foreground_recovery: Dict[str, Any],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+) -> Dict[str, Any]:
+    """Leave any previous results page and verify a homepage/search-entry boundary."""
+    result = _call_act_with_foreground_recovery(
+        client=client,
+        contract=contract,
+        prompt=_pre_keyword_home_entry_prompt(keyword=keyword, contract=contract),
+        stage="pre_keyword_home_entry",
+        keyword=keyword,
+        capture_plan=capture_plan,
+        tools=tools,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        evidence_dir=evidence_dir,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+    )
+    action_diagnostics = _home_entry_action_diagnostics(result, client=client)
+    _record_action_trace(
+        evidence_dir=evidence_dir,
+        keyword=keyword,
+        action="pre_keyword_home_entry",
+        tile_id="home_entry",
+        payload=action_diagnostics,
+        diagnostics=diagnostics,
+    )
+    _raise_if_rate_limited_diagnostics(action_diagnostics, "pre_keyword_home_entry")
+    _raise_if_abnormal_act(result, default_context="pre_keyword_home_entry")
+    _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_pre_keyword_home_entry")
+
+    verification_path = os.path.join(evidence_dir, "home_entry_prepared.png")
+    screenshot, page_state = _capture_and_classify_with_foreground_recovery(
+        client=client,
+        contract=contract,
+        capture_plan=capture_plan,
+        tools=tools,
+        path=verification_path,
+        tile_id="home_entry",
+        keyword=keyword,
+        evidence_dir=evidence_dir,
+        stage="pre_keyword_home_entry_verification",
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+    )
+    review_reason = _home_entry_review_reason(page_state)
+    payload = {
+        "status": "verified" if not review_reason else "blocked",
+        "mode": "pre_keyword_home_entry",
+        "gate": _home_entry_gate_policy(),
+        "steps": {"act": action_diagnostics},
+        "verification_screenshot": verification_path,
+        "screenshot": {
+            "path": verification_path,
+            "mime_type": screenshot.get("mime_type") or "image/png",
+        },
+        "page_state": page_state,
+        "stop_reason": review_reason,
+    }
+    if review_reason and _should_retry_pre_keyword_home_entry(review_reason, page_state):
+        retry_payload = _retry_prepare_home_entry_before_keyword_once(
+            client=client,
+            contract=contract,
+            task=task,
+            capture_plan=capture_plan,
+            keyword=keyword,
+            tools=tools,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+            run_id=run_id,
+            session_index=session_index,
+            task_dir=task_dir,
+            initial_payload=payload,
+        )
+        if retry_payload.get("status") == "verified":
+            return retry_payload
+        payload = retry_payload
+        review_reason = str(payload.get("stop_reason") or review_reason)
+    if review_reason:
+        raise MidsceneActionAbnormal(
+            reason=review_reason,
+            rough_state=str(page_state.get("status") or UNKNOWN),
+            message=(
+                "Pre-keyword home-entry gate did not reach the normal Taobao "
+                f"homepage/search-entry before searching {keyword!r}."
+            ),
+            diagnostics={"pre_keyword_home_entry": payload},
+        )
+    return payload
+
+
+def _retry_prepare_home_entry_before_keyword_once(
+    client: "MidsceneStdioClient",
+    contract: Dict[str, Any],
+    task: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    keyword: str,
+    tools: List[str],
+    diagnostics: Dict[str, Any],
+    foreground_recovery: Dict[str, Any],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+    initial_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    result = _call_act_with_foreground_recovery(
+        client=client,
+        contract=contract,
+        prompt=_pre_keyword_home_entry_retry_prompt(keyword=keyword, contract=contract),
+        stage="pre_keyword_home_entry_retry",
+        keyword=keyword,
+        capture_plan=capture_plan,
+        tools=tools,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        evidence_dir=evidence_dir,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+    )
+    retry_action_diagnostics = _home_entry_action_diagnostics(result, client=client)
+    _record_action_trace(
+        evidence_dir=evidence_dir,
+        keyword=keyword,
+        action="pre_keyword_home_entry_retry",
+        tile_id="home_entry",
+        payload=retry_action_diagnostics,
+        diagnostics=diagnostics,
+    )
+    _raise_if_rate_limited_diagnostics(retry_action_diagnostics, "pre_keyword_home_entry_retry")
+    _raise_if_abnormal_act(result, default_context="pre_keyword_home_entry_retry")
+    _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_pre_keyword_home_entry_retry")
+
+    verification_path = os.path.join(evidence_dir, "home_entry_prepared_retry.png")
+    screenshot, page_state = _capture_and_classify_with_foreground_recovery(
+        client=client,
+        contract=contract,
+        capture_plan=capture_plan,
+        tools=tools,
+        path=verification_path,
+        tile_id="home_entry_retry",
+        keyword=keyword,
+        evidence_dir=evidence_dir,
+        stage="pre_keyword_home_entry_retry_verification",
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+    )
+    review_reason = _home_entry_review_reason(page_state)
+    payload = {
+        "status": "verified" if not review_reason else "blocked",
+        "mode": "pre_keyword_home_entry_retry",
+        "trigger": {
+            "stop_reason": initial_payload.get("stop_reason") or "",
+            "page_state": initial_payload.get("page_state") or {},
+            "verification_screenshot": initial_payload.get("verification_screenshot") or "",
+        },
+        "gate": dict(initial_payload.get("gate") or {}),
+        "steps": {
+            "initial": initial_payload,
+            "repair_act": retry_action_diagnostics,
+        },
+        "verification_screenshot": verification_path,
+        "screenshot": {
+            "path": verification_path,
+            "mime_type": screenshot.get("mime_type") or "image/png",
+        },
+        "page_state": page_state,
+        "stop_reason": review_reason,
+    }
+    diagnostics["pre_keyword_home_entry_retry"] = payload
+    return payload
+
+
+def _home_entry_gate_policy() -> Dict[str, Any]:
+    return {
+        "allowed_statuses": ["visible_ready"],
+        "allows_homepage_placeholder_or_suggestion": True,
+        "requires_no_actual_old_query": False,
+        "blocks_results_page_states": [
+            "results_end",
+            "results_page",
+            "search_results",
+            "visible_results",
+        ],
+        "pure_vision_boundary": True,
+    }
+
+
+def _home_entry_review_reason(page_state: Dict[str, Any]) -> str:
+    status = str(page_state.get("status") or UNKNOWN)
+    if status == UNKNOWN:
+        return "home_entry_unverified"
+    review_reason = _page_state_review_reason(page_state)
+    if review_reason:
+        return review_reason
+    if status in {"results_end", "results_page", "search_results", "visible_results"}:
+        return "home_entry_not_reached"
+    if status != "visible_ready":
+        return "home_entry_unverified"
+    return ""
+
+
+def _search_box_text_kind(page_state: Dict[str, Any]) -> str:
+    text = str((page_state or {}).get("search_box_text_kind") or "").strip().lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    aliases = {
+        "actual": "actual_input",
+        "typed": "actual_input",
+        "typed_value": "actual_input",
+        "input": "actual_input",
+        "query": "actual_input",
+        "submitted_query": "actual_input",
+        "recommendation": "suggestion",
+        "recommended": "suggestion",
+        "recommendation_text": "suggestion",
+        "placeholder_text": "placeholder",
+        "hot": "hot_search",
+        "hotsearch": "hot_search",
+        "hot_search_text": "hot_search",
+    }
+    text = aliases.get(text, text)
+    if text in {"actual_input", "placeholder", "suggestion", "hot_search", "unreadable", "none"}:
+        return text
+    return ""
+
+
+def _should_retry_pre_keyword_home_entry(review_reason: str, page_state: Dict[str, Any]) -> bool:
+    if review_reason in HARD_ABNORMAL_REASONS:
+        return False
+    if _foreground_loss_detected(page_state):
+        return False
+    status = str((page_state or {}).get("status") or UNKNOWN)
+    if status == UNKNOWN:
+        return False
+    if review_reason == "home_entry_not_reached":
+        return status in {"results_end", "results_page", "search_results", "visible_results"}
+    return False
 
 
 def _preserve_failed_verification_screenshot(
@@ -1630,11 +2099,45 @@ def _midscene_text_diagnostics(
     }
 
 
-def _search_submission_diagnostics(
+def _parse_reported_bool_flag(text: str, name: str) -> Optional[bool]:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return None
+    pattern = rf"\b{re.escape(name.lower())}\s*[:=]\s*(true|false)\b"
+    match = re.search(pattern, normalized)
+    if not match:
+        return None
+    return match.group(1) == "true"
+
+
+def _home_entry_action_diagnostics(
     result: Optional[Dict[str, Any]] = None,
     client: Optional[Any] = None,
 ) -> Dict[str, Any]:
     diagnostics = _midscene_text_diagnostics(result=result, client=client)
+    text = _tool_text(result or {})
+    for flag in (
+        "home_entry_prepared",
+        "home_entry_used",
+        "bookmark_home_entry_used",
+        "recovered_from_old_results",
+        "current_results_tab_closed",
+    ):
+        parsed = _parse_reported_bool_flag(text, flag)
+        if parsed is not None:
+            diagnostics[f"reported_{flag}"] = parsed
+    diagnostics["home_entry_policy"] = {
+        "goal": "normal_taobao_homepage_or_search_entry_before_keyword_search",
+        "forbidden": "typing_next_keyword_into_old_results_page_search_box",
+    }
+    return diagnostics
+
+
+def _search_submission_diagnostics(
+    result: Optional[Dict[str, Any]] = None,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    diagnostics = _home_entry_action_diagnostics(result=result, client=client)
     diagnostics["submission_policy"] = {
         "preferred": "visible_search_button_click",
         "enter_fallback_allowed_only_when": "visible_search_button_unavailable_or_not_clickable",
@@ -1862,6 +2365,20 @@ def _capture_and_classify_with_foreground_recovery(
             keyword_deadline=keyword_deadline,
             timeout_seconds=timeout_seconds,
         )
+        if page_state.get("status") == CLOSEABLE_POPUP_OVERLAY:
+            _maybe_close_closeable_popup_overlay(
+                client=client,
+                contract=contract,
+                stage=stage,
+                keyword=keyword,
+                diagnostics=diagnostics,
+                evidence_dir=evidence_dir,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                timeout_seconds=timeout_seconds,
+                trigger_page_state=page_state,
+            )
+            continue
         if not _foreground_loss_detected(page_state):
             return screenshot, page_state
         _maybe_recover_foreground(
@@ -1878,6 +2395,100 @@ def _capture_and_classify_with_foreground_recovery(
             keyword_deadline=keyword_deadline,
             timeout_seconds=timeout_seconds,
         )
+
+
+def _maybe_close_closeable_popup_overlay(
+    client: "MidsceneStdioClient",
+    contract: Dict[str, Any],
+    stage: str,
+    keyword: str,
+    diagnostics: Optional[Dict[str, Any]],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+    trigger_page_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    records = _closeable_popup_records(diagnostics)
+    budget = _closeable_popup_repair_budget(contract)
+    if len(records) >= budget:
+        raise MidsceneActionAbnormal(
+            reason=CLOSEABLE_POPUP_OVERLAY,
+            rough_state=CLOSEABLE_POPUP_OVERLAY,
+            message="Closeable Taobao popup overlay repair budget exhausted.",
+            diagnostics={"closeable_popup_overlay_repairs": records},
+        )
+    repair_index = len(records) + 1
+    record: Dict[str, Any] = {
+        "stage": stage,
+        "status": "attempting",
+        "repair_index": repair_index,
+        "budget": budget,
+        "trigger_page_state": trigger_page_state or {},
+    }
+    records.append(record)
+    result = _call_act(
+        client,
+        _closeable_popup_overlay_prompt(keyword=keyword, stage=stage, repair_index=repair_index),
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        keyword=keyword,
+        timeout_seconds=timeout_seconds,
+    )
+    action_diagnostics = _midscene_text_diagnostics(result, client=client)
+    action_diagnostics["repair_policy"] = {
+        "state": CLOSEABLE_POPUP_OVERLAY,
+        "target": "modal_or_overlay_gray_x_close_control",
+        "forbidden": "browser_window_close_or_account_state_changing_controls",
+    }
+    record["act"] = action_diagnostics
+    _record_action_trace(
+        evidence_dir=evidence_dir,
+        keyword=keyword,
+        action=f"{stage}_closeable_popup_overlay_repair_{repair_index}",
+        tile_id=f"{stage}_closeable_popup_overlay",
+        payload=action_diagnostics,
+        diagnostics=diagnostics,
+    )
+    classification = classify_midscene_act_result(result, default_context="closeable_popup_overlay_repair")
+    record["classification"] = classification
+    if classification["abnormal"]:
+        record["status"] = "blocked"
+        record["reason"] = classification["stop_reason"]
+        raise MidsceneActionAbnormal(
+            reason=classification["stop_reason"],
+            rough_state=classification["rough_state"],
+            message=classification["message"],
+            diagnostics={"closeable_popup_overlay_repairs": records},
+        )
+    record["status"] = "attempted"
+    return record
+
+
+def _closeable_popup_records(diagnostics: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if diagnostics is None:
+        return []
+    records = diagnostics.setdefault("closeable_popup_overlay_repairs", [])
+    if isinstance(records, list):
+        return records
+    diagnostics["closeable_popup_overlay_repairs"] = []
+    return diagnostics["closeable_popup_overlay_repairs"]
+
+
+def _closeable_popup_repair_budget(contract: Dict[str, Any]) -> int:
+    hard_stop = contract.get("hard_stop_policy") or {}
+    config = contract.get("config") or {}
+    value = (
+        hard_stop.get("closeable_popup_overlay_repairs_per_keyword")
+        or config.get("closeable_popup_overlay_repairs_per_keyword")
+        or hard_stop.get("popup_repairs_per_keyword")
+        or config.get("popup_repairs_per_keyword")
+        or 1
+    )
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _classify_screenshot_page_state(
@@ -1984,6 +2595,8 @@ def _heuristic_page_state_fallback(
 def _page_state_review_reason(page_state: Dict[str, Any]) -> str:
     status = str(page_state.get("status") or UNKNOWN)
     reason = str(page_state.get("reason") or "")
+    if status == CLOSEABLE_POPUP_OVERLAY:
+        return CLOSEABLE_POPUP_OVERLAY
     if status in {LOGIN_REQUIRED, CAPTCHA_REQUIRED, WHITE_SKELETON, "risk_suspected", "popup_blocked", "rate_limited"}:
         return status
     if reason.startswith("page_state_detection_failed"):
@@ -2210,7 +2823,10 @@ def _fallback_goal_contract(
         },
         "capture_plan": {
             "max_tiles_per_keyword": capture_plan.get("max_tiles_per_keyword"),
+            "min_retained_tiles_per_keyword": capture_plan.get("min_retained_tiles_per_keyword"),
             "tile_scroll_distance_px": capture_plan.get("tile_scroll_distance_px"),
+            "estimated_tile_scroll_distance_px": capture_plan.get("estimated_tile_scroll_distance_px"),
+            "max_tile_scroll_distance_px": capture_plan.get("max_tile_scroll_distance_px"),
         },
     }
 
@@ -2907,6 +3523,21 @@ def _maybe_recover_foreground_after_act_exception(
     }
     if diagnostics is not None:
         diagnostics.setdefault("foreground_recovery_exception_checks", []).append(record)
+    if page_state.get("status") == CLOSEABLE_POPUP_OVERLAY:
+        _maybe_close_closeable_popup_overlay(
+            client=client,
+            contract=contract,
+            stage=f"{stage}_act_exception",
+            keyword=keyword,
+            diagnostics=diagnostics,
+            evidence_dir=evidence_dir,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+            trigger_page_state=page_state,
+        )
+        record["status"] = "closeable_popup_overlay_repaired"
+        return True
     if not _foreground_loss_detected(page_state):
         if not exception_reports_foreground_loss:
             return False
@@ -3271,6 +3902,25 @@ def _foreground_recovery_prompt(keyword: str, stage: str, attempt_index: int) ->
         "home, and do not change account state. If Chrome/Taobao cannot be made visible "
         "within this bounded attempt, stop and report foreground_recovery=blocked. "
         f"This is foreground recovery attempt {attempt_index}."
+    )
+
+
+def _closeable_popup_overlay_prompt(keyword: str, stage: str, repair_index: int) -> str:
+    return (
+        "Handle one normal Taobao in-page closeable popup overlay using only visible-screen "
+        "reasoning and system mouse actions. The current keyword remains "
+        f"{keyword!r}, and the current stage is {stage!r}; do not search, re-search, "
+        "scroll, type, submit, navigate, use the browser address bar, open a new tab, "
+        "or change account state. If the Taobao page is dimmed by a translucent overlay "
+        "and there is a clear gray X close control around the popup or overlay itself, "
+        "usually near that popup's own upper-right corner, click only that gray X. "
+        "Do not click the Chrome/browser/window close button. Do not click login, "
+        "captcha, security verification, permission, checkout, cart, favorite, reward "
+        "claim, coupon-use, or account-state-changing controls. If the visible overlay "
+        "does not clearly have a safe gray X close control, stop and report "
+        "closeable_overlay_blocked. In the final action message include "
+        "closeable_overlay_closed=true or closeable_overlay_closed=false. "
+        f"This is closeable popup overlay repair {repair_index}."
     )
 
 
@@ -3734,6 +4384,115 @@ def _bookmark_home_entry_repair_prompt(contract: Optional[Dict[str, Any]] = None
     )
 
 
+def _pre_keyword_home_entry_prompt(
+    keyword: str,
+    contract: Optional[Dict[str, Any]] = None,
+) -> str:
+    navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    return (
+        "Prepare the Taobao homepage/search-entry boundary for the next keyword. "
+        "Use only visible-screen reasoning and system mouse/keyboard actions. Do "
+        "not read DOM, HTML, network, cookies, storage, selector maps, page source, "
+        "JS-evaluated data, or clipboard contents. Do not use short action APIs "
+        "such as Tap, Input, KeyboardPress, Scroll, or ClearInput. "
+        "Do not type the next keyword yet, do not submit a search, do not use the "
+        "browser address bar, do not type a URL, and do not run scripts. "
+        "If Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome app is "
+        "visible, report chrome_not_foreground so the Python worker can recover "
+        "foreground safely. If login, captcha, security verification, risk warning, "
+        "unusual account state, or an automation permission panel is visible, stop "
+        "and report failure. "
+        "If a normal Taobao in-page modal or marketing overlay dims the page and "
+        "has a clear gray X close control around the popup itself, click only that "
+        "popup/overlay gray X before continuing; never click browser/window close "
+        "buttons or account-state controls. "
+        f"{navigation_rule}"
+        "If the current page is an old Taobao results page, bottom-of-results page, "
+        "or a page whose visible search box belongs to the previous keyword, leave "
+        "that old results page first through a visible Taobao logo, Home/首页 entry, "
+        "return-home control, already visible normal homepage tab, or the configured "
+        "visible bookmark home-entry repair when it is allowed. Do not replace text "
+        "inside the old results-page search box. "
+        "The prepared boundary must be the normal homepage/search-entry surface, "
+        "not a results page and not a results-page search box. Homepage placeholder, "
+        "recommendation, hot-search, or suggestion text is acceptable. Stop after "
+        "the ordinary Taobao homepage/search-entry search box is visible "
+        f"and ready for the next keyword {keyword!r}. In the final action message, "
+        "include home_entry_prepared=true, home_entry_used=true, "
+        "recovered_from_old_results=true or false, and bookmark_home_entry_used=true "
+        "or false. Do not output product rows."
+    )
+
+
+def _pre_keyword_home_entry_retry_prompt(
+    keyword: str,
+    contract: Optional[Dict[str, Any]] = None,
+) -> str:
+    navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    return (
+        "The previous pre-keyword boundary check still saw an old results page, "
+        "a bottom-of-results page, or a homepage/search-entry field containing an "
+        "old or unrelated keyword. Perform one bounded home-entry repair before "
+        "the next keyword. Use only visible-screen reasoning and system mouse/"
+        "keyboard actions. Do not read DOM, HTML, network, cookies, storage, "
+        "selector maps, page source, JS-evaluated data, or clipboard contents. "
+        "Do not use short action APIs such as Tap, Input, KeyboardPress, Scroll, "
+        "or ClearInput. Do not type the next keyword yet, do not submit a search, "
+        "do not use the browser address bar, do not type a URL, and do not run "
+        "scripts. "
+        "If login, captcha, security verification, risk warning, unusual account "
+        "state, or an automation permission panel is visible, stop and report "
+        "failure. If Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome "
+        "app is visible, report chrome_not_foreground so the Python worker can "
+        "recover foreground safely. "
+        f"{navigation_rule}"
+        "Leave the old keyword context through a visible Taobao logo, Home/首页 "
+        "entry, return-home control, already visible normal homepage tab, or the "
+        "configured visible bookmark home-entry repair when it is allowed. Do not "
+        "replace text inside the old results-page search box. The repaired "
+        "boundary must be the normal Taobao homepage/search-entry surface, not a "
+        "results page and not a results-page search box. Homepage placeholder, "
+        "recommendation, hot-search, or suggestion text is acceptable. Stop ready "
+        f"for the next keyword {keyword!r}. "
+        "In the final action message, include home_entry_prepared=true, "
+        "home_entry_used=true, recovered_from_old_results=true, and "
+        "bookmark_home_entry_used=true or false. Do not output product rows."
+    )
+
+
+def _post_keyword_cleanup_prompt(
+    keyword: str,
+    contract: Optional[Dict[str, Any]] = None,
+) -> str:
+    navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    return (
+        "The current keyword capture has finished successfully. Clean up the current "
+        "Taobao results page before the next keyword. Use only visible-screen reasoning "
+        "and system mouse/keyboard actions. Do not read DOM, HTML, network, cookies, "
+        "storage, selector maps, page source, JS-evaluated data, or clipboard contents. "
+        "Do not use short action APIs such as Tap, Input, KeyboardPress, Scroll, or "
+        "ClearInput. Do not use the browser address bar, do not type a URL, do not "
+        "paste a URL, and do not run scripts. "
+        "If login, captcha, security verification, risk warning, unusual account state, "
+        "or an automation permission panel is visible, stop and report failure. If Codex, "
+        "Terminal, Cursor, VS Code, WPS, or another non-Chrome app is visible, report "
+        "chrome_not_foreground so the Python worker can recover foreground safely. "
+        f"{navigation_rule}"
+        "Close the current completed Taobao results tab with the normal browser close-tab "
+        "keyboard shortcut: Command+W on macOS, or Ctrl+W on Windows/Linux. Use that "
+        "shortcut once; do not close the browser window deliberately. If this reveals a "
+        "normal Taobao homepage/search-entry tab, stop there. If it reveals a visible "
+        "Chrome new tab/start page and the Taobao bookmark button is visible, click that "
+        "visible Taobao bookmark to open the normal Taobao homepage; do not open extra "
+        "tabs for any other purpose. If the normal Taobao homepage/search-entry is already "
+        "visible, leave it ready. "
+        f"Do not type the next keyword. Stop ready for the next keyword after cleaning up {keyword!r}. "
+        "In the final action message, include home_entry_prepared=true or false, "
+        "home_entry_used=true or false, current_results_tab_closed=true or false, and "
+        "bookmark_home_entry_used=true or false. Do not output product rows."
+    )
+
+
 def _keyword_search_home_entry_prompt(
     keyword: str,
     contract: Optional[Dict[str, Any]] = None,
@@ -3752,6 +4511,12 @@ def _keyword_search_home_entry_prompt(
         "If Chrome/Taobao is unavailable, or login, captcha, security verification, "
         "risk warning, unusual account state, or an automation permission panel "
         "is visible, stop and report failure. "
+        "If a normal Taobao in-page modal or marketing overlay dims the page and "
+        "has a clear gray X close control around the popup itself, usually near "
+        "the popup's own upper-right corner, it is a closeable_popup_overlay; "
+        "click only that popup/overlay gray X and then continue from the same "
+        "visible step. Do not click browser/window close buttons or account-state "
+        "controls. "
         f"{navigation_rule}"
         "Before searching, return through the existing visible Taobao home page or "
         "ordinary Taobao home/search-entry UI. You may use visible low-frequency "
@@ -3783,15 +4548,24 @@ def _keyword_search_home_entry_retry_after_exception_prompt(
         "page or old keyword was visible. Treat an old results page, bottom-of-results "
         "footer, or visible old keyword as a recoverable home-entry condition, not "
         "as success and not as a reason to type into the old results-page search box. "
+        "Do not replace text inside an old results-page search box. "
         "Use only visible-screen reasoning and system mouse/keyboard actions. Do "
         "not read DOM, HTML, network, cookies, storage, selector maps, page source, "
         "JS-evaluated data, or clipboard contents. Do not use short action APIs "
         "such as Tap, Input, KeyboardPress, Scroll, or ClearInput. Do not use the "
         "browser address bar, do not type a URL, and do not run scripts. "
+        "If Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome app is "
+        "visible, report chrome_not_foreground so the Python worker can recover "
+        "foreground safely; do not type, scroll, search, or navigate in that app. "
+        "If a normal Taobao in-page modal or marketing overlay dims the page and "
+        "has a clear gray X close control around the popup itself, usually near "
+        "the popup's own upper-right corner, click only that popup/overlay gray X "
+        "before continuing; never click browser/window close buttons or account-state "
+        "controls. "
         f"{navigation_rule}"
         "From the current visible Taobao page, first use a "
         "visible Taobao logo, Home/首页 entry, return-home control, or ordinary "
-        "homepage/search-entry UI to get to the normal homepage search entry. If "
+        "Taobao home/search-entry UI to get to the normal homepage search entry. If "
         "the configured bookmark repair is allowed, an old results page may instead "
         "be repaired by clicking the visible new tab plus button and then the visible "
         "Taobao bookmark button. If no such visible home entry exists, report failure. "
@@ -3821,18 +4595,25 @@ def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> st
         "so the Python worker can run bounded foreground recovery; do not type, "
         "scroll, search, or navigate in that app. If Chrome/Taobao is unavailable, or login, captcha, security/risk, "
         "unusual account state, white skeleton, or a permission panel is visible, "
-        "stop and report failure. If the visible page already appears to be at the bottom of "
+        "stop and report failure. If a normal Taobao in-page modal or marketing overlay dims "
+        "the page and has a clear gray X close control around the popup itself, usually near "
+        "the popup's own upper-right corner, report closeable_popup_overlay or click only "
+        "that popup/overlay gray X before continuing; never click browser/window close "
+        "buttons or account-state controls. If the visible page already appears to be at the bottom of "
         "Taobao results, do not keep trying to scroll; report that the results end is visible. "
         "Bottom signals include a long pagination row, previous/next page buttons, page jump "
         "input, page count with current/total pages, footer columns, rules/agreements/help links, copyright/ICP/"
         "license/filing text, partner/friend links, or the scrollbar already at the bottom. "
         "During ordinary non-bottom scrolling, do not stop just because the search box text is not readable; "
         "keyword text confirmation belongs at results-end or keyword-boundary handling. "
-        "Otherwise move to the next visible results "
-        f"viewport for tile_{tile_index:02d}; use a normal page-level downward "
-        f"scroll of about {scroll_distance} px if appropriate, then wait for "
-        "visible content to settle. Do not output product rows and do not change "
-        "account state."
+        "Otherwise move only one short step toward the next visible results "
+        f"viewport for tile_{tile_index:02d}; use exactly one normal page-level "
+        f"downward wheel/trackpad scroll of about {scroll_distance} px if appropriate. "
+        "Do not chain multiple wheel ticks, do not repeat-scroll until the footer, "
+        "and do not skip over intermediate result rows. Stop immediately after that "
+        "single short scroll and wait only for visible content to settle so the "
+        "Python worker can save the next screenshot at this intermediate position. "
+        "Do not output product rows and do not change account state."
     )
 
 

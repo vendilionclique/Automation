@@ -13,6 +13,7 @@ WHITE_SKELETON = "white_skeleton"
 LOGIN_REQUIRED = "login_required"
 CAPTCHA_REQUIRED = "captcha_required"
 POPUP_BLOCKED = "popup_blocked"
+CLOSEABLE_POPUP_OVERLAY = "closeable_popup_overlay"
 EMPTY_RESULT = "empty_result"
 UNKNOWN = "unknown"
 

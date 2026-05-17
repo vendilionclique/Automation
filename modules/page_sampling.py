@@ -32,6 +32,8 @@ HUMAN_REQUIRED_REASONS = {
 class PageSamplingConfig:
     target_listings_per_keyword: int = 48
     max_tiles_per_keyword: int = 6
+    min_retained_tiles_per_keyword: int = 3
+    max_tile_scroll_distance_px: int = 360
     tile_scroll_viewport_ratio: float = 0.80
     tile_overlap_ratio: float = 0.20
     min_new_rows_per_tile: int = 2
@@ -55,6 +57,12 @@ def page_sampling_config_from_settings(config) -> PageSamplingConfig:
             section, "target_listings_per_keyword", fallback=48
         ),
         max_tiles_per_keyword=config.getint(section, "max_tiles_per_keyword", fallback=6),
+        min_retained_tiles_per_keyword=config.getint(
+            section, "min_retained_tiles_per_keyword", fallback=3
+        ),
+        max_tile_scroll_distance_px=config.getint(
+            section, "max_tile_scroll_distance_px", fallback=360
+        ),
         tile_scroll_viewport_ratio=config.getfloat(
             section, "tile_scroll_viewport_ratio", fallback=0.80
         ),
@@ -111,7 +119,9 @@ def estimate_tile_scroll_distance(
     top_y = max(0, min(height - 1, top_y))
     bottom_y = max(top_y + 1, min(height, bottom_y))
     visible_product_height = max(1, bottom_y - top_y)
-    scroll_distance = max(1, int(round(visible_product_height * config.tile_scroll_viewport_ratio)))
+    estimated_scroll_distance = max(1, int(round(visible_product_height * config.tile_scroll_viewport_ratio)))
+    scroll_cap = int(config.max_tile_scroll_distance_px or 0)
+    scroll_distance = min(estimated_scroll_distance, scroll_cap) if scroll_cap > 0 else estimated_scroll_distance
     overlap = max(0, visible_product_height - scroll_distance)
     return {
         "screen_height": height,
@@ -119,6 +129,8 @@ def estimate_tile_scroll_distance(
         "content_bottom_y": bottom_y,
         "visible_product_height": visible_product_height,
         "tile_scroll_distance_px": scroll_distance,
+        "estimated_tile_scroll_distance_px": estimated_scroll_distance,
+        "max_tile_scroll_distance_px": scroll_cap,
         "tile_overlap_px": overlap,
         "tile_scroll_viewport_ratio": config.tile_scroll_viewport_ratio,
         "tile_overlap_ratio": config.tile_overlap_ratio,

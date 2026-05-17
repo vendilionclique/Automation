@@ -20,6 +20,7 @@ CLASSIFIER_STATES = {
     "login_required",
     "risk_suspected",
     "popup_blocked",
+    "closeable_popup_overlay",
     "white_skeleton",
     "empty_result",
     "results_end",
@@ -138,19 +139,29 @@ def _request_payload(model: str, image_path: Path, keyword: str, temperature: fl
     prompt = (
         "Using only this saved screenshot image, classify the coarse operational state of the visible page. "
         "Return only a valid JSON object with exactly these fields: state, confidence, reason, "
-        "visible_search_keyword, keyword_match. "
+        "visible_search_keyword, keyword_match, search_box_text_kind. "
         "state must be one of: chrome_not_foreground, captcha_required, login_required, risk_suspected, "
-        "popup_blocked, white_skeleton, empty_result, results_end, visible_results, search_results, "
-        "results_page, visible_ready, unknown. "
+        "popup_blocked, closeable_popup_overlay, white_skeleton, empty_result, results_end, "
+        "visible_results, search_results, results_page, visible_ready, unknown. "
         "Use chrome_not_foreground when Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome app "
-        "is the visible foreground window. Treat login, captcha, security/risk warnings, blocking popups, "
-        "and white skeleton/loading pages as higher priority than visible listings. "
+        "is the visible foreground window. Use closeable_popup_overlay only for a normal Taobao in-page "
+        "modal or marketing overlay where the page behind it is visibly dimmed by a translucent layer and "
+        "the modal or nearby overlay area has a clear gray X close control, usually near the modal's own "
+        "upper-right corner. Do not use closeable_popup_overlay for login, captcha, security/risk, account, "
+        "permission, checkout, cart, favorite, reward-claim, or other account-state-changing dialogs; use "
+        "the relevant hard-stop state or popup_blocked instead. Treat login, captcha, security/risk warnings, "
+        "blocking popups, and white skeleton/loading pages as higher priority than visible listings. "
         "Use results_end when a readable Taobao results page clearly shows pagination, previous/next buttons, "
         "jump input, footer links, copyright/ICP/filing text, friend links, or a bottom scrollbar; a literal "
         "no-more-results label is not required. "
-        f"The expected keyword is {keyword!r}. If a Taobao search box is visible, read its text into "
-        "visible_search_keyword. Set keyword_match true only when it clearly equals the expected keyword, "
-        "false when it clearly differs, and null when it is not visible or unreadable. "
+        f"The expected keyword is {keyword!r}. On a normal homepage/search-entry surface, recommendation, "
+        "hot-search, suggestion, or placeholder text inside or near the search box is acceptable and should "
+        "not prevent visible_ready. The keyword content mainly matters on results/search_results/results_end "
+        "product-listing pages. If a submitted search keyword is clearly visible on a product-listing page, "
+        "put it into visible_search_keyword and set keyword_match true when it equals the expected keyword, "
+        "false when it clearly differs, or null when it is not visible or unreadable. Keep the compatible "
+        "search_box_text_kind field as actual_input, placeholder, suggestion, hot_search, unreadable, none, "
+        "or an empty string if the distinction is not useful. "
         "Do not output product rows, prices, shop names, item titles, business filtering, or price decisions."
     )
     return {
@@ -295,7 +306,35 @@ def _normalize_classifier_payload(payload: Dict[str, Any], *, raw_text: str) -> 
         "raw_text": raw_text,
         "visible_search_keyword": str(payload.get("visible_search_keyword") or "").strip(),
         "keyword_match": keyword_match,
+        "search_box_text_kind": _normalize_search_box_text_kind(payload.get("search_box_text_kind")),
     }
+
+
+def _normalize_search_box_text_kind(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "actual": "actual_input",
+        "typed": "actual_input",
+        "typed_value": "actual_input",
+        "input": "actual_input",
+        "query": "actual_input",
+        "submitted_query": "actual_input",
+        "recommendation": "suggestion",
+        "recommended": "suggestion",
+        "recommendation_text": "suggestion",
+        "placeholder_text": "placeholder",
+        "hot": "hot_search",
+        "hotsearch": "hot_search",
+        "hot_search_text": "hot_search",
+        "not_visible": "none",
+        "empty": "none",
+        "missing": "none",
+        "unknown": "unreadable",
+    }
+    text = aliases.get(text, text)
+    if text in {"actual_input", "placeholder", "suggestion", "hot_search", "unreadable", "none"}:
+        return text
+    return ""
 
 
 def _float_value(value: Any, *, default: float) -> float:

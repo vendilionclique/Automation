@@ -4,6 +4,7 @@ from modules.visual_goal_contract import (
     ACCEPT,
     ACCEPT_END,
     REPAIR,
+    REPAIR_CLOSE_NON_ACCOUNT_POPUP,
     REPAIR_HOME_ENTRY,
     SCHEMA,
     STOP,
@@ -98,6 +99,43 @@ class VisualGoalContractTests(unittest.TestCase):
 
         self.assertEqual(decision["action"], STOP)
         self.assertEqual(decision["terminal_status"], "needs_review")
+
+    def test_closeable_popup_overlay_repairs_once_but_popup_blocked_stops(self):
+        contract = build_goal_contract(keyword="MTG Counterspell")
+        closeable = normalize_evidence_check(
+            {
+                "schema": "taobao_goal_evidence_check_v1",
+                "goal_met": False,
+                "page_kind": "closeable_popup_overlay",
+                "blocking_reason": "closeable_popup_overlay",
+                "recommended_next": "repair",
+                "confidence": 0.9,
+            }
+        )
+        blocked = normalize_evidence_check(
+            {
+                "schema": "taobao_goal_evidence_check_v1",
+                "goal_met": False,
+                "page_kind": "popup_blocked",
+                "blocking_reason": "popup_blocked",
+                "recommended_next": "stop",
+                "confidence": 0.9,
+            }
+        )
+
+        first = gate_evidence_check(closeable, contract, stage="BOUNDARY_VERIFY")
+        second = gate_evidence_check(
+            closeable,
+            contract,
+            history=[{"repair_action": REPAIR_CLOSE_NON_ACCOUNT_POPUP}],
+            stage="BOUNDARY_VERIFY",
+        )
+        hard_stop = gate_evidence_check(blocked, contract, stage="BOUNDARY_VERIFY")
+
+        self.assertEqual(first["action"], REPAIR)
+        self.assertEqual(first["repair_action"], REPAIR_CLOSE_NON_ACCOUNT_POPUP)
+        self.assertEqual(second["action"], STOP)
+        self.assertEqual(hard_stop["action"], STOP)
 
     def test_parse_unstructured_text_stops(self):
         check = parse_evidence_check_text("I see a normal shopping page.")

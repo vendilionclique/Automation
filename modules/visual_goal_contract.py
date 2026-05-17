@@ -85,10 +85,11 @@ BLOCKING_STOP_REASONS = {
     "permission_panel",
     "rate_limited",
     "account_state_changed_or_unusual",
+    "popup_blocked",
 }
 REFRESH_REPAIR_REASONS = {"white_skeleton", "page_not_loaded", "loading_failed"}
 FOREGROUND_REPAIR_REASONS = {"chrome_not_foreground"}
-POPUP_REPAIR_REASONS = {"popup_blocked", "non_account_popup"}
+POPUP_REPAIR_REASONS = {"closeable_popup_overlay", "non_account_popup"}
 CAPTURABLE_PAGE_KINDS = {"results_page", "search_results", "visible_results", "empty_result", "results_end"}
 
 
@@ -271,7 +272,7 @@ def build_evidence_check_prompt(
         '"page_kind":"unknown","keyword_match":false,"visible_search_keyword":"",'
         '"blocking_reason":"unknown","recommended_next":"needs_review","confidence":0.0,"reason":""}. '
         "page_kind must be one of chrome_not_foreground, results_page, results_end, empty_result, "
-        "login_required, captcha_required, risk_suspected, popup_blocked, white_skeleton, "
+        "login_required, captcha_required, risk_suspected, popup_blocked, closeable_popup_overlay, white_skeleton, "
         "permission_panel, unknown. keyword_match may be true or false. "
         "recommended_next must be accept, repair, stop, needs_review, or accept_end. "
         "Set goal_met true only when the visible page clearly satisfies the current keyword goal. "
@@ -327,6 +328,7 @@ def normalize_evidence_check(payload: Dict[str, Any], raw_text: str = "") -> Dic
             "captcha_required",
             "risk_suspected",
             "popup_blocked",
+            "closeable_popup_overlay",
             "white_skeleton",
             "permission_panel",
             "rate_limited",
@@ -521,6 +523,7 @@ def _page_kind_from_state(state: str) -> str:
         "captcha_required": "captcha_required",
         "risk_suspected": "risk_suspected",
         "popup_blocked": "popup_blocked",
+        "closeable_popup_overlay": "closeable_popup_overlay",
         "white_skeleton": "white_skeleton",
         "automation_permission_blocked": "permission_panel",
         "rate_limited": "rate_limited",

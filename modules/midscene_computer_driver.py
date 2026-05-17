@@ -75,6 +75,7 @@ class MidsceneComputerConfig:
     foreground_recovery_attempts_per_event: int = 3
     foreground_recovery_events_per_keyword: int = 2
     allow_bookmark_home_entry_repair: bool = False
+    require_initial_home_entry: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -152,6 +153,9 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
         allow_bookmark_home_entry_repair=config.getboolean(
             section, "allow_bookmark_home_entry_repair", fallback=True
         ),
+        require_initial_home_entry=config.getboolean(
+            section, "require_initial_home_entry", fallback=True
+        ),
     )
 
 
@@ -199,8 +203,11 @@ def write_midscene_session_worker_contract(
                 else "visual_homepage_entry_only_no_address_bar_url_new_tab_or_script"
             ),
             "max_tiles_per_keyword": sampling_config.max_tiles_per_keyword,
+            "min_retained_tiles_per_keyword": sampling_config.min_retained_tiles_per_keyword,
             "target_listings_per_keyword": sampling_config.target_listings_per_keyword,
             "tile_scroll_distance_px": calibration["tile_scroll_distance_px"],
+            "estimated_tile_scroll_distance_px": calibration.get("estimated_tile_scroll_distance_px"),
+            "max_tile_scroll_distance_px": calibration.get("max_tile_scroll_distance_px"),
             "tile_id_pattern": "tile_00, tile_01, ...",
             "tile_path_pattern": os.path.join(evidence_dir, "tile_<NN>.png"),
             "primary_screenshot_path": primary_screenshot_path,
@@ -279,6 +286,7 @@ def write_midscene_session_worker_contract(
             "foreground_recovery_attempts_per_event": config.foreground_recovery_attempts_per_event,
             "foreground_recovery_events_per_keyword": config.foreground_recovery_events_per_keyword,
             "allow_bookmark_home_entry_repair": config.allow_bookmark_home_entry_repair,
+            "require_initial_home_entry": config.require_initial_home_entry,
             "retain_abnormal_screenshots": True,
         },
         "action_boundary": {
@@ -441,6 +449,13 @@ Per-keyword homepage entry rule:
   the same bounded visual homepage-entry rule according to the capture worker's
   hard-stop policy. Never treat a reset homepage first viewport as a captured
   keyword result.
+- If a normal Taobao in-page modal or marketing overlay dims the page and has a
+  clear gray X close control around the modal itself, usually near the modal's
+  own upper-right corner, classify it as `closeable_popup_overlay`. Within the
+  popup repair budget, use bounded visual `act` to click only that modal/overlay
+  gray X and then re-screenshot/re-classify the same step. Do not click the
+  browser/window close button and do not click login, verification, permission,
+  checkout, cart, favorite, reward-claim, or account-state-changing controls.
 
 Keywords:
 {keywords or "- none"}

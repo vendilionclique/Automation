@@ -49,6 +49,7 @@ class PageStateClassifierTests(unittest.TestCase):
                 "reason": "readable listings",
                 "visible_search_keyword": "万智牌 中止",
                 "keyword_match": "yes",
+                "search_box_text_kind": "typed_value",
             },
             raw_text="{}",
         )
@@ -57,6 +58,45 @@ class PageStateClassifierTests(unittest.TestCase):
         self.assertEqual(payload["confidence"], 1.0)
         self.assertEqual(payload["visible_search_keyword"], "万智牌 中止")
         self.assertTrue(payload["keyword_match"])
+        self.assertEqual(payload["search_box_text_kind"], "actual_input")
+
+    def test_normalize_classifier_payload_accepts_closeable_popup_overlay(self):
+        payload = page_state_classifier._normalize_classifier_payload(
+            {
+                "state": "closeable_popup_overlay",
+                "confidence": 0.88,
+                "reason": "dimmed Taobao page with a normal modal and gray X close control",
+            },
+            raw_text="{}",
+        )
+
+        self.assertEqual(payload["status"], "closeable_popup_overlay")
+        self.assertEqual(payload["confidence"], 0.88)
+
+    def test_request_payload_describes_closeable_popup_overlay_boundary(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            f.write(
+                b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+                b"\x90wS\xde\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            f.flush()
+
+            payload = page_state_classifier._request_payload(
+                model="glm-4.6v-flashx",
+                image_path=Path(f.name),
+                keyword="万智牌 中止",
+                temperature=0,
+            )
+
+        prompt = payload["messages"][0]["content"][0]["text"]
+        self.assertIn("closeable_popup_overlay", prompt)
+        self.assertIn("gray X close control", prompt)
+        self.assertIn("Do not use closeable_popup_overlay for login", prompt)
+        self.assertIn("search_box_text_kind", prompt)
+        self.assertIn("normal homepage/search-entry surface", prompt)
+        self.assertIn("should not prevent visible_ready", prompt)
+        self.assertIn("keyword content mainly matters on results/search_results/results_end", prompt)
 
     def test_extract_message_content_accepts_text_parts(self):
         content = page_state_classifier._extract_message_content(

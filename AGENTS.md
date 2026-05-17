@@ -489,6 +489,10 @@ python3 harness.py db
 - 不自动处理验证码或登录，只检测、暂停、通知人工。
 - capture 与 extract 必须分离：capture worker 只负责 Chrome 前台/淘宝页面状态、关键词搜索、截图证据、manifest 和 diagnostics；商品标题、价格、店铺、地区等字段只由 Codex extract worker 基于已保存截图抽取，再由 `visual-apply-extracted-rows` 确定性落盘。
 - 当前 capture 重建主线要求每个关键词先回到淘宝首页或已有淘宝首页状态，再从首页可见搜索框低频搜索当前关键词；旧搜索结果页不能直接当作新关键词入口。
+- 2026-05-17 接棒收口后，朴素业务流程固定为：关键词开始前先确认淘宝首页/普通搜索入口；从首页搜索框提交当前关键词；`tile_00` 必须证明商品列表页属于当前关键词；滚动采集可见 tiles，遇到到底或相邻可采集 tile 高度相似则结束当前关键词；商品字段抽取仍在 capture 之后由 Codex extract worker 处理。
+- `visible_ready` 只表示当前截图是正常可用页面，不是登录、验证码、风控、白屏、阻断弹窗或非 Chrome 前台。首页/search-entry 阶段只要 VLM 判为 `visible_ready` 就可作为入口继续，搜索框里的推荐词、placeholder、热搜词或旧文案不作为阻断依据；关键词是否正确只在商品列表页/结果页阶段通过 `visible_search_keyword` / `keyword_match` 做硬边界。
+- 第一个关键词也应默认走首页入口确认：session contract 写入 `require_initial_home_entry=true`。后续关键词无条件先做 pre-entry；如果上一个关键词的 post-keyword cleanup 未能确认回到首页，只记录诊断并把机会交给下一个关键词的 pre-entry repair，pre-entry 仍失败时再停为人工复核/由 watchdog 后续恢复。
+- post-keyword cleanup 只对干净 `captured` 且后面还有关键词时执行，用低频可见 UI 动作关闭/离开当前结果页并尝试露出淘宝首页入口；cleanup 失败不能把已采集关键词改成失败，也不能立刻截断 session，只写入 `post_keyword_cleanup` diagnostics。
 - 旧结果页/到底页允许的有限 home-entry repair 是：在配置
   `[MIDSCENE_COMPUTER] allow_bookmark_home_entry_repair=true` 时，仅通过可见 UI
   点击浏览器新标签页按钮，再点击书签栏淘宝按钮回首页；仍禁止地址栏、URL 输入、脚本、
