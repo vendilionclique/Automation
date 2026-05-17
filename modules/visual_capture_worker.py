@@ -11,6 +11,7 @@ import os
 import queue
 import random
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -66,6 +67,7 @@ HARD_ABNORMAL_REASONS = {
     "midscene_mcp_request_timeout",
     "keyword_mismatch",
     "visible_keyword_mismatch",
+    "visible_keyword_unverified",
     "rate_limited",
     "manual_review_needed",
     "page_state_detection_failed",
@@ -469,7 +471,7 @@ def _capture_keyword_with_mcp(
                 notes=search_verification["page_state"].get("reason") or "post_act_keyword_verification",
             )
         if not search_verification["ok"]:
-            retry_verification = _retry_search_submit_once(
+            retry_verification = _reset_and_retry_keyword_search_once(
                 client=client,
                 task=task,
                 capture_plan=capture_plan,
@@ -489,26 +491,26 @@ def _capture_keyword_with_mcp(
             )
             if retry_verification:
                 search_verification = retry_verification
-                if search_verification["ok"]:
+                if screenshots:
                     screenshots[-1] = search_verification["screenshot"]
                 else:
-                    screenshots[-1] = search_verification["screenshot"]
+                    screenshots.append(search_verification["screenshot"])
             if search_verification["ok"]:
                 _merge_diagnostics_in_place(
                     diagnostics,
                     {
-                        "post_act_submit_retry": {
+                        "post_act_reset_retry": {
                             "status": "recovered",
                             "recovered": {
                                 "status": "recovered",
                                 "message": (
-                                    "A single bounded act retry submitted the visible search "
-                                    "and produced a capturable state."
+                                    "A single bounded reset/retry opened a fresh Taobao search "
+                                    "and produced a verified capturable state."
                                 ),
                             },
                             "message": (
-                                "A single bounded act retry submitted the visible search "
-                                "and produced a capturable state."
+                                "A single bounded reset/retry opened a fresh Taobao search "
+                                "and produced a verified capturable state."
                             ),
                         }
                     },
@@ -633,10 +635,28 @@ def _capture_keyword_with_mcp(
                 )
                 break
             if page_state.get("status") == "results_end":
+                boundary_verification = _verify_results_end_keyword_boundary(
+                    tile_path=tile_path,
+                    tile_id=tile_id,
+                    page_state=page_state,
+                    screenshot_payload=screenshots[-1],
+                    keyword=keyword,
+                )
+                diagnostics[f"{tile_id}_results_end_boundary"] = {
+                    "ok": boundary_verification["ok"],
+                    "stop_reason": boundary_verification.get("stop_reason") or "",
+                    "rough_state": boundary_verification.get("rough_state") or "",
+                    "message": boundary_verification.get("message") or "",
+                    **(boundary_verification.get("diagnostics") or {}),
+                }
                 diagnostics["capture_stop"] = {
                     "tile_id": tile_id,
                     "reason": "results_end",
-                    "message": "Visible page-state probe reported the bottom/end of results; retained this tile and moved to the next keyword.",
+                    "keyword_boundary_ok": boundary_verification["ok"],
+                    "message": (
+                        "Visible page-state probe reported the bottom/end of results; retained this tile "
+                        "and moved to the next keyword without resetting the current keyword."
+                    ),
                 }
                 break
 
@@ -952,7 +972,7 @@ def _remove_file_if_exists(path: str) -> bool:
         return False
 
 
-def _retry_search_submit_once(
+def _reset_and_retry_keyword_search_once(
     client: "MidsceneStdioClient",
     task: Dict[str, Any],
     capture_plan: Dict[str, Any],
@@ -969,29 +989,44 @@ def _retry_search_submit_once(
     interrupt_check: Optional[Callable[[], None]],
     keyword_deadline: float,
     timeout_seconds: float,
+    initial_diagnostics_key: str = "post_act_verification_initial",
+    preserve_label: str = "tile_00_initial_failed",
+    replace_existing_screenshots: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    if not _should_retry_search_submit(search_verification):
+    if not _should_reset_retry_search(search_verification):
         return None
+    preservation = _preserve_failed_verification_screenshot(search_verification, preserve_label)
+    initial_diagnostics = dict(search_verification.get("diagnostics") or {})
+    if preservation:
+        initial_diagnostics["failed_screenshot_preservation"] = preservation
+    diagnostics[initial_diagnostics_key] = initial_diagnostics
     result = _call_act(
         client,
-        _keyword_search_submit_prompt(keyword),
+        _keyword_search_reset_prompt(keyword),
         interrupt_check=interrupt_check,
         keyword_deadline=keyword_deadline,
         keyword=keyword,
         timeout_seconds=timeout_seconds,
     )
-    retry_diagnostics = _midscene_text_diagnostics(result, client=client)
-    _raise_if_rate_limited_diagnostics(retry_diagnostics, "keyword_search_submit_retry")
-    _raise_if_abnormal_act(result, default_context="keyword_search_submit_retry")
-    diagnostics["post_act_submit_retry"] = {
+    reset_diagnostics = _midscene_text_diagnostics(result, client=client)
+    _raise_if_rate_limited_diagnostics(reset_diagnostics, "keyword_search_reset_retry")
+    _raise_if_abnormal_act(result, default_context="keyword_search_reset_retry")
+    diagnostics["post_act_reset_retry"] = {
         "status": "attempted",
+        "trigger": {
+            "stop_reason": search_verification.get("stop_reason") or "",
+            "rough_state": search_verification.get("rough_state") or "",
+            "screenshot_keyword": (search_verification.get("diagnostics") or {}).get("screenshot_keyword") or {},
+            "failed_screenshot_preservation": preservation,
+        },
         "attempted": {
             "status": "attempted",
-            "steps": {"act": retry_diagnostics},
+            "steps": {"act": reset_diagnostics},
+            "failed_screenshot_preservation": preservation,
         },
-        "steps": {"act": retry_diagnostics},
+        "steps": {"act": reset_diagnostics},
     }
-    _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_search_submit_retry")
+    _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_search_reset_retry")
     retry_verification = _verify_keyword_after_act(
         client=client,
         task=task,
@@ -1005,10 +1040,18 @@ def _retry_search_submit_once(
         contract=contract,
     )
     if retry_verification.get("screenshot"):
-        if screenshots:
+        if replace_existing_screenshots:
+            screenshots[:] = [retry_verification["screenshot"]]
+        elif screenshots:
             screenshots[-1] = retry_verification["screenshot"]
         else:
             screenshots.append(retry_verification["screenshot"])
+        diagnostics["post_act_reset_retry"]["recovered"] = {
+            "status": "recovered" if retry_verification.get("ok") else "verification_failed",
+            "screenshot_path": retry_verification["screenshot"].get("path") or "",
+            "page_state": retry_verification.get("page_state") or {},
+            "stop_reason": retry_verification.get("stop_reason") or "",
+        }
         _refresh_capture_runtime(
             run_id,
             session_index,
@@ -1027,19 +1070,120 @@ def _retry_search_submit_once(
             rough_state=retry_verification["page_state"]["status"],
             image_path=retry_verification["screenshot"]["path"],
             image_retained=True,
-            notes=retry_verification["page_state"].get("reason") or "post_act_submit_retry_verification",
+            notes=retry_verification["page_state"].get("reason") or "post_act_reset_retry_verification",
         )
     return retry_verification
 
 
-def _should_retry_search_submit(search_verification: Dict[str, Any]) -> bool:
+def _preserve_failed_verification_screenshot(
+    verification: Dict[str, Any],
+    preserve_label: str,
+) -> Dict[str, Any]:
+    screenshot = verification.get("screenshot") or {}
+    source_path = str(
+        screenshot.get("path")
+        or (verification.get("diagnostics") or {}).get("verification_screenshot")
+        or ""
+    )
+    if not source_path:
+        return {"status": "missing_source_path", "source_path": "", "preserved_path": ""}
+    directory, filename = os.path.split(source_path)
+    base, ext = os.path.splitext(filename)
+    suffix = preserve_label.strip("_") or "initial_failed"
+    if base == suffix:
+        preserved_path = source_path
+    elif suffix.startswith(f"{base}_"):
+        preserved_path = os.path.join(directory, f"{suffix}{ext or '.png'}")
+    else:
+        preserved_path = os.path.join(directory, f"{base}_{suffix}{ext or '.png'}")
+    payload = {
+        "status": "not_preserved",
+        "source_path": source_path,
+        "preserved_path": preserved_path,
+    }
+    if not os.path.exists(source_path):
+        payload["reason"] = "source_missing"
+        return payload
+    try:
+        ensure_dir(os.path.dirname(preserved_path))
+        shutil.copy2(source_path, preserved_path)
+    except OSError as exc:
+        payload["reason"] = str(exc)
+        return payload
+    payload["status"] = "preserved"
+    return payload
+
+
+def _should_reset_retry_search(search_verification: Dict[str, Any]) -> bool:
     stop_reason = str(search_verification.get("stop_reason") or "")
     rough_state = str(search_verification.get("rough_state") or "")
     page_state = search_verification.get("page_state") or {}
     status = str(page_state.get("status") or rough_state or "")
-    if stop_reason in HARD_ABNORMAL_REASONS - {"manual_review_needed", "page_state_detection_failed"}:
+    hard_reset_blockers = HARD_ABNORMAL_REASONS - {
+        "manual_review_needed",
+        "page_state_detection_failed",
+        "visible_keyword_mismatch",
+        "visible_keyword_unverified",
+    }
+    if stop_reason in hard_reset_blockers or status in hard_reset_blockers:
         return False
-    return stop_reason in {"manual_review_needed", "search_submit_unconfirmed"} and status in {UNKNOWN, ""}
+    return stop_reason in {
+        "manual_review_needed",
+        "page_state_detection_failed",
+        "search_submit_unconfirmed",
+        "visible_keyword_mismatch",
+        "visible_keyword_unverified",
+    } or (
+        stop_reason in {"", "manual_review_needed"}
+        and status in {UNKNOWN, "keyword_mismatch", "keyword_unverified", ""}
+    )
+
+
+def _verify_results_end_keyword_boundary(
+    tile_path: str,
+    tile_id: str,
+    page_state: Dict[str, Any],
+    screenshot_payload: Dict[str, Any],
+    keyword: str,
+) -> Dict[str, Any]:
+    diagnostics: Dict[str, Any] = {
+        "expected_keyword": keyword,
+        "verification_screenshot": tile_path,
+        "tile_id": tile_id,
+        "page_state": page_state,
+    }
+    screenshot_keyword = verify_visible_keyword(tile_path, keyword, page_state=page_state).to_dict()
+    diagnostics["screenshot_keyword"] = screenshot_keyword
+    keyword_match = page_state.get("keyword_match")
+    explicit_match = keyword_match is True or (
+        screenshot_keyword.get("status") == "matched" and keyword_match is not False
+    )
+    if explicit_match:
+        return {
+            "ok": True,
+            "stop_reason": "",
+            "rough_state": "results_end",
+            "message": "Results-end keyword boundary verified.",
+            "screenshot": screenshot_payload,
+            "page_state": page_state,
+            "diagnostics": diagnostics,
+        }
+    visible_keyword = str(page_state.get("visible_search_keyword") or "").strip()
+    mismatch = screenshot_keyword.get("status") == "mismatch" or (keyword_match is False and bool(visible_keyword))
+    stop_reason = "visible_keyword_mismatch" if mismatch else "visible_keyword_unverified"
+    rough_state = "keyword_mismatch" if mismatch else "keyword_unverified"
+    return {
+        "ok": False,
+        "stop_reason": stop_reason,
+        "rough_state": rough_state,
+        "message": (
+            "Visible results_end reached the bottom of the current captured keyword, but the search "
+            "box keyword was not verified. This is diagnostic-only for the current keyword."
+        ),
+        "screenshot": screenshot_payload,
+        "page_state": page_state,
+        "diagnostics": diagnostics,
+    }
 
 
 def _sleep_between_keywords(
@@ -1413,6 +1557,18 @@ def _verify_keyword_after_act(
 
     screenshot_keyword = verify_visible_keyword(tile_path, keyword, page_state=page_state).to_dict()
     diagnostics["screenshot_keyword"] = screenshot_keyword
+    review_reason = _page_state_review_reason(page_state)
+    if review_reason:
+        diagnostics["reason"] = review_reason
+        return {
+            "ok": False,
+            "stop_reason": review_reason,
+            "rough_state": page_state.get("status") or UNKNOWN,
+            "message": f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
+            "screenshot": screenshot_payload,
+            "page_state": page_state,
+            "diagnostics": diagnostics,
+        }
     if screenshot_keyword["status"] == "mismatch":
         return {
             "ok": False,
@@ -1420,7 +1576,20 @@ def _verify_keyword_after_act(
             "rough_state": "keyword_mismatch",
             "message": (
                 "Visible screenshot search keyword mismatched the current keyword after Midscene act complete; "
-                "session stopped to avoid evidence pollution."
+                "a bounded reset/retry is required before trusting this keyword evidence."
+            ),
+            "screenshot": screenshot_payload,
+            "page_state": page_state,
+            "diagnostics": diagnostics,
+        }
+    if screenshot_keyword["status"] != "matched":
+        return {
+            "ok": False,
+            "stop_reason": "visible_keyword_unverified",
+            "rough_state": "keyword_unverified",
+            "message": (
+                "Visible screenshot did not confirm the current keyword after Midscene act complete; "
+                "a bounded reset/retry is required before trusting this keyword evidence."
             ),
             "screenshot": screenshot_payload,
             "page_state": page_state,
@@ -1428,48 +1597,11 @@ def _verify_keyword_after_act(
         }
 
     if "assert" not in set(tools or []):
-        if screenshot_keyword["status"] == "matched":
-            review_reason = _page_state_review_reason(page_state)
-            if not review_reason:
-                return {
-                    "ok": True,
-                    "stop_reason": "",
-                    "rough_state": page_state.get("status") or VISIBLE_READY,
-                    "message": "Post-act screenshot keyword and page state verified.",
-                    "screenshot": screenshot_payload,
-                    "page_state": page_state,
-                    "diagnostics": diagnostics,
-                }
-            diagnostics["keyword_match"] = "matched"
-            diagnostics["reason"] = review_reason
-            return {
-                "ok": False,
-                "stop_reason": review_reason,
-                "rough_state": page_state.get("status") or UNKNOWN,
-                "message": f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
-                "screenshot": screenshot_payload,
-                "page_state": page_state,
-                "diagnostics": diagnostics,
-            }
-        diagnostics["keyword_match"] = "unknown"
-        diagnostics["reason"] = "midscene_assert_tool_missing"
         return {
-            "ok": False,
-            "stop_reason": "manual_review_needed",
-            "rough_state": page_state.get("status") or UNKNOWN,
-            "message": "Post-act keyword verification unavailable: Midscene assert tool missing.",
-            "screenshot": screenshot_payload,
-            "page_state": page_state,
-            "diagnostics": diagnostics,
-        }
-
-    review_reason = _page_state_review_reason(page_state)
-    if review_reason:
-        return {
-            "ok": False,
-            "stop_reason": review_reason,
-            "rough_state": page_state.get("status") or UNKNOWN,
-            "message": f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
+            "ok": True,
+            "stop_reason": "",
+            "rough_state": page_state.get("status") or VISIBLE_READY,
+            "message": "Post-act screenshot keyword and page state verified.",
             "screenshot": screenshot_payload,
             "page_state": page_state,
             "diagnostics": diagnostics,
@@ -1556,6 +1688,8 @@ def _classify_screenshot_with_optional_probe(
             "metrics": {},
             "source": "midscene_assert_probe",
             "raw_text": probe["raw_text"],
+            "visible_search_keyword": probe.get("visible_search_keyword") or "",
+            "keyword_match": probe.get("keyword_match"),
         }
     if probe.get("fallback_reason") == "probe_rate_limited":
         return {
@@ -1624,7 +1758,8 @@ def _probe_midscene_page_state(
     prompt = (
         "Using only the current visible screenshot, classify the operational state of the Taobao page. "
         "Return only a compact JSON object like "
-        '{"state":"visible_results","confidence":0.82,"reason":"readable listings visible"}. '
+        '{"state":"visible_results","confidence":0.82,"reason":"readable listings visible",'
+        '"visible_search_keyword":"万智牌 示例","keyword_match":true}. '
         "The state must be exactly one of: captcha_required, login_required, risk_suspected, "
         "popup_blocked, white_skeleton, empty_result, results_end, visible_results, search_results, "
         "results_page, visible_ready, unknown. Treat login, captcha, security/risk warnings, "
@@ -1636,8 +1771,12 @@ def _probe_midscene_page_state(
         "rules/agreements/help links, copyright/ICP/license/filing text, partner/friend links, "
         "or a scrollbar at the bottom. A literal no-more-results label is not required when these "
         "footer/pagination/bottom-scrollbar signals are visible. "
-        f"For result states, the current keyword is {keyword!r}. Do not output product rows, prices, "
-        "shop names, item titles, business filtering, or price trust decisions."
+        f"For result states, the current keyword is {keyword!r}. Also read the visible Taobao search "
+        "box text when it is visible and put it in visible_search_keyword. If the search box is not "
+        "visible or not readable on an ordinary non-bottom results viewport, leave visible_search_keyword "
+        "empty and do not downgrade the results state for that reason. Set keyword_match true only when "
+        "the visible search keyword clearly equals the current keyword; otherwise false. "
+        "Do not output product rows, prices, shop names, item titles, business filtering, or price trust decisions."
     )
     try:
         result = client.call_tool(
@@ -1703,10 +1842,14 @@ def _probe_midscene_page_state(
                 "state": parsed,
                 "confidence": float(confidence),
                 "reason": parsed_payload.get("reason") or "midscene_page_state_probe",
+                "visible_search_keyword": parsed_payload.get("visible_search_keyword") or "",
+                "keyword_match": parsed_payload.get("keyword_match"),
                 "raw_text": text,
             },
             ensure_ascii=False,
         ),
+        "visible_search_keyword": parsed_payload.get("visible_search_keyword") or "",
+        "keyword_match": parsed_payload.get("keyword_match"),
         "checks": diagnostics,
     }
 
@@ -1823,7 +1966,38 @@ def _parse_page_state_probe_payload(text: str) -> Dict[str, Any]:
     reason = str(parsed.get("reason") or "").strip()
     if reason:
         payload["reason"] = reason
+    visible_keyword = str(
+        parsed.get("visible_search_keyword")
+        or parsed.get("observed_keyword")
+        or parsed.get("search_keyword")
+        or ""
+    ).strip()
+    if visible_keyword:
+        payload["visible_search_keyword"] = visible_keyword
+    if "keyword_match" in parsed:
+        parsed_keyword_match = _parse_optional_bool(parsed.get("keyword_match"))
+        if parsed_keyword_match is not None:
+            payload["keyword_match"] = parsed_keyword_match
     return payload
+
+
+def _parse_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
 
 
 def _normalize_page_state_probe_value(value: str, allow_alias_substrings: bool = True) -> str:
@@ -2395,18 +2569,25 @@ def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
     )
 
 
-def _keyword_search_submit_prompt(keyword: str) -> str:
+def _keyword_search_reset_prompt(keyword: str) -> str:
     return (
-        "You are continuing a bounded Taobao search act using only the current "
-        "visible screen and system mouse/keyboard actions. Do not read DOM, HTML, "
-        "network, cookies, storage, selector maps, page source, or JS evaluated "
-        "data. The intended keyword is "
-        f"{keyword!r}. If a Taobao results page for this keyword is already loading "
-        "or visible, leave the page alone. Otherwise, use the visible Taobao search "
-        "box and search button/Enter key to submit this exact keyword once, then "
-        "wait for visible results or a clear abnormal state. Do not scroll, do not "
-        "open product detail pages, do not output product rows, and do not change "
-        "account state."
+        "You are recovering a Taobao keyword boundary using only visible-screen "
+        "reasoning and system mouse/keyboard actions. Do not read DOM, HTML, "
+        "network, cookies, storage, selector maps, page source, JS evaluated data, "
+        "or clipboard contents. Do not use short action APIs such as Tap, Input, "
+        "KeyboardPress, Scroll, or ClearInput. Bring the existing Chrome window "
+        "with the dedicated Taobao profile to the foreground if Codex, Terminal, "
+        "Cursor, VS Code, or another app is visible. If login, captcha, security "
+        "verification, risk warning, unusual account state, or an automation "
+        "permission panel is visible, stop and report failure. Close only the "
+        "current Taobao results tab or otherwise leave the old results page, then "
+        "find an existing Taobao home tab if one is visible; if no Taobao home tab "
+        "is visible, open Taobao home in a normal browser tab. Use the fresh empty "
+        "visible Taobao home search box to search exactly this keyword: "
+        f"{keyword!r}. After the search box visibly contains exactly this keyword, "
+        "submit with Enter or the visible search button and wait until the first "
+        "visible results viewport settles. Do not open product detail pages, do "
+        "not scroll, do not output product rows, and do not change account state."
     )
 
 
@@ -2424,6 +2605,8 @@ def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> st
         "Bottom signals include a long pagination row, previous/next page buttons, page jump "
         "input, page count with current/total pages, footer columns, rules/agreements/help links, copyright/ICP/"
         "license/filing text, partner/friend links, or the scrollbar already at the bottom. "
+        "During ordinary non-bottom scrolling, do not stop just because the search box text is not readable; "
+        "keyword text confirmation belongs at results-end or keyword-boundary handling. "
         "Otherwise move to the next visible results "
         f"viewport for tile_{tile_index:02d}; use a normal page-level downward "
         f"scroll of about {scroll_distance} px if appropriate, then wait for "

@@ -42,10 +42,12 @@ The sync script also pre-approves the Midscene computer tools needed by the
 Taobao visual workflow in `~/.codex/config.toml` with
 `approval_mode = "approve"`. The generated `taobao_visual_cron` and
 `taobao_visual_extract` profiles use `approval_policy = "never"`. This keeps
-cron-launched sessions from pausing on
-every `Tap`, `Input`, `Scroll`, or screenshot action. The approval is scoped to
-the Midscene computer MCP action surface; it does not add DOM, HTML, network,
-cookie, storage, or CDP extraction tools.
+cron-launched sessions from pausing on the bounded act mainline: connect/list
+display, system screenshot, `act`, and coarse `assert`. Short action tools such
+as `Tap`, `Input`, `KeyboardPress`, `Scroll`, and `ClearInput` are not part of
+the unattended capture approval surface. The approval is scoped to the Midscene
+computer MCP action surface; it does not add DOM, HTML, network, cookie,
+storage, clipboard, or CDP extraction tools.
 
 For external VLM grounding, copy:
 

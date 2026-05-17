@@ -35,6 +35,10 @@ class FakeClient:
                 return {"content": [{"type": "text", "text": "ok"}]}
             return values
         if name == "act":
+            if isinstance(self.act_result, list):
+                if self.act_result:
+                    return self.act_result.pop(0)
+                return {"content": [{"type": "text", "text": "ok"}]}
             return self.act_result
         if name == "assert":
             if self.assert_results is not None:
@@ -110,6 +114,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
     def test_search_and_scroll_prompts_keep_search_submission_and_foreground_rules(self):
         search_prompt = worker._keyword_search_prompt("万智牌 中止", 560)
         scroll_prompt = worker._next_tile_prompt("万智牌 中止", 1, 560)
+        reset_prompt = worker._keyword_search_reset_prompt("万智牌 中止")
 
         self.assertIn("search exactly this keyword", search_prompt)
         self.assertIn("'万智牌 中止'", search_prompt)
@@ -127,7 +132,64 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("pagination row", scroll_prompt)
         self.assertIn("copyright/ICP", scroll_prompt)
         self.assertIn("page count with current/total pages", scroll_prompt)
+        self.assertIn("ordinary non-bottom scrolling", scroll_prompt)
+        self.assertIn("keyword-boundary handling", scroll_prompt)
         self.assertNotIn("1/100", scroll_prompt)
+        self.assertIn("recovering a Taobao keyword boundary", reset_prompt)
+        self.assertIn("Close only the current Taobao results tab", reset_prompt)
+        self.assertIn("fresh empty visible Taobao home search box", reset_prompt)
+        self.assertIn("'万智牌 中止'", reset_prompt)
+        self.assertIn("Do not read DOM, HTML, network", reset_prompt)
+        self.assertIn("or clipboard contents", reset_prompt)
+        self.assertIn("Do not use short action APIs", reset_prompt)
+        self.assertIn("Tap, Input, KeyboardPress, Scroll, or ClearInput", reset_prompt)
+
+    def test_search_reset_retry_predicate_is_boundary_only_and_excludes_hard_blocks(self):
+        self.assertTrue(
+            worker._should_reset_retry_search(
+                {
+                    "stop_reason": "visible_keyword_mismatch",
+                    "rough_state": "keyword_mismatch",
+                    "page_state": {"status": "visible_results"},
+                }
+            )
+        )
+        self.assertTrue(
+            worker._should_reset_retry_search(
+                {
+                    "stop_reason": "visible_keyword_unverified",
+                    "rough_state": "keyword_unverified",
+                    "page_state": {"status": "results_end"},
+                }
+            )
+        )
+        self.assertFalse(
+            worker._should_reset_retry_search(
+                {
+                    "stop_reason": "login_required",
+                    "rough_state": "login_required",
+                    "page_state": {"status": "login_required"},
+                }
+            )
+        )
+        self.assertFalse(
+            worker._should_reset_retry_search(
+                {
+                    "stop_reason": "manual_review_needed",
+                    "rough_state": "login_required",
+                    "page_state": {"status": "login_required"},
+                }
+            )
+        )
+        self.assertFalse(
+            worker._should_reset_retry_search(
+                {
+                    "stop_reason": "manual_review_needed",
+                    "rough_state": "rate_limited",
+                    "page_state": {"status": "rate_limited"},
+                }
+            )
+        )
 
     def test_page_state_probe_prompt_describes_taobao_bottom_signals(self):
         client = FakeClient(
@@ -158,7 +220,18 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("copyright/ICP", prompt)
         self.assertIn("literal no-more-results label is not required", prompt)
         self.assertIn("page count with current/total pages", prompt)
+        self.assertIn("visible_search_keyword", prompt)
+        self.assertIn("keyword_match", prompt)
+        self.assertIn("ordinary non-bottom results viewport", prompt)
+        self.assertIn("do not downgrade the results state", prompt)
         self.assertNotIn("1/100", prompt)
+
+    def test_page_state_probe_keyword_match_string_false_parses_false(self):
+        payload = worker._parse_page_state_probe_payload(
+            '{"state":"results_end","visible_search_keyword":"万智牌 闪电击","keyword_match":"false"}'
+        )
+
+        self.assertIs(payload["keyword_match"], False)
 
     def test_search_and_scroll_use_bounded_act(self):
         client = FakeClient({"content": [{"type": "text", "text": "focused search input"}]})
@@ -325,6 +398,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                         "status": "visible_ready",
                         "confidence": 0.72,
                         "reason": "test_visible_results",
+                        "visible_search_keyword": "万智牌 撼地灵",
                         "metrics": {},
                     },
                 ):
@@ -351,7 +425,139 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 ["act"],
             )
 
-    def test_keyword_capture_stops_when_screenshot_keyword_hint_mismatches_without_assert(self):
+    def test_keyword_capture_resets_once_when_visible_keyword_is_unverified_with_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 撼地灵",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+            }
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "<complete success=\"true\">done</complete>"}]},
+                    {"content": [{"type": "text", "text": "reset search completed"}]},
+                ],
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 撼地灵","keyword_match":true}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(result["stop_reason"], "captured")
+            self.assertEqual(payload["status"], "captured")
+            self.assertEqual(
+                payload["diagnostics"]["post_act_verification_initial"]["screenshot_keyword"]["status"],
+                "unknown",
+            )
+            reset_retry = payload["diagnostics"]["post_act_reset_retry"]
+            self.assertEqual(reset_retry["status"], "recovered")
+            self.assertEqual(reset_retry["trigger"]["stop_reason"], "visible_keyword_unverified")
+            preserved = reset_retry["trigger"]["failed_screenshot_preservation"]
+            self.assertEqual(preserved["status"], "preserved")
+            self.assertTrue(preserved["preserved_path"].endswith("tile_00_initial_failed.png"))
+            self.assertTrue(os.path.exists(preserved["preserved_path"]))
+            self.assertEqual(reset_retry["recovered"]["screenshot_path"], os.path.join(tmp, "evidence", "tile_00.png"))
+            self.assertIn("Close only the current Taobao results tab", client.calls[2]["arguments"]["prompt"])
+            self.assertEqual([call["name"] for call in client.calls], ["act", "assert", "act", "assert"])
+
+    def test_new_keyword_post_act_mismatch_resets_once_from_old_results_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-2",
+                "keyword_index": 2,
+                "keyword": "万智牌 撼地灵",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+            }
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "search completed but old results remain"}]},
+                    {"content": [{"type": "text", "text": "reset search completed"}]},
+                ],
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 闪电击","keyword_match":"false"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 撼地灵","keyword_match":true}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=2,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(payload["status"], "captured")
+            self.assertEqual(
+                payload["diagnostics"]["post_act_verification_initial"]["screenshot_keyword"]["status"],
+                "mismatch",
+            )
+            self.assertFalse(
+                payload["diagnostics"]["post_act_verification_initial"]["page_state"]["keyword_match"]
+            )
+            reset_retry = payload["diagnostics"]["post_act_reset_retry"]
+            self.assertEqual(reset_retry["status"], "recovered")
+            self.assertEqual(reset_retry["trigger"]["stop_reason"], "visible_keyword_mismatch")
+            preserved = reset_retry["trigger"]["failed_screenshot_preservation"]
+            self.assertEqual(preserved["status"], "preserved")
+            self.assertTrue(preserved["preserved_path"].endswith("tile_00_initial_failed.png"))
+            self.assertTrue(os.path.exists(preserved["preserved_path"]))
+            self.assertEqual([call["name"] for call in client.calls], ["act", "assert", "act", "assert"])
+
+    def test_keyword_capture_resets_once_when_screenshot_keyword_hint_mismatches_without_assert(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = {
                 "task_id": "task-1",
@@ -372,7 +578,12 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 "model_boundary": {"allow_midscene_act": True},
                 "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
             }
-            client = FakeClient({"content": [{"type": "text", "text": "search completed"}]})
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "search completed"}]},
+                    {"content": [{"type": "text", "text": "reset search completed"}]},
+                ]
+            )
 
             with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
                 mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
@@ -380,13 +591,22 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 mock.patch.object(
                     worker,
                     "_classify_screenshot",
-                    return_value={
-                        "status": "visible_ready",
-                        "confidence": 0.72,
-                        "reason": "test_visible_results",
-                        "visible_search_keyword": "万智牌 闪电击",
-                        "metrics": {},
-                    },
+                    side_effect=[
+                        {
+                            "status": "visible_ready",
+                            "confidence": 0.72,
+                            "reason": "test_visible_results",
+                            "visible_search_keyword": "万智牌 闪电击",
+                            "metrics": {},
+                        },
+                        {
+                            "status": "visible_ready",
+                            "confidence": 0.72,
+                            "reason": "reset_visible_results",
+                            "visible_search_keyword": "万智牌 撼地灵",
+                            "metrics": {},
+                        },
+                    ],
                 ):
                 result = worker._capture_keyword_with_mcp(
                     client=client,
@@ -400,16 +620,21 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 )
 
             payload = worker._read_json(task["result_path"])
-            self.assertEqual(result["status"], "needs_review")
-            self.assertEqual(result["stop_reason"], "visible_keyword_mismatch")
-            self.assertEqual(payload["rough_state"], "keyword_mismatch")
-            self.assertNotEqual(payload["status"], "captured")
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(result["stop_reason"], "captured")
+            self.assertEqual(payload["status"], "captured")
             self.assertEqual(
-                payload["diagnostics"]["post_act_verification"]["screenshot_keyword"]["observed_keyword"],
+                payload["diagnostics"]["post_act_verification_initial"]["screenshot_keyword"]["observed_keyword"],
                 "万智牌 闪电击",
             )
+            self.assertEqual(payload["diagnostics"]["post_act_reset_retry"]["trigger"]["stop_reason"], "visible_keyword_mismatch")
+            preserved = payload["diagnostics"]["post_act_reset_retry"]["trigger"]["failed_screenshot_preservation"]
+            self.assertEqual(preserved["status"], "preserved")
+            self.assertTrue(preserved["preserved_path"].endswith("tile_00_initial_failed.png"))
+            self.assertTrue(os.path.exists(preserved["preserved_path"]))
+            self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
 
-    def test_submit_retry_recovered_keeps_attempted_act_diagnostics(self):
+    def test_reset_retry_recovered_keeps_attempted_act_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = {
                 "task_id": "task-1",
@@ -430,7 +655,12 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 "model_boundary": {"allow_midscene_act": True},
                 "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
             }
-            client = FakeClient({"content": [{"type": "text", "text": "search completed"}]})
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "search completed"}]},
+                    {"content": [{"type": "text", "text": "reset search completed"}]},
+                ]
+            )
 
             with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
                 mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
@@ -466,15 +696,15 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 )
 
             payload = worker._read_json(task["result_path"])
-            submit_retry = payload["diagnostics"]["post_act_submit_retry"]
+            reset_retry = payload["diagnostics"]["post_act_reset_retry"]
             self.assertEqual(result["status"], "captured")
             self.assertEqual(payload["screenshots"][0]["page_state"]["status"], "visible_results")
-            self.assertEqual(submit_retry["status"], "recovered")
-            self.assertEqual(submit_retry["attempted"]["status"], "attempted")
-            self.assertEqual(submit_retry["recovered"]["status"], "recovered")
-            self.assertIn("act", submit_retry["attempted"]["steps"])
-            self.assertIn("act", submit_retry["steps"])
-            self.assertEqual(submit_retry["attempted"]["steps"]["act"], submit_retry["steps"]["act"])
+            self.assertEqual(reset_retry["status"], "recovered")
+            self.assertEqual(reset_retry["attempted"]["status"], "attempted")
+            self.assertEqual(reset_retry["recovered"]["status"], "recovered")
+            self.assertIn("act", reset_retry["attempted"]["steps"])
+            self.assertIn("act", reset_retry["steps"])
+            self.assertEqual(reset_retry["attempted"]["steps"]["act"], reset_retry["steps"]["act"])
             self.assertEqual(
                 [call["name"] for call in client.calls],
                 ["act", "act"],
@@ -565,7 +795,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             client = FakeClient(
                 {"content": [{"type": "text", "text": "search completed"}]},
                 assert_result=[
-                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
                     {"content": [{"type": "text", "text": "true"}]},
                 ],
             )
@@ -589,8 +819,217 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(result["status"], "captured")
             self.assertEqual(payload["screenshots"][0]["page_state"]["status"], "visible_results")
             self.assertEqual(payload["screenshots"][0]["page_state"]["source"], "midscene_assert_probe")
+            self.assertEqual(payload["screenshots"][0]["page_state"]["visible_search_keyword"], "万智牌 中止")
             self.assertEqual([call["name"] for call in client.calls], ["act", "assert"])
             heuristic.assert_not_called()
+
+    def test_non_bottom_scroll_tile_without_readable_search_keyword_keeps_capturing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 3,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "search completed"}]},
+                    {"content": [{"type": "text", "text": "scrolled to next results viewport"}]},
+                    {"content": [{"type": "text", "text": "scrolled to results end"}]},
+                ],
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","confidence":0.86,"reason":"normal middle results tile"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"results_end","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(len(payload["screenshots"]), 3)
+            self.assertEqual(payload["screenshots"][1]["page_state"]["status"], "visible_results")
+            self.assertEqual(payload["screenshots"][1]["page_state"]["visible_search_keyword"], "")
+            self.assertEqual(payload["diagnostics"]["capture_stop"]["reason"], "results_end")
+            self.assertEqual([call["name"] for call in client.calls], ["act", "assert", "act", "assert", "act", "assert"])
+
+    def test_results_end_keyword_mismatch_or_unreadable_stops_without_reset(self):
+        cases = [
+            (
+                "mismatch",
+                '{"state":"results_end","visible_search_keyword":"万智牌 闪电击","keyword_match":"false"}',
+                "visible_keyword_mismatch",
+                False,
+            ),
+            (
+                "unreadable",
+                '{"state":"results_end","confidence":0.9}',
+                "visible_keyword_unverified",
+                None,
+            ),
+        ]
+        for label, results_end_probe, stop_reason, keyword_match in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                task = {
+                    "task_id": "task-1",
+                    "keyword_index": 1,
+                    "keyword": "万智牌 中止",
+                    "evidence_dir": os.path.join(tmp, "evidence"),
+                    "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                    "capture_plan": {
+                        "max_tiles_per_keyword": 2,
+                        "tile_scroll_distance_px": 500,
+                        "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                    },
+                }
+                contract = {
+                    "run_id": "run",
+                    "session_index": 1,
+                    "task_dir": tmp,
+                    "model_boundary": {"allow_midscene_act": True},
+                    "page_sampling": {"allow_midscene_page_state_probe": True},
+                    "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+                }
+                client = FakeClient(
+                    [
+                        {"content": [{"type": "text", "text": "search completed"}]},
+                        {"content": [{"type": "text", "text": "scrolled to results end"}]},
+                    ],
+                    assert_result=[
+                        {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
+                        {"content": [{"type": "text", "text": results_end_probe}]},
+                    ],
+                )
+
+                with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                    mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                    mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                    result = worker._capture_keyword_with_mcp(
+                        client=client,
+                        task=task,
+                        contract=contract,
+                        run_id="run",
+                        session_index=1,
+                        task_dir=tmp,
+                        fallback_index=1,
+                        tools=["act", "take_screenshot", "assert"],
+                    )
+
+                payload = worker._read_json(task["result_path"])
+                boundary = payload["diagnostics"]["tile_01_results_end_boundary"]
+                self.assertEqual(result["status"], "captured")
+                self.assertEqual(payload["status"], "captured")
+                self.assertEqual(len(payload["screenshots"]), 2)
+                self.assertEqual(payload["screenshots"][1]["tile_id"], "tile_01")
+                self.assertEqual(payload["diagnostics"]["capture_stop"]["reason"], "results_end")
+                self.assertFalse(payload["diagnostics"]["capture_stop"]["keyword_boundary_ok"])
+                self.assertFalse(boundary["ok"])
+                self.assertEqual(boundary["stop_reason"], stop_reason)
+                self.assertEqual(boundary["page_state"].get("keyword_match"), keyword_match)
+                self.assertNotIn("post_act_reset_retry", payload["diagnostics"])
+                self.assertFalse(os.path.exists(os.path.join(tmp, "evidence", "tile_01_results_end_failed.png")))
+                self.assertEqual([call["name"] for call in client.calls], ["act", "assert", "act", "assert"])
+
+    def test_post_act_unknown_keyword_verification_resets_once_then_needs_review(self):
+        for page_state in ("visible_results", "results_end"):
+            with self.subTest(page_state=page_state), tempfile.TemporaryDirectory() as tmp:
+                task = {
+                    "task_id": "task-1",
+                    "keyword_index": 1,
+                    "keyword": "万智牌 中止",
+                    "evidence_dir": os.path.join(tmp, "evidence"),
+                    "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                    "capture_plan": {
+                        "max_tiles_per_keyword": 1,
+                        "tile_scroll_distance_px": 500,
+                        "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                    },
+                }
+                contract = {
+                    "run_id": "run",
+                    "session_index": 1,
+                    "task_dir": tmp,
+                    "model_boundary": {"allow_midscene_act": True},
+                    "page_sampling": {"allow_midscene_page_state_probe": True},
+                    "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+                }
+                client = FakeClient(
+                    {"content": [{"type": "text", "text": "search completed"}]},
+                    assert_result={
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f'{{"state":"{page_state}","confidence":0.9}}',
+                            }
+                        ]
+                    },
+                )
+                unknown_keyword = mock.Mock()
+                unknown_keyword.to_dict.return_value = {
+                    "status": "unknown",
+                    "expected_keyword": "万智牌 中止",
+                    "observed_keyword": "",
+                    "confidence": 0.0,
+                    "reason": "ocr_unavailable",
+                    "source": "test",
+                }
+
+                with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                    mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                    mock.patch.object(worker, "_sleep_micro_pause", return_value=None), \
+                    mock.patch.object(worker, "verify_visible_keyword", return_value=unknown_keyword):
+                    result = worker._capture_keyword_with_mcp(
+                        client=client,
+                        task=task,
+                        contract=contract,
+                        run_id="run",
+                        session_index=1,
+                        task_dir=tmp,
+                        fallback_index=1,
+                        tools=["act", "take_screenshot", "assert"],
+                    )
+
+                payload = worker._read_json(task["result_path"])
+                self.assertEqual(result["status"], "needs_review")
+                self.assertEqual(result["stop_reason"], "visible_keyword_unverified")
+                self.assertNotEqual(payload["status"], "captured")
+                self.assertEqual(
+                    payload["diagnostics"]["post_act_verification"]["screenshot_keyword"]["status"],
+                    "unknown",
+                )
+                self.assertEqual(
+                    payload["diagnostics"]["post_act_verification_initial"]["screenshot_keyword"]["status"],
+                    "unknown",
+                )
+                self.assertEqual(payload["diagnostics"]["post_act_reset_retry"]["status"], "attempted")
+                self.assertEqual([call["name"] for call in client.calls], ["act", "assert", "act", "assert"])
 
     def test_page_state_probe_captcha_stops_for_review(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -724,8 +1163,8 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             client = FakeClient(
                 {"content": [{"type": "text", "text": "search completed"}]},
                 assert_result=[
-                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
-                    {"content": [{"type": "text", "text": '{"state":"search_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"search_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
                     {"content": [{"type": "text", "text": '{"state":"unknown"}'}]},
                 ],
             )
@@ -752,6 +1191,56 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 payload["diagnostics"]["partial_capture_stop"]["reason"],
                 "later_tile_unknown_after_capturable_tiles",
             )
+
+    def test_scroll_tiles_do_not_require_visible_search_keyword_when_results_continue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-1",
+                "keyword_index": 1,
+                "keyword": "万智牌 中止",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 2,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "page_sampling": {"allow_midscene_page_state_probe": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            client = FakeClient(
+                {"content": [{"type": "text", "text": "search completed"}]},
+                assert_result=[
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","confidence":0.82}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=1,
+                    tools=["act", "take_screenshot", "assert"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(payload["screenshots"][1]["page_state"]["status"], "visible_results")
+            self.assertEqual(payload["screenshots"][1]["page_state"]["visible_search_keyword"], "")
+            self.assertNotIn("post_act_reset_retry", payload["diagnostics"])
 
     def test_highly_similar_adjacent_tile_stops_and_removes_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -787,8 +1276,8 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             client = ImageClient(
                 {"content": [{"type": "text", "text": "search completed"}]},
                 assert_result=[
-                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
-                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
                 ],
             )
 
@@ -870,7 +1359,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             client = FakeClient(
                 {"content": [{"type": "text", "text": "search completed"}]},
                 assert_result=[
-                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
                     {"content": [{"type": "text", "text": "true"}]},
                 ],
             )
@@ -930,7 +1419,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             client = FakeClient(
                 {"content": [{"type": "text", "text": "focused search input"}]},
                 assert_result=[
-                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
                 ],
             )
             act_results = [
@@ -993,7 +1482,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             client = FakeClient(
                 {"content": [{"type": "text", "text": "search completed"}]},
                 assert_result=[
-                    {"content": [{"type": "text", "text": '{"state":"visible_results"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 中止","keyword_match":true}'}]},
                     {"content": [{"type": "text", "text": "true"}]},
                 ],
             )
