@@ -214,7 +214,12 @@ class ConfigManager:
             'page_load_wait': '8',
             'session_keyword_limit': '3',
             'keyword_timeout_seconds': '180',
+            'mcp_request_timeout_seconds': '180',
             'consecutive_abnormal_stop': '2',
+            'foreground_recovery_enabled': 'true',
+            'foreground_recovery_attempts_per_event': '3',
+            'foreground_recovery_events_per_keyword': '2',
+            'allow_bookmark_home_entry_repair': 'true',
             'min_rows_per_keyword': '5',
             'screenshot_prefixes': 'initial,results,scroll_1',
         }
@@ -247,6 +252,21 @@ class ConfigManager:
             'session_due_times': '',
             'session_due_interval_minutes': '0',
             'capture_worker_stale_after_minutes': '240',
+        }
+
+        config['CODEX_EXTRACT'] = {
+            'codex_bin': '',
+            'profile': 'taobao_visual_extract',
+            'model': 'gpt-5.5',
+            'sandbox': 'danger-full-access',
+            'approval_policy': 'never',
+            'ignore_rules': 'true',
+            'json_events': 'true',
+            'ephemeral': 'true',
+            'max_parallel': '1',
+            'advice_enabled': 'false',
+            'drain_poll_seconds': '20',
+            'drain_idle_timeout_seconds': '900',
         }
 
         config['CAPTURE_WATCHDOG'] = {

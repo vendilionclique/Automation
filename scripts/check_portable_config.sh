@@ -14,10 +14,10 @@ if git grep -n -E '[A-Za-z]:\\Users\\[^\\[:space:]]+' -- ':!scripts/check_portab
   exit 1
 fi
 
-echo "Checking Midscene GLM-4.6V-FlashX env example..."
-grep -q 'MIDSCENE_MODEL_NAME="glm-4.6v-flashx"' local/midscene-computer.env.example
+echo "Checking Midscene GLM-5V-Turbo env example..."
+grep -q 'MIDSCENE_MODEL_NAME="glm-5v-turbo"' local/midscene-computer.env.example
 grep -q 'MIDSCENE_MODEL_API_KEY=""' local/midscene-computer.env.example
-grep -q 'MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"' local/midscene-computer.env.example
+grep -q 'MIDSCENE_MODEL_BASE_URL="https://api.z.ai/api/paas/v4"' local/midscene-computer.env.example
 grep -q 'MIDSCENE_MODEL_FAMILY="glm-v"' local/midscene-computer.env.example
 grep -q 'MIDSCENE_MODEL_REASONING_ENABLED="false"' local/midscene-computer.env.example
 grep -q 'MIDSCENE_MODEL_TEMPERATURE="0"' local/midscene-computer.env.example

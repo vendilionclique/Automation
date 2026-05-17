@@ -71,6 +71,10 @@ class MidsceneComputerConfig:
     cart_or_favorites_peek_probability: float = 0.03
     allow_cart_or_favorites_peek: bool = True
     allow_claim_rewards: bool = False
+    foreground_recovery_enabled: bool = True
+    foreground_recovery_attempts_per_event: int = 3
+    foreground_recovery_events_per_keyword: int = 2
+    allow_bookmark_home_entry_repair: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -134,6 +138,20 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
         allow_claim_rewards=config.getboolean(
             behavior_section, "allow_claim_rewards", fallback=False
         ),
+        foreground_recovery_enabled=config.getboolean(
+            section, "foreground_recovery_enabled", fallback=True
+        ),
+        foreground_recovery_attempts_per_event=max(
+            1,
+            config.getint(section, "foreground_recovery_attempts_per_event", fallback=3),
+        ),
+        foreground_recovery_events_per_keyword=max(
+            0,
+            config.getint(section, "foreground_recovery_events_per_keyword", fallback=2),
+        ),
+        allow_bookmark_home_entry_repair=config.getboolean(
+            section, "allow_bookmark_home_entry_repair", fallback=True
+        ),
     )
 
 
@@ -173,8 +191,13 @@ def write_midscene_session_worker_contract(
         primary_screenshot_path = screenshot_path_for(evidence_dir, keyword)
         abnormal_screenshot_path = os.path.join(evidence_dir, "abnormal_state.png")
         capture_plan = {
-            "start_url": TAOBAO_HOME,
-            "entry_mode": "taobao_home_visible_search_box",
+            "reference_url": TAOBAO_HOME,
+            "entry_context": "taobao_homepage_visible_search_entry_required",
+            "navigation_instruction": (
+                "visual_homepage_entry_only_no_address_bar_url_or_script"
+                if config.allow_bookmark_home_entry_repair
+                else "visual_homepage_entry_only_no_address_bar_url_new_tab_or_script"
+            ),
             "max_tiles_per_keyword": sampling_config.max_tiles_per_keyword,
             "target_listings_per_keyword": sampling_config.target_listings_per_keyword,
             "tile_scroll_distance_px": calibration["tile_scroll_distance_px"],
@@ -211,7 +234,13 @@ def write_midscene_session_worker_contract(
         "task_dir": task_dir,
         "session_dir": session_dir,
         "manual_state": manual_state or "",
-        "start_url": TAOBAO_HOME,
+        "reference_url": TAOBAO_HOME,
+        "entry_context": "taobao_homepage_visible_search_entry_required",
+        "navigation_instruction": (
+            "visual_homepage_entry_only_no_address_bar_url_or_script"
+            if config.allow_bookmark_home_entry_repair
+            else "visual_homepage_entry_only_no_address_bar_url_new_tab_or_script"
+        ),
         "worker_role": "visual_capture_worker",
         "session_result_path": result_path,
         "instructions_path": instructions_path,
@@ -246,13 +275,35 @@ def write_midscene_session_worker_contract(
             "stop_after_consecutive_abnormal": config.consecutive_abnormal_stop,
             "timeout_per_keyword_seconds": config.keyword_timeout_seconds,
             "mcp_request_timeout_seconds": config.mcp_request_timeout_seconds,
+            "foreground_recovery_enabled": config.foreground_recovery_enabled,
+            "foreground_recovery_attempts_per_event": config.foreground_recovery_attempts_per_event,
+            "foreground_recovery_events_per_keyword": config.foreground_recovery_events_per_keyword,
+            "allow_bookmark_home_entry_repair": config.allow_bookmark_home_entry_repair,
             "retain_abnormal_screenshots": True,
         },
         "action_boundary": {
             "autonomy": "small_session_only",
             "input": "system screenshots only",
             "actions": ["coordinate click", "keyboard input", "keyboard shortcut", "page-level scroll"],
-            "allowed_act_scope": "complete bounded keyword capture tasks in this session only",
+            "allowed_act_scope": "bounded visual act through visible Taobao homepage entry only",
+            "forbidden_live_tools": ["Tap", "Input", "KeyboardPress", "Scroll", "ClearInput"],
+            "forbidden_navigation": [
+                "browser address bar",
+                "typed URL",
+                "scripted force activation",
+            ]
+            + ([] if config.allow_bookmark_home_entry_repair else ["new browser tab"]),
+            "limited_navigation_repair": (
+                "visible new tab plus visible Taobao bookmark only; close obsolete tabs only when more than one Chrome tab remains"
+                if config.allow_bookmark_home_entry_repair
+                else ""
+            ),
+            "new_tab_policy": (
+                "bookmark_home_entry_repair_only"
+                if config.allow_bookmark_home_entry_repair
+                else "forbidden"
+            ),
+            "tab_safety": "never close the final remaining Chrome tab",
             "forbidden_strategy_scope": "no daily planning, no cross-session routing, no final exception strategy",
             "product_rows_source": "Codex-reviewed visible screenshots only",
         },
@@ -343,22 +394,53 @@ Communication rule:
   user in Chinese by default. Keep machine-readable JSON keys and status values
   exactly as specified below.
 
-Chrome foreground rule:
-- If the current screenshot shows Codex, Cursor, Terminal, or another app, do
-  not classify that as Taobao/Chrome failure. It usually only means Chrome is
-  not foreground.
-- First try to bring Chrome forward visually: taskbar/Dock click, Alt-Tab on
-  Windows, or Cmd-Tab on macOS. A human clicking Codex to check progress is not
-  Chrome instability.
-- If Chrome is not visible after visual switching, run the platform launcher
-  from the repository root. It reuses any already running logged-in Chrome
-  window and must not start a duplicate collection window/profile merely
-  because Codex was foreground:
-  - Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\start_taobao_visual_chrome.ps1`
-  - macOS: `bash scripts/start_taobao_visual_chrome.sh`
-- After the launcher, take a fresh system screenshot and continue from the
-  visible Chrome page. Only stop with `chrome_start_failed` if Chrome still
-  cannot be foregrounded.
+Chrome foreground recovery rule:
+- If the current screenshot shows Codex, Cursor, Terminal, WPS, or any other
+  non-Chrome app, report `chrome_not_foreground`, then use only bounded visual
+  foreground recovery before continuing.
+- Recovery may click an already visible Chrome window, Dock icon, or taskbar
+  icon, and may use OS-level app-switching shortcuts. Recovery must not type
+  into any non-Chrome app.
+- Recovery must not run launchers, force-activate Chrome through scripts, type
+  into the browser address bar, type a URL, open a new browser tab, navigate to
+  Taobao home, or search/research the keyword.
+- Per keyword, foreground recovery is limited to
+  {payload["hard_stop_policy"].get("foreground_recovery_attempts_per_event", 3)}
+  attempts per event and
+  {payload["hard_stop_policy"].get("foreground_recovery_events_per_keyword", 2)}
+  events total. After recovery, take a fresh screenshot and re-verify the
+  current step before continuing.
+
+Per-keyword homepage entry rule:
+- Each keyword must start from the visible Taobao homepage or a normal visible
+  Taobao homepage entry. Do not reuse a results-page search field or any old
+  keyword page as the starting point for the new keyword.
+- You may use one bounded visual `act` to return through a visible Taobao home
+  entry such as the Taobao logo/home control or an already visible homepage
+  search entrance, then search the current keyword from the homepage search
+  box. This must be visual and low-frequency.
+- If `allow_bookmark_home_entry_repair` is true in the contract and the current
+  page is an old results page or bottom-of-results page, one bounded repair may
+  click the visible browser new tab plus button, then click the visible Taobao
+  bookmark button on the bookmarks bar to reach Taobao home. This is the only
+  allowed new-tab repair path; if the Taobao bookmark is not visibly available,
+  stop and report failure.
+- After a bookmark repair succeeds, obsolete old-results tabs may be closed only
+  if the tab strip visibly shows more than one Chrome tab remains. Never close
+  the final remaining Chrome tab; if tab count is unclear, leave the tab open.
+- Do not use the browser address bar, do not type or paste a URL, do not run
+  AppleScript/shell/scripted force-activation helpers, and do not use
+  short-action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`, or
+  `ClearInput` for unattended capture. Use bounded visual `act` only for the
+  homepage entry/search step.
+- After submitting the homepage search, save and classify `tile_00` as the hard
+  acceptance boundary. `tile_00` must prove a visible Taobao results page for
+  the current keyword before any scrolling or later tile capture. If `tile_00`
+  shows an old keyword, unreadable keyword boundary, login, captcha, risk,
+  white skeleton, blocking popup, or unknown state, stop or retry only through
+  the same bounded visual homepage-entry rule according to the capture worker's
+  hard-stop policy. Never treat a reset homepage first viewport as a captured
+  keyword result.
 
 Keywords:
 {keywords or "- none"}
@@ -366,9 +448,10 @@ Keywords:
 Allowed autonomy:
 - You may use bounded `act` or equivalent continuous visual actions to complete
   this small session.
-- For each keyword, search Taobao through the visible foreground Chrome window,
-  wait for visible content to settle, classify only the coarse operational state,
-  save viewport tile screenshots, and write keyword_result.json.
+- For each keyword, first return through the visible Taobao homepage entry,
+  search from the homepage search box, wait for visible content to settle,
+  classify `tile_00` as the current-keyword hard acceptance boundary, then save
+  later viewport tile screenshots only after that boundary passes.
 - Continue to the next keyword only after the previous keyword result and tile
   summaries are written.
 
@@ -381,8 +464,8 @@ State boundary:
   {payload["hard_stop_policy"]["timeout_per_keyword_seconds"]} seconds.
 - If a hard stop occurs, retain the abnormal screenshot, write
   session_worker_result.json with status `needs_review`, and stop the session.
-  Do not use `unknown` merely because Codex was foreground before switching to
-  Chrome.
+  Do not use foreground recovery to mask login, captcha, security/risk, unusual
+  account state, white skeleton, blocking popup, or permission-panel states.
 
 Data boundary:
 - Use system screenshots only. Do not read DOM, HTML, AX tree, selector maps,

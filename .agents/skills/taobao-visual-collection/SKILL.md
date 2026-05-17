@@ -49,12 +49,11 @@ Use this skill for project-specific Taobao collection work in this repository. I
   coordinate click, keyboard input, and scroll actions; locating the Taobao
   search box, confirming result pages, recognizing abnormal states, and deciding
   visible-screen progress all require a reliable VLM.
-- `glm-4.6v-flashx` is the tracked paid high-speed GLM mainline for Midscene
-  grounding. Use `MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`,
+- `glm-5v-turbo` is the tracked GLM mainline for Midscene grounding. Use
+  `MIDSCENE_MODEL_BASE_URL=https://api.z.ai/api/paas/v4`,
   `MIDSCENE_MODEL_FAMILY=glm-v`, `MIDSCENE_MODEL_REASONING_ENABLED=false`, and
-  `MIDSCENE_MODEL_TEMPERATURE=0`. Kimi/Moonshot has been abandoned for this
-  workflow and is not the mainline. GLM-5V-Turbo is reserved only for later A/B
-  evaluation.
+  `MIDSCENE_MODEL_TEMPERATURE=0`. Keep thinking/reasoning disabled by default
+  because this workflow needs low-latency visual grounding.
 - Do not make a long-lived Codex chat session the real-time visual controller.
   Codex remains the supervisor/control-plane and the short-lived screenshot
   extract worker. It may judge low-frequency abnormal states, but it should not

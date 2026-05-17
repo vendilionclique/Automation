@@ -36,6 +36,17 @@ from modules.visual_control import (
     write_worker_runtime,
 )
 
+try:
+    from modules.visual_goal_contract import (
+        build_evidence_check as build_goal_evidence_check,
+        build_goal_contract,
+        decide_capture_gate,
+    )
+except ImportError:  # pragma: no cover - paired worker may add this module later.
+    build_goal_contract = None
+    build_goal_evidence_check = None
+    decide_capture_gate = None
+
 
 MCP_REQUIRED_TOOLS = {
     "computer_connect",
@@ -53,6 +64,9 @@ CAPTURABLE_PAGE_STATES = {
     "search_results",
     "visible_results",
 }
+ASSERTION_KEYWORD_BOUNDARY_STATES = CAPTURABLE_PAGE_STATES - {EMPTY_RESULT}
+FOREGROUND_RECOVERY_STOP_REASON = "foreground_recovery_exhausted"
+FOREGROUND_NOT_READY_REASON = "chrome_not_foreground"
 HARD_ABNORMAL_REASONS = {
     "login_required",
     "captcha_required",
@@ -386,6 +400,29 @@ def _capture_keyword_with_mcp(
     fallback_index: int,
     tools: List[str],
 ) -> Dict[str, Any]:
+    return _capture_keyword_from_home_with_mcp(
+        client=client,
+        task=task,
+        contract=contract,
+        run_id=run_id,
+        session_index=session_index,
+        task_dir=task_dir,
+        fallback_index=fallback_index,
+        tools=tools,
+    )
+
+
+def _capture_keyword_from_home_with_mcp(
+    client: "MidsceneStdioClient",
+    task: Dict[str, Any],
+    contract: Dict[str, Any],
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+    fallback_index: int,
+    tools: List[str],
+) -> Dict[str, Any]:
+    """Capture one keyword from an existing Taobao home/search-entry boundary."""
     keyword = str(task.get("keyword") or "")
     keyword_index = int(task.get("keyword_index") or task.get("index") or fallback_index)
     capture_plan = task.get("capture_plan") or {}
@@ -396,6 +433,16 @@ def _capture_keyword_with_mcp(
     started = time.monotonic()
     screenshots: List[Dict[str, Any]] = []
     diagnostics: Dict[str, Any] = {}
+    foreground_recovery: Dict[str, Any] = {"events_used": 0}
+    goal_contract = _write_goal_contract_artifact(
+        evidence_dir=evidence_dir,
+        task=task,
+        contract=contract,
+        keyword=keyword,
+        keyword_index=keyword_index,
+        capture_plan=capture_plan,
+        diagnostics=diagnostics,
+    )
     max_tiles = int(capture_plan.get("max_tiles_per_keyword") or 1)
     max_tiles = max(1, max_tiles)
     scroll_distance = int(capture_plan.get("tile_scroll_distance_px") or 0)
@@ -414,15 +461,43 @@ def _capture_keyword_with_mcp(
         _raise_if_keyword_timeout(started, timeout_seconds, keyword)
         if not allow_act:
             raise RuntimeError("midscene_act_disabled_for_real_capture")
+        foreground_record = _run_initial_foreground_recovery(
+            client=client,
+            contract=contract,
+            capture_plan=capture_plan,
+            tools=tools,
+            keyword=keyword,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=mcp_timeout_seconds,
+        )
+        diagnostics["initial_foreground_recovery"] = foreground_record
         search_diagnostics = _perform_keyword_search(
             client=client,
+            contract=contract,
             keyword=keyword,
             scroll_distance=scroll_distance,
+            capture_plan=capture_plan,
+            tools=tools,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
             interrupt_check=interrupt_check,
             keyword_deadline=keyword_deadline,
             timeout_seconds=mcp_timeout_seconds,
         )
         _merge_diagnostics_in_place(diagnostics, {"keyword_search": search_diagnostics})
+        _record_action_trace(
+            evidence_dir=evidence_dir,
+            keyword=keyword,
+            action="keyword_search",
+            tile_id="tile_00",
+            payload=search_diagnostics,
+            diagnostics=diagnostics,
+        )
         for step_name, step_diagnostics in search_diagnostics.get("steps", {}).items():
             _raise_if_rate_limited_diagnostics(step_diagnostics, f"keyword_search:{step_name}")
         _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_keyword_search_act")
@@ -447,7 +522,25 @@ def _capture_keyword_with_mcp(
             keyword_deadline=keyword_deadline,
             mcp_timeout_seconds=mcp_timeout_seconds,
             contract=contract,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
         )
+        search_observation = _observation_from_search_verification(
+            keyword=keyword,
+            stage="post_act_verification",
+            verification=search_verification,
+            action_payload=search_diagnostics,
+        )
+        search_decision = _record_observation_artifacts(
+            evidence_dir=evidence_dir,
+            keyword=keyword,
+            observation=search_observation,
+            goal_state="BOUNDARY_VERIFY",
+            goal_contract=goal_contract,
+            diagnostics=diagnostics,
+            boundary=True,
+        )
+        search_verification.setdefault("diagnostics", {})["capture_decision"] = search_decision
         if search_verification["screenshot"]:
             screenshots.append(search_verification["screenshot"])
             _refresh_capture_runtime(
@@ -488,6 +581,9 @@ def _capture_keyword_with_mcp(
                 interrupt_check=interrupt_check,
                 keyword_deadline=keyword_deadline,
                 timeout_seconds=mcp_timeout_seconds,
+                foreground_recovery=foreground_recovery,
+                goal_contract=goal_contract,
+                gate_decision=search_decision,
             )
             if retry_verification:
                 search_verification = retry_verification
@@ -495,6 +591,23 @@ def _capture_keyword_with_mcp(
                     screenshots[-1] = search_verification["screenshot"]
                 else:
                     screenshots.append(search_verification["screenshot"])
+                retry_observation = _observation_from_search_verification(
+                    keyword=keyword,
+                    stage="post_act_home_entry_retry_verification",
+                    verification=search_verification,
+                    action_payload=(diagnostics.get("post_act_reset_retry") or {}).get("steps", {}).get("act") or {},
+                )
+                retry_decision = _record_observation_artifacts(
+                    evidence_dir=evidence_dir,
+                    keyword=keyword,
+                    observation=retry_observation,
+                    goal_state="BOUNDARY_VERIFY",
+                    goal_contract=goal_contract,
+                    diagnostics=diagnostics,
+                    boundary=True,
+                    repair_attempted=True,
+                )
+                search_verification.setdefault("diagnostics", {})["capture_decision"] = retry_decision
             if search_verification["ok"]:
                 _merge_diagnostics_in_place(
                     diagnostics,
@@ -504,12 +617,12 @@ def _capture_keyword_with_mcp(
                             "recovered": {
                                 "status": "recovered",
                                 "message": (
-                                    "A single bounded reset/retry opened a fresh Taobao search "
+                                    "A single bounded home-entry retry opened a fresh Taobao search "
                                     "and produced a verified capturable state."
                                 ),
                             },
                             "message": (
-                                "A single bounded reset/retry opened a fresh Taobao search "
+                                "A single bounded home-entry retry opened a fresh Taobao search "
                                 "and produced a verified capturable state."
                             ),
                         }
@@ -529,9 +642,15 @@ def _capture_keyword_with_mcp(
             _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"before_scroll_{tile_index}")
             scroll_result = _perform_page_scroll(
                 client=client,
+                contract=contract,
                 keyword=keyword,
                 tile_index=tile_index,
                 scroll_distance=scroll_distance,
+                capture_plan=capture_plan,
+                tools=tools,
+                diagnostics=diagnostics,
+                foreground_recovery=foreground_recovery,
+                evidence_dir=evidence_dir,
                 interrupt_check=interrupt_check,
                 keyword_deadline=keyword_deadline,
                 timeout_seconds=mcp_timeout_seconds,
@@ -540,6 +659,14 @@ def _capture_keyword_with_mcp(
                 diagnostics,
                 {f"scroll_tile_{tile_index}": scroll_result},
             )
+            _record_action_trace(
+                evidence_dir=evidence_dir,
+                keyword=keyword,
+                action=f"scroll_tile_{tile_index}",
+                tile_id=f"tile_{tile_index:02d}",
+                payload=scroll_result,
+                diagnostics=diagnostics,
+            )
             _raise_if_rate_limited_diagnostics(
                 diagnostics.get(f"scroll_tile_{tile_index}"),
                 f"scroll_tile_{tile_index}",
@@ -547,13 +674,7 @@ def _capture_keyword_with_mcp(
             _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, f"after_scroll_act_{tile_index}")
             tile_id = f"tile_{tile_index:02d}"
             tile_path = _tile_path(capture_plan, evidence_dir, tile_index)
-            screenshot = client.capture_screenshot(
-                tile_path,
-                interrupt_check=interrupt_check,
-                keyword_deadline=keyword_deadline,
-                keyword=keyword,
-            )
-            page_state = _classify_screenshot_with_optional_probe(
+            screenshot, page_state = _capture_and_classify_with_foreground_recovery(
                 client=client,
                 path=tile_path,
                 contract=contract,
@@ -561,6 +682,10 @@ def _capture_keyword_with_mcp(
                 tools=tools,
                 tile_id=tile_id,
                 keyword=keyword,
+                evidence_dir=evidence_dir,
+                stage=f"tile_{tile_index:02d}_verification",
+                diagnostics=diagnostics,
+                foreground_recovery=foreground_recovery,
                 interrupt_check=interrupt_check,
                 keyword_deadline=keyword_deadline,
                 timeout_seconds=mcp_timeout_seconds,
@@ -574,6 +699,25 @@ def _capture_keyword_with_mcp(
                     "page_state": page_state,
                 }
             )
+            tile_observation = _observation_from_tile_classification(
+                keyword=keyword,
+                stage=f"tile_{tile_index:02d}_verification",
+                tile_id=tile_id,
+                tile_path=tile_path,
+                screenshot=screenshot,
+                page_state=page_state,
+                action_payload=scroll_result,
+            )
+            tile_decision = _record_observation_artifacts(
+                evidence_dir=evidence_dir,
+                keyword=keyword,
+                observation=tile_observation,
+                goal_state="CAPTURING",
+                goal_contract=goal_contract,
+                diagnostics=diagnostics,
+                boundary=page_state.get("status") == "results_end",
+            )
+            diagnostics[f"{tile_id}_capture_decision"] = tile_decision
             _refresh_capture_runtime(
                 run_id,
                 session_index,
@@ -788,14 +932,27 @@ def _capture_keyword_with_mcp(
             diagnostics=_merge_diagnostics(diagnostics, _midscene_exception_diagnostics(exc)),
         )
     except MidsceneActionAbnormal as exc:
-        if exc.reason == "midscene_mcp_action_failed" and _has_capturable_screenshot(screenshots):
+        if (
+            exc.reason in {"midscene_mcp_action_failed", FOREGROUND_RECOVERY_STOP_REASON}
+            and _has_capturable_screenshot(screenshots)
+        ):
+            partial_reason = (
+                "foreground_recovery_exhausted_after_capturable_tiles"
+                if exc.reason == FOREGROUND_RECOVERY_STOP_REASON
+                else "mcp_action_failed_after_capturable_tiles"
+            )
             diagnostics["partial_capture_stop"] = {
-                "reason": "mcp_action_failed_after_capturable_tiles",
+                "reason": partial_reason,
                 "message": (
-                    "A later Midscene action failed after result-page evidence had already been captured."
+                    "A later Midscene action could not continue after result-page evidence had already been captured."
                 ),
             }
             elapsed = round(time.monotonic() - started, 3)
+            stop_reason = (
+                "captured_partial_foreground_recovery_exhausted"
+                if exc.reason == FOREGROUND_RECOVERY_STOP_REASON
+                else "captured_partial_mcp_action_failed"
+            )
             return _write_keyword_result(
                 task=task,
                 run_id=run_id,
@@ -805,9 +962,9 @@ def _capture_keyword_with_mcp(
                 mode="real",
                 status="captured",
                 rough_state="visible_results_unverified",
-                stop_reason="captured_partial_mcp_action_failed",
+                stop_reason=stop_reason,
                 notes=(
-                    "Captured viewport tiles before a later Midscene action failed; "
+                    "Captured viewport tiles before a later Midscene action could not continue; "
                     "product extraction is deferred to retained screenshot evidence."
                 ),
                 screenshots=screenshots,
@@ -989,30 +1146,49 @@ def _reset_and_retry_keyword_search_once(
     interrupt_check: Optional[Callable[[], None]],
     keyword_deadline: float,
     timeout_seconds: float,
+    foreground_recovery: Optional[Dict[str, Any]] = None,
     initial_diagnostics_key: str = "post_act_verification_initial",
     preserve_label: str = "tile_00_initial_failed",
     replace_existing_screenshots: bool = True,
+    goal_contract: Optional[Dict[str, Any]] = None,
+    gate_decision: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    if not _should_reset_retry_search(search_verification):
+    if not _should_reset_retry_search(search_verification, gate_decision=gate_decision):
         return None
     preservation = _preserve_failed_verification_screenshot(search_verification, preserve_label)
     initial_diagnostics = dict(search_verification.get("diagnostics") or {})
     if preservation:
         initial_diagnostics["failed_screenshot_preservation"] = preservation
     diagnostics[initial_diagnostics_key] = initial_diagnostics
-    result = _call_act(
-        client,
-        _keyword_search_reset_prompt(keyword),
+    result = _call_act_with_foreground_recovery(
+        client=client,
+        contract=contract,
+        prompt=_keyword_search_home_entry_prompt(keyword, contract=contract),
+        stage="post_act_home_entry_retry",
+        keyword=keyword,
+        capture_plan=capture_plan,
+        tools=tools,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        evidence_dir=evidence_dir,
         interrupt_check=interrupt_check,
         keyword_deadline=keyword_deadline,
-        keyword=keyword,
         timeout_seconds=timeout_seconds,
     )
     reset_diagnostics = _search_submission_diagnostics(result, client=client)
-    _raise_if_rate_limited_diagnostics(reset_diagnostics, "keyword_search_reset_retry")
-    _raise_if_abnormal_act(result, default_context="keyword_search_reset_retry")
+    _record_action_trace(
+        evidence_dir=evidence_dir,
+        keyword=keyword,
+        action="post_act_home_entry_retry",
+        tile_id="tile_00",
+        payload=reset_diagnostics,
+        diagnostics=diagnostics,
+    )
+    _raise_if_rate_limited_diagnostics(reset_diagnostics, "keyword_search_home_entry_retry")
+    _raise_if_abnormal_act(result, default_context="keyword_search_home_entry_retry")
     diagnostics["post_act_reset_retry"] = {
         "status": "attempted",
+        "mode": "home_entry_retry",
         "trigger": {
             "stop_reason": search_verification.get("stop_reason") or "",
             "rough_state": search_verification.get("rough_state") or "",
@@ -1021,6 +1197,7 @@ def _reset_and_retry_keyword_search_once(
         },
         "attempted": {
             "status": "attempted",
+            "mode": "home_entry_retry",
             "steps": {"act": reset_diagnostics},
             "failed_screenshot_preservation": preservation,
         },
@@ -1038,6 +1215,8 @@ def _reset_and_retry_keyword_search_once(
         keyword_deadline=keyword_deadline,
         mcp_timeout_seconds=timeout_seconds,
         contract=contract,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
     )
     if retry_verification.get("screenshot"):
         if replace_existing_screenshots:
@@ -1048,6 +1227,7 @@ def _reset_and_retry_keyword_search_once(
             screenshots.append(retry_verification["screenshot"])
         diagnostics["post_act_reset_retry"]["recovered"] = {
             "status": "recovered" if retry_verification.get("ok") else "verification_failed",
+            "mode": "home_entry_retry",
             "screenshot_path": retry_verification["screenshot"].get("path") or "",
             "page_state": retry_verification.get("page_state") or {},
             "stop_reason": retry_verification.get("stop_reason") or "",
@@ -1114,11 +1294,21 @@ def _preserve_failed_verification_screenshot(
     return payload
 
 
-def _should_reset_retry_search(search_verification: Dict[str, Any]) -> bool:
+def _should_reset_retry_search(
+    search_verification: Dict[str, Any],
+    gate_decision: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if gate_decision is not None:
+        gate = str(gate_decision.get("gate_decision") or gate_decision.get("action") or "")
+        if gate:
+            return gate == "repair_once"
     stop_reason = str(search_verification.get("stop_reason") or "")
     rough_state = str(search_verification.get("rough_state") or "")
     page_state = search_verification.get("page_state") or {}
     status = str(page_state.get("status") or rough_state or "")
+    diagnostics = search_verification.get("diagnostics") or {}
+    screenshot_keyword = diagnostics.get("screenshot_keyword") or {}
+    screenshot_keyword_status = str(screenshot_keyword.get("status") or "")
     hard_reset_blockers = HARD_ABNORMAL_REASONS - {
         "manual_review_needed",
         "page_state_detection_failed",
@@ -1127,16 +1317,14 @@ def _should_reset_retry_search(search_verification: Dict[str, Any]) -> bool:
     }
     if stop_reason in hard_reset_blockers or status in hard_reset_blockers:
         return False
-    return stop_reason in {
-        "manual_review_needed",
-        "page_state_detection_failed",
-        "search_submit_unconfirmed",
-        "visible_keyword_mismatch",
-        "visible_keyword_unverified",
-    } or (
-        stop_reason in {"", "manual_review_needed"}
-        and status in {UNKNOWN, "keyword_mismatch", "keyword_unverified", ""}
-    )
+    if stop_reason in {"visible_keyword_mismatch", "visible_keyword_unverified", "search_submit_unconfirmed"}:
+        return status in CAPTURABLE_PAGE_STATES or rough_state in {
+            "keyword_mismatch",
+            "keyword_unverified",
+        }
+    if stop_reason in {"manual_review_needed", "page_state_detection_failed"}:
+        return status in CAPTURABLE_PAGE_STATES and screenshot_keyword_status in {"mismatch", "unknown"}
+    return False
 
 
 def _verify_results_end_keyword_boundary(
@@ -1155,9 +1343,7 @@ def _verify_results_end_keyword_boundary(
     screenshot_keyword = verify_visible_keyword(tile_path, keyword, page_state=page_state).to_dict()
     diagnostics["screenshot_keyword"] = screenshot_keyword
     keyword_match = page_state.get("keyword_match")
-    explicit_match = keyword_match is True or (
-        screenshot_keyword.get("status") == "matched" and keyword_match is not False
-    )
+    explicit_match = screenshot_keyword.get("status") == "matched" and keyword_match is not False
     if explicit_match:
         return {
             "ok": True,
@@ -1551,23 +1737,23 @@ def _verify_keyword_after_act(
     keyword_deadline: float,
     mcp_timeout_seconds: float,
     contract: Dict[str, Any],
+    diagnostics: Optional[Dict[str, Any]] = None,
+    foreground_recovery: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Capture tile_00 and verify the visible search query before trusting act complete."""
     tile_path = _tile_path(capture_plan, evidence_dir, 0)
-    screenshot = client.capture_screenshot(
-        tile_path,
-        interrupt_check=interrupt_check,
-        keyword_deadline=keyword_deadline,
-        keyword=keyword,
-    )
-    page_state = _classify_screenshot_with_optional_probe(
+    screenshot, page_state = _capture_and_classify_with_foreground_recovery(
         client=client,
-        path=tile_path,
         contract=contract,
         capture_plan=capture_plan,
         tools=tools,
+        path=tile_path,
         tile_id="tile_00",
         keyword=keyword,
+        evidence_dir=evidence_dir,
+        stage="post_act_verification",
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
         interrupt_check=interrupt_check,
         keyword_deadline=keyword_deadline,
         timeout_seconds=mcp_timeout_seconds,
@@ -1579,17 +1765,17 @@ def _verify_keyword_after_act(
         "captured_at": _now(),
         "page_state": page_state,
     }
-    diagnostics: Dict[str, Any] = {
+    verification_diagnostics: Dict[str, Any] = {
         "expected_keyword": keyword,
         "verification_screenshot": tile_path,
         "page_state": page_state,
     }
 
     screenshot_keyword = verify_visible_keyword(tile_path, keyword, page_state=page_state).to_dict()
-    diagnostics["screenshot_keyword"] = screenshot_keyword
+    verification_diagnostics["screenshot_keyword"] = screenshot_keyword
     review_reason = _page_state_review_reason(page_state)
     if review_reason:
-        diagnostics["reason"] = review_reason
+        verification_diagnostics["reason"] = review_reason
         return {
             "ok": False,
             "stop_reason": review_reason,
@@ -1597,7 +1783,7 @@ def _verify_keyword_after_act(
             "message": f"Screenshot coarse state requires review: {page_state.get('reason') or review_reason}",
             "screenshot": screenshot_payload,
             "page_state": page_state,
-            "diagnostics": diagnostics,
+            "diagnostics": verification_diagnostics,
         }
     if screenshot_keyword["status"] == "mismatch":
         return {
@@ -1610,7 +1796,7 @@ def _verify_keyword_after_act(
             ),
             "screenshot": screenshot_payload,
             "page_state": page_state,
-            "diagnostics": diagnostics,
+            "diagnostics": verification_diagnostics,
         }
     if screenshot_keyword["status"] != "matched":
         return {
@@ -1623,7 +1809,7 @@ def _verify_keyword_after_act(
             ),
             "screenshot": screenshot_payload,
             "page_state": page_state,
-            "diagnostics": diagnostics,
+            "diagnostics": verification_diagnostics,
         }
 
     if "assert" not in set(tools or []):
@@ -1634,7 +1820,7 @@ def _verify_keyword_after_act(
             "message": "Post-act screenshot keyword and page state verified.",
             "screenshot": screenshot_payload,
             "page_state": page_state,
-            "diagnostics": diagnostics,
+            "diagnostics": verification_diagnostics,
         }
 
     return {
@@ -1644,8 +1830,61 @@ def _verify_keyword_after_act(
         "message": "Post-act screenshot verified against the current keyword.",
         "screenshot": screenshot_payload,
         "page_state": page_state,
-        "diagnostics": diagnostics,
+        "diagnostics": verification_diagnostics,
     }
+
+
+def _capture_and_classify_with_foreground_recovery(
+    client: "MidsceneStdioClient",
+    contract: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    tools: List[str],
+    path: str,
+    tile_id: str,
+    keyword: str,
+    evidence_dir: str,
+    stage: str,
+    diagnostics: Optional[Dict[str, Any]],
+    foreground_recovery: Optional[Dict[str, Any]],
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    while True:
+        screenshot = client.capture_screenshot(
+            path,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
+        )
+        page_state = _classify_screenshot_with_optional_probe(
+            client=client,
+            path=path,
+            contract=contract,
+            capture_plan=capture_plan,
+            tools=tools,
+            tile_id=tile_id,
+            keyword=keyword,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
+        if not _foreground_loss_detected(page_state):
+            return screenshot, page_state
+        _maybe_recover_foreground(
+            client=client,
+            contract=contract,
+            capture_plan=capture_plan,
+            tools=tools,
+            stage=stage,
+            keyword=keyword,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _assertion_text_is_true(normalized_text: str) -> bool:
@@ -1683,6 +1922,45 @@ def _assertion_text_is_false(normalized_text: str) -> bool:
         "不同",
     ]
     return any(item in normalized_text for item in negatives)
+
+
+def _page_state_probe_assertion_passed(page_state: Dict[str, Any]) -> bool:
+    texts: List[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            raw_text = value.get("raw_text")
+            if raw_text:
+                raw_text_value = str(raw_text)
+                try:
+                    parsed_raw_text = json.loads(raw_text_value)
+                except (TypeError, ValueError):
+                    parsed_raw_text = None
+                if isinstance(parsed_raw_text, (dict, list)):
+                    collect(parsed_raw_text)
+                else:
+                    texts.append(raw_text_value)
+            diagnostics = value.get("probe_diagnostics")
+            if isinstance(diagnostics, dict):
+                collect(diagnostics)
+            checks = value.get("checks")
+            if isinstance(checks, list):
+                for check in checks:
+                    collect(check)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(page_state)
+    for text in texts:
+        normalized = " ".join(str(text or "").lower().split())
+        if _assertion_text_is_false(normalized):
+            return False
+    return any(_assertion_text_is_true(" ".join(str(text or "").lower().split())) for text in texts)
+
+
+def _page_state_allows_assertion_keyword_boundary(page_state: Dict[str, Any]) -> bool:
+    return str(page_state.get("status") or "") in ASSERTION_KEYWORD_BOUNDARY_STATES
 
 
 def _classify_screenshot_with_optional_probe(
@@ -1790,9 +2068,10 @@ def _probe_midscene_page_state(
         "Return only a compact JSON object like "
         '{"state":"visible_results","confidence":0.82,"reason":"readable listings visible",'
         '"visible_search_keyword":"万智牌 示例","keyword_match":true}. '
-        "The state must be exactly one of: captcha_required, login_required, risk_suspected, "
-        "popup_blocked, white_skeleton, empty_result, results_end, visible_results, search_results, "
-        "results_page, visible_ready, unknown. Treat login, captcha, security/risk warnings, "
+        "The state must be exactly one of: chrome_not_foreground, captcha_required, login_required, "
+        "risk_suspected, popup_blocked, white_skeleton, empty_result, results_end, visible_results, search_results, "
+        "results_page, visible_ready, unknown. Use chrome_not_foreground when Codex, Terminal, Cursor, "
+        "VS Code, WPS, or another non-Chrome app is the visible foreground window. Treat login, captcha, security/risk warnings, "
         "blocking popups, and white skeleton/loading pages as higher priority than visible listings. "
         "Use results_end when the current viewport is a readable results page and clearly shows "
         "the bottom/end/no-more-results area. Taobao bottom indicators include a long pagination "
@@ -2035,6 +2314,7 @@ def _normalize_page_state_probe_value(value: str, allow_alias_substrings: bool =
     if not text:
         return ""
     aliases = [
+        (FOREGROUND_NOT_READY_REASON, [FOREGROUND_NOT_READY_REASON, "not foreground", "non-chrome", "codex", "terminal", "cursor", "vs code", "wps"]),
         ("captcha_required", ["captcha_required", "captcha", "验证码", "滑块"]),
         ("login_required", ["login_required", "login", "sign in", "请登录", "登录"]),
         ("risk_suspected", ["risk_suspected", "security", "risk", "风控", "风险", "安全验证", "安全检查"]),
@@ -2177,6 +2457,469 @@ def _write_keyword_result(
         "result_path": result_path,
         "stop_reason": stop_reason,
     }
+
+
+def _artifact_path(evidence_dir: str, filename: str) -> str:
+    return os.path.join(evidence_dir, filename)
+
+
+def _append_jsonl(path: str, payload: Dict[str, Any]) -> str:
+    ensure_dir(os.path.dirname(path))
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        f.write("\n")
+    return path
+
+
+def _record_action_trace(
+    evidence_dir: str,
+    keyword: str,
+    action: str,
+    tile_id: str,
+    payload: Dict[str, Any],
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    record = {
+        "schema": "taobao_visual_action_trace_v1",
+        "recorded_at": _now(),
+        "keyword": keyword,
+        "action": action,
+        "tile_id": tile_id,
+        "payload": payload or {},
+    }
+    path = _artifact_path(evidence_dir, "action_trace.jsonl")
+    _append_jsonl(path, record)
+    _remember_artifact_path(diagnostics, "action_trace", path)
+    return record
+
+
+def _write_goal_contract_artifact(
+    evidence_dir: str,
+    task: Dict[str, Any],
+    contract: Dict[str, Any],
+    keyword: str,
+    keyword_index: int,
+    capture_plan: Dict[str, Any],
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if build_goal_contract is not None:
+        try:
+            goal_contract = build_goal_contract(
+                {
+                    "task": task,
+                    "contract": contract,
+                    "keyword": keyword,
+                    "keyword_index": keyword_index,
+                    "capture_plan": capture_plan,
+                }
+            )
+        except TypeError:
+            goal_contract = build_goal_contract(
+                task=task,
+                contract=contract,
+                keyword=keyword,
+                keyword_index=keyword_index,
+                capture_plan=capture_plan,
+            )
+        if not isinstance(goal_contract, dict):
+            goal_contract = {}
+    else:
+        goal_contract = {}
+    if not goal_contract:
+        goal_contract = _fallback_goal_contract(
+            task=task,
+            contract=contract,
+            keyword=keyword,
+            keyword_index=keyword_index,
+            capture_plan=capture_plan,
+        )
+    goal_contract.setdefault("schema", "taobao_visual_goal_contract_v1")
+    goal_contract.setdefault("created_at", _now())
+    goal_contract.setdefault("keyword", keyword)
+    path = _artifact_path(evidence_dir, "goal_contract.json")
+    _write_json(path, goal_contract)
+    _remember_artifact_path(diagnostics, "goal_contract", path)
+    return goal_contract
+
+
+def _fallback_goal_contract(
+    task: Dict[str, Any],
+    contract: Dict[str, Any],
+    keyword: str,
+    keyword_index: int,
+    capture_plan: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "schema": "taobao_visual_goal_contract_v1",
+        "keyword": keyword,
+        "keyword_index": keyword_index,
+        "task_id": task.get("task_id") or "",
+        "run_id": contract.get("run_id") or "",
+        "session_index": contract.get("session_index") or 0,
+        "acceptance": {
+            "tile_00": "current keyword must be verified on a visible Taobao results page before capture",
+            "capturing": "retain visible result-page tiles; results_end ends only the current keyword",
+        },
+        "repair_policy": {
+            "boundary_repair_limit": 1,
+            "allowed_repair": "home_entry_retry",
+            "hard_abnormal_states_stop": sorted(HARD_ABNORMAL_REASONS),
+        },
+        "capture_plan": {
+            "max_tiles_per_keyword": capture_plan.get("max_tiles_per_keyword"),
+            "tile_scroll_distance_px": capture_plan.get("tile_scroll_distance_px"),
+        },
+    }
+
+
+def _build_evidence_check(
+    keyword: str,
+    goal_state: str,
+    goal_contract: Optional[Dict[str, Any]],
+    observation: Dict[str, Any],
+    boundary: bool,
+) -> Dict[str, Any]:
+    if build_goal_evidence_check is not None:
+        try:
+            result = build_goal_evidence_check(
+                {
+                    "keyword": keyword,
+                    "goal_state": goal_state,
+                    "goal_contract": goal_contract or {},
+                    "observation": observation,
+                    "boundary": boundary,
+                }
+            )
+        except TypeError:
+            result = build_goal_evidence_check(
+                keyword=keyword,
+                goal_state=goal_state,
+                goal_contract=goal_contract or {},
+                observation=observation,
+                boundary=boundary,
+            )
+        if isinstance(result, dict):
+            return {
+                "schema": "taobao_visual_evidence_check_v1",
+                "checked_at": _now(),
+                "keyword": keyword,
+                "goal_state": goal_state,
+                **result,
+            }
+    return _fallback_evidence_check(keyword, goal_state, goal_contract or {}, observation, boundary)
+
+
+def _fallback_evidence_check(
+    keyword: str,
+    goal_state: str,
+    goal_contract: Dict[str, Any],
+    observation: Dict[str, Any],
+    boundary: bool,
+) -> Dict[str, Any]:
+    page_state = observation.get("page_state") or {}
+    verification = observation.get("verification") or {}
+    state = str(page_state.get("status") or verification.get("rough_state") or UNKNOWN)
+    screenshot_keyword = verification.get("screenshot_keyword") or {}
+    keyword_status = str(screenshot_keyword.get("status") or "")
+    keyword_match = page_state.get("keyword_match")
+    review_reason = _page_state_review_reason(page_state)
+    checks = {
+        "visible_results_state": state in CAPTURABLE_PAGE_STATES,
+        "keyword_verified": keyword_status == "matched" and keyword_match is not False,
+        "keyword_mismatch": keyword_status == "mismatch" or keyword_match is False,
+        "review_required": bool(review_reason),
+        "results_end": state == "results_end",
+    }
+    if goal_state == "CAPTURING" and state in CAPTURABLE_PAGE_STATES and not review_reason:
+        checks["keyword_verified"] = keyword_match is not False
+    status = "pass"
+    reason = "evidence_matches_goal"
+    if review_reason:
+        status = "stop"
+        reason = review_reason
+    elif goal_state == "BOUNDARY_VERIFY" and checks["keyword_mismatch"]:
+        status = "repairable"
+        reason = "visible_keyword_mismatch"
+    elif goal_state == "BOUNDARY_VERIFY" and not checks["keyword_verified"]:
+        status = "repairable"
+        reason = "visible_keyword_unverified"
+    elif not checks["visible_results_state"]:
+        status = "stop"
+        reason = "non_capturable_page_state"
+    elif state == "results_end":
+        reason = "results_end"
+    return {
+        "schema": "taobao_visual_evidence_check_v1",
+        "checked_at": _now(),
+        "keyword": keyword,
+        "goal_state": goal_state,
+        "goal_contract_schema": goal_contract.get("schema") or "",
+        "tile_id": observation.get("tile_id") or "",
+        "stage": observation.get("stage") or "",
+        "screenshot_path": observation.get("screenshot_path") or "",
+        "boundary": boundary,
+        "status": status,
+        "reason": reason,
+        "observed_state": state,
+        "checks": checks,
+        "page_state_source": page_state.get("source") or "",
+    }
+
+
+def _record_observation_artifacts(
+    evidence_dir: str,
+    keyword: str,
+    observation: Dict[str, Any],
+    goal_state: str,
+    goal_contract: Optional[Dict[str, Any]] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+    boundary: bool = False,
+    repair_attempted: bool = False,
+) -> Dict[str, Any]:
+    page_state_path = _artifact_path(evidence_dir, "page_state_v2.jsonl")
+    _append_jsonl(page_state_path, observation)
+    _remember_artifact_path(diagnostics, "page_state_v2", page_state_path)
+
+    evidence_check = _build_evidence_check(
+        keyword=keyword,
+        goal_state=goal_state,
+        goal_contract=goal_contract,
+        observation=observation,
+        boundary=boundary,
+    )
+    evidence_check_path = _artifact_path(evidence_dir, "evidence_check.jsonl")
+    _append_jsonl(evidence_check_path, evidence_check)
+    _remember_artifact_path(diagnostics, "evidence_check", evidence_check_path)
+
+    decision = _reconcile_observation(
+        keyword=keyword,
+        goal_state=goal_state,
+        observation=observation,
+        evidence_check=evidence_check,
+        goal_contract=goal_contract,
+        repair_attempted=repair_attempted,
+    )
+    decision_path = _artifact_path(evidence_dir, "capture_decision.jsonl")
+    _append_jsonl(decision_path, decision)
+    _remember_artifact_path(diagnostics, "capture_decision", decision_path)
+
+    if boundary:
+        boundary_payload = _keyword_boundary_payload(keyword, observation, decision, goal_state)
+        boundary_path = _artifact_path(evidence_dir, "keyword_boundary.json")
+        _write_json(boundary_path, boundary_payload)
+        _remember_artifact_path(diagnostics, "keyword_boundary", boundary_path)
+    return decision
+
+
+def _observation_from_search_verification(
+    keyword: str,
+    stage: str,
+    verification: Dict[str, Any],
+    action_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    screenshot = verification.get("screenshot") or {}
+    page_state = verification.get("page_state") or {}
+    diagnostics = verification.get("diagnostics") or {}
+    return _observation_payload(
+        keyword=keyword,
+        stage=stage,
+        tile_id=str(screenshot.get("tile_id") or "tile_00"),
+        screenshot_path=str(screenshot.get("path") or diagnostics.get("verification_screenshot") or ""),
+        page_state=page_state,
+        action_payload=action_payload,
+        verification={
+            "ok": bool(verification.get("ok")),
+            "stop_reason": verification.get("stop_reason") or "",
+            "rough_state": verification.get("rough_state") or "",
+            "message": verification.get("message") or "",
+            "screenshot_keyword": diagnostics.get("screenshot_keyword") or {},
+        },
+    )
+
+
+def _observation_from_tile_classification(
+    keyword: str,
+    stage: str,
+    tile_id: str,
+    tile_path: str,
+    screenshot: Dict[str, Any],
+    page_state: Dict[str, Any],
+    action_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return _observation_payload(
+        keyword=keyword,
+        stage=stage,
+        tile_id=tile_id,
+        screenshot_path=tile_path,
+        page_state=page_state,
+        action_payload=action_payload,
+        verification={
+            "ok": not bool(_page_state_review_reason(page_state)),
+            "rough_state": page_state.get("status") or UNKNOWN,
+            "mime_type": screenshot.get("mime_type") or "image/png",
+        },
+    )
+
+
+def _observation_payload(
+    keyword: str,
+    stage: str,
+    tile_id: str,
+    screenshot_path: str,
+    page_state: Dict[str, Any],
+    action_payload: Optional[Dict[str, Any]],
+    verification: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "schema": "taobao_visual_page_state_observation_v2",
+        "observed_at": _now(),
+        "keyword": keyword,
+        "stage": stage,
+        "tile_id": tile_id,
+        "screenshot_path": screenshot_path,
+        "page_state": page_state or {},
+        "action": action_payload or {},
+        "verification": verification or {},
+    }
+
+
+def _reconcile_observation(
+    keyword: str,
+    goal_state: str,
+    observation: Dict[str, Any],
+    evidence_check: Optional[Dict[str, Any]] = None,
+    goal_contract: Optional[Dict[str, Any]] = None,
+    repair_attempted: bool = False,
+) -> Dict[str, Any]:
+    if decide_capture_gate is not None:
+        try:
+            result = decide_capture_gate(
+                {
+                    "keyword": keyword,
+                    "goal_state": goal_state,
+                    "observation": observation,
+                    "evidence_check": evidence_check or {},
+                    "goal_contract": goal_contract or {},
+                    "repair_attempted": repair_attempted,
+                }
+            )
+        except TypeError:
+            result = decide_capture_gate(
+                keyword=keyword,
+                goal_state=goal_state,
+                observation=observation,
+                evidence_check=evidence_check or {},
+                goal_contract=goal_contract or {},
+                repair_attempted=repair_attempted,
+            )
+        if isinstance(result, dict):
+            return {
+                "schema": "taobao_visual_capture_decision_v1",
+                "decided_at": _now(),
+                "keyword": keyword,
+                "goal_state": goal_state,
+                **result,
+            }
+    return _fallback_capture_decision(
+        keyword,
+        goal_state,
+        observation,
+        evidence_check=evidence_check,
+        repair_attempted=repair_attempted,
+    )
+
+
+def _fallback_capture_decision(
+    keyword: str,
+    goal_state: str,
+    observation: Dict[str, Any],
+    evidence_check: Optional[Dict[str, Any]] = None,
+    repair_attempted: bool = False,
+) -> Dict[str, Any]:
+    page_state = observation.get("page_state") or {}
+    verification = observation.get("verification") or {}
+    state = str(page_state.get("status") or verification.get("rough_state") or UNKNOWN)
+    keyword_match = page_state.get("keyword_match")
+    review_reason = _page_state_review_reason(page_state)
+    if review_reason:
+        decision = "needs_review"
+        gate_decision = "stop"
+        reason = review_reason
+    elif verification.get("ok") is False:
+        reason = str(verification.get("stop_reason") or "verification_failed")
+        if goal_state == "BOUNDARY_VERIFY" and not repair_attempted and reason in {
+            "visible_keyword_mismatch",
+            "visible_keyword_unverified",
+            "search_submit_unconfirmed",
+            "manual_review_needed",
+            "page_state_detection_failed",
+        }:
+            decision = "repair_once"
+            gate_decision = "repair_once"
+        else:
+            decision = "blocked"
+            gate_decision = "stop"
+        reason = str(verification.get("stop_reason") or "verification_failed")
+    elif state == "results_end":
+        decision = "keyword_end"
+        gate_decision = "accept"
+        reason = "results_end"
+    elif state in CAPTURABLE_PAGE_STATES and keyword_match is not False:
+        decision = "continue_capture"
+        gate_decision = "accept"
+        reason = "capturable_page_state"
+    else:
+        decision = "needs_review"
+        gate_decision = "stop"
+        reason = "uncertain_page_state"
+    evidence_check_status = ""
+    if evidence_check:
+        evidence_check_status = str(evidence_check.get("status") or "")
+    return {
+        "schema": "taobao_visual_capture_decision_v1",
+        "decided_at": _now(),
+        "keyword": keyword,
+        "goal_state": goal_state,
+        "decision": decision,
+        "gate_decision": gate_decision,
+        "reason": reason,
+        "evidence_check_status": evidence_check_status,
+        "repair_attempted": repair_attempted,
+        "observed_state": state,
+        "tile_id": observation.get("tile_id") or "",
+    }
+
+
+def _keyword_boundary_payload(
+    keyword: str,
+    observation: Dict[str, Any],
+    decision: Dict[str, Any],
+    goal_state: str,
+) -> Dict[str, Any]:
+    page_state = observation.get("page_state") or {}
+    verification = observation.get("verification") or {}
+    return {
+        "schema": "taobao_visual_keyword_boundary_v1",
+        "updated_at": _now(),
+        "keyword": keyword,
+        "goal_state": goal_state,
+        "tile_id": observation.get("tile_id") or "",
+        "screenshot_path": observation.get("screenshot_path") or "",
+        "page_state": page_state,
+        "verification": verification,
+        "decision": decision,
+    }
+
+
+def _remember_artifact_path(
+    diagnostics: Optional[Dict[str, Any]],
+    key: str,
+    path: str,
+) -> None:
+    if diagnostics is None:
+        return
+    artifacts = diagnostics.setdefault("artifacts", {})
+    artifacts[key] = path
 
 
 class MidsceneStdioClient:
@@ -2393,47 +3136,550 @@ def _call_act(
     )
 
 
-def _perform_keyword_search(
+def _call_act_with_foreground_recovery(
     client: MidsceneStdioClient,
+    contract: Dict[str, Any],
+    prompt: str,
+    stage: str,
     keyword: str,
-    scroll_distance: int,
+    capture_plan: Optional[Dict[str, Any]],
+    tools: Optional[List[str]],
+    diagnostics: Optional[Dict[str, Any]],
+    foreground_recovery: Optional[Dict[str, Any]],
+    evidence_dir: str,
     interrupt_check: Optional[Callable[[], None]],
     keyword_deadline: float,
     timeout_seconds: float,
 ) -> Dict[str, Any]:
-    search_result = _call_act(
-        client,
-        _keyword_search_prompt(keyword=keyword, scroll_distance=scroll_distance),
+    while True:
+        try:
+            result = _call_act(
+                client,
+                prompt,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                keyword=keyword,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:
+            recovered = _maybe_recover_foreground_after_act_exception(
+                client=client,
+                exc=exc,
+                contract=contract,
+                capture_plan=capture_plan or {},
+                tools=tools or [],
+                stage=stage,
+                keyword=keyword,
+                diagnostics=diagnostics,
+                foreground_recovery=foreground_recovery,
+                evidence_dir=evidence_dir,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                timeout_seconds=timeout_seconds,
+            )
+            if recovered:
+                continue
+            raise
+        if not _foreground_loss_detected(result):
+            return result
+        _maybe_recover_foreground(
+            client=client,
+            contract=contract,
+            capture_plan=capture_plan,
+            tools=tools,
+            stage=stage,
+            keyword=keyword,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
+            trigger=result,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+def _maybe_recover_foreground_after_act_exception(
+    client: MidsceneStdioClient,
+    exc: BaseException,
+    contract: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    tools: List[str],
+    stage: str,
+    keyword: str,
+    diagnostics: Optional[Dict[str, Any]],
+    foreground_recovery: Optional[Dict[str, Any]],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> bool:
+    classification = classify_midscene_exception(exc)
+    if classification.get("stop_reason") != "midscene_mcp_action_failed":
+        return False
+    path = _foreground_exception_screenshot_path(evidence_dir, stage)
+    screenshot: Dict[str, Any] = {}
+    page_state: Dict[str, Any] = {}
+    try:
+        screenshot = client.capture_screenshot(
+            path,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
+        )
+        page_state = _classify_screenshot_with_optional_probe(
+            client=client,
+            path=path,
+            contract=contract,
+            capture_plan={**(capture_plan or {}), "allow_midscene_page_state_probe": True},
+            tools=tools,
+            tile_id=f"{stage}_act_exception",
+            keyword=keyword,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as probe_exc:
+        if diagnostics is not None:
+            diagnostics.setdefault("foreground_recovery_exception_checks", []).append(
+                {
+                    "stage": stage,
+                    "status": "probe_failed",
+                    "exception": str(exc),
+                    "probe_error": str(probe_exc),
+                    "screenshot_path": path,
+                }
+            )
+        return False
+    record = {
+        "stage": stage,
+        "status": "checked",
+        "exception": str(exc),
+        "screenshot": screenshot,
+        "page_state": page_state,
+    }
+    if diagnostics is not None:
+        diagnostics.setdefault("foreground_recovery_exception_checks", []).append(record)
+    if not _foreground_loss_detected(page_state):
+        return False
+    _maybe_recover_foreground(
+        client=client,
+        contract=contract,
+        capture_plan=capture_plan,
+        tools=tools,
+        stage=f"{stage}_act_exception",
+        keyword=keyword,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        evidence_dir=evidence_dir,
+        trigger={
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"{FOREGROUND_NOT_READY_REASON}: act exception while non-Chrome foreground was visible; {exc}",
+                }
+            ],
+            "page_state": page_state,
+        },
         interrupt_check=interrupt_check,
         keyword_deadline=keyword_deadline,
-        keyword=keyword,
         timeout_seconds=timeout_seconds,
     )
+    record["status"] = "recovered"
+    return True
+
+
+def _foreground_exception_screenshot_path(evidence_dir: str, stage: str) -> str:
+    safe_stage = re.sub(r"[^A-Za-z0-9_]+", "_", str(stage or "act_exception")).strip("_")
+    return os.path.join(evidence_dir, f"foreground_exception_{safe_stage}.png")
+
+
+def _foreground_recovery_limits(contract: Dict[str, Any]) -> Dict[str, Any]:
+    hard_stop = contract.get("hard_stop_policy") or {}
+    config = contract.get("config") or {}
+    enabled_value = hard_stop.get("foreground_recovery_enabled")
+    if enabled_value is None:
+        enabled_value = config.get("foreground_recovery_enabled", True)
+    attempts = hard_stop.get("foreground_recovery_attempts_per_event")
+    if attempts is None:
+        attempts = config.get("foreground_recovery_attempts_per_event", 3)
+    events = hard_stop.get("foreground_recovery_events_per_keyword")
+    if events is None:
+        events = config.get("foreground_recovery_events_per_keyword", 2)
+    try:
+        attempts_int = max(1, int(attempts))
+    except (TypeError, ValueError):
+        attempts_int = 3
+    try:
+        events_int = max(0, int(events))
+    except (TypeError, ValueError):
+        events_int = 2
+    return {
+        "enabled": _config_bool(enabled_value),
+        "attempts_per_event": attempts_int,
+        "events_per_keyword": events_int,
+    }
+
+
+def _maybe_recover_foreground(
+    client: MidsceneStdioClient,
+    contract: Dict[str, Any],
+    capture_plan: Optional[Dict[str, Any]],
+    tools: Optional[List[str]],
+    stage: str,
+    keyword: str,
+    diagnostics: Optional[Dict[str, Any]],
+    foreground_recovery: Optional[Dict[str, Any]],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+    trigger: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    limits = _foreground_recovery_limits(contract)
+    state = foreground_recovery if foreground_recovery is not None else {}
+    state.setdefault("events_used", 0)
+    records = _foreground_recovery_records(diagnostics)
+    if not limits["enabled"] or state["events_used"] >= limits["events_per_keyword"]:
+        record = {
+            "stage": stage,
+            "status": "exhausted",
+            "reason": FOREGROUND_RECOVERY_STOP_REASON,
+            "events_used": state["events_used"],
+            "limits": limits,
+            "trigger": _foreground_trigger_summary(trigger),
+        }
+        records.append(record)
+        raise MidsceneActionAbnormal(
+            reason=FOREGROUND_RECOVERY_STOP_REASON,
+            rough_state=FOREGROUND_NOT_READY_REASON,
+            message="Foreground recovery budget exhausted before Chrome/Taobao could be re-verified.",
+            diagnostics={"foreground_recovery_attempts": records},
+        )
+    state["events_used"] += 1
+    event_index = state["events_used"]
+    event_record: Dict[str, Any] = {
+        "stage": stage,
+        "status": "attempting",
+        "event_index": event_index,
+        "limits": limits,
+        "trigger": _foreground_trigger_summary(trigger),
+        "attempts": [],
+    }
+    records.append(event_record)
+    for attempt_index in range(1, limits["attempts_per_event"] + 1):
+        before_path = _foreground_recovery_screenshot_path(evidence_dir, stage, event_index, attempt_index, "before")
+        after_path = _foreground_recovery_screenshot_path(evidence_dir, stage, event_index, attempt_index, "after")
+        attempt: Dict[str, Any] = {
+            "attempt_index": attempt_index,
+            "before_screenshot": before_path,
+            "after_screenshot": after_path,
+        }
+        event_record["attempts"].append(attempt)
+        try:
+            client.capture_screenshot(
+                before_path,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                keyword=keyword,
+            )
+        except Exception as exc:
+            attempt["before_error"] = str(exc)
+        result = _call_act(
+            client,
+            _foreground_recovery_prompt(keyword=keyword, stage=stage, attempt_index=attempt_index),
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            keyword=keyword,
+            timeout_seconds=timeout_seconds,
+        )
+        attempt["act"] = _midscene_text_diagnostics(result, client=client)
+        _record_action_trace(
+            evidence_dir=evidence_dir,
+            keyword=keyword,
+            action=f"{stage}_foreground_recovery_attempt_{attempt_index}",
+            tile_id=f"{stage}_foreground_recovery",
+            payload=attempt["act"],
+            diagnostics=diagnostics,
+        )
+        try:
+            client.capture_screenshot(
+                after_path,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                keyword=keyword,
+            )
+        except Exception as exc:
+            attempt["after_error"] = str(exc)
+        after_page_state: Dict[str, Any] = {}
+        if "after_error" not in attempt:
+            try:
+                after_page_state = _classify_screenshot_with_optional_probe(
+                    client=client,
+                    path=after_path,
+                    contract=contract,
+                    capture_plan={**(capture_plan or {}), "allow_midscene_page_state_probe": True},
+                    tools=tools or [],
+                    tile_id=f"{stage}_foreground_recovery_after",
+                    keyword=keyword,
+                    interrupt_check=interrupt_check,
+                    keyword_deadline=keyword_deadline,
+                    timeout_seconds=timeout_seconds,
+                )
+                attempt["after_page_state"] = after_page_state
+            except Exception as exc:
+                attempt["after_page_state_error"] = str(exc)
+        classification = classify_midscene_act_result(result, default_context="foreground_recovery")
+        attempt["classification"] = classification
+        if classification["abnormal"] and classification["stop_reason"] not in {
+            FOREGROUND_NOT_READY_REASON,
+            "midscene_reported_failure",
+            "midscene_mcp_action_failed",
+        }:
+            event_record["status"] = "blocked"
+            event_record["reason"] = classification["stop_reason"]
+            raise MidsceneActionAbnormal(
+                reason=classification["stop_reason"],
+                rough_state=classification["rough_state"],
+                message=classification["message"],
+                diagnostics={"foreground_recovery_attempts": records},
+            )
+        if _foreground_recovery_result_ok(result) and after_page_state and not _foreground_loss_detected(after_page_state):
+            event_record["status"] = "recovered"
+            event_record["recovered_attempt"] = attempt_index
+            return event_record
+        if _foreground_recovery_result_ok(result):
+            attempt["after_verification"] = (
+                "still_not_foreground" if _foreground_loss_detected(after_page_state) else "not_confirmed"
+            )
+    event_record["status"] = "exhausted"
+    event_record["reason"] = FOREGROUND_RECOVERY_STOP_REASON
+    raise MidsceneActionAbnormal(
+        reason=FOREGROUND_RECOVERY_STOP_REASON,
+        rough_state=FOREGROUND_NOT_READY_REASON,
+        message="Foreground recovery attempts were exhausted for this event.",
+        diagnostics={"foreground_recovery_attempts": records},
+    )
+
+
+def _foreground_recovery_records(diagnostics: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if diagnostics is None:
+        return []
+    records = diagnostics.setdefault("foreground_recovery_attempts", [])
+    if isinstance(records, list):
+        return records
+    diagnostics["foreground_recovery_attempts"] = []
+    return diagnostics["foreground_recovery_attempts"]
+
+
+def _foreground_recovery_screenshot_path(
+    evidence_dir: str,
+    stage: str,
+    event_index: int,
+    attempt_index: int,
+    suffix: str,
+) -> str:
+    safe_stage = re.sub(r"[^A-Za-z0-9_]+", "_", str(stage or "foreground")).strip("_")
+    return os.path.join(
+        evidence_dir,
+        f"foreground_recovery_{safe_stage}_event{event_index:02d}_attempt{attempt_index:02d}_{suffix}.png",
+    )
+
+
+def _foreground_trigger_summary(trigger: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not trigger:
+        return {}
+    return {
+        "text": _tool_text(trigger)[:500],
+        "isError": bool(trigger.get("isError")),
+    }
+
+
+def _foreground_recovery_result_ok(result: Dict[str, Any]) -> bool:
+    text = _tool_text(result).lower()
+    if not text:
+        return False
+    blocked = [
+        "foreground_recovery=blocked",
+        "chrome_not_foreground",
+        "chrome not foreground",
+        "not chrome foreground",
+        "not foreground",
+        "not visible",
+        "foreground_recovery=blocked",
+        "non-chrome",
+        "wps",
+        "无法",
+        "不能",
+    ]
+    if any(item in text for item in blocked):
+        return False
+    success = [
+        "foreground_recovery=recovered",
+        "foreground recovered",
+        "chrome is foreground",
+        "chrome foreground",
+        "taobao is visible",
+        "淘宝页面可见",
+        "已切回",
+    ]
+    return any(item in text for item in success)
+
+
+def _foreground_recovery_prompt(keyword: str, stage: str, attempt_index: int) -> str:
+    return (
+        "Recover only the foreground window for the bounded Taobao visual capture. "
+        "Use visible-screen reasoning only. The current keyword remains "
+        f"{keyword!r}, and the current stage is {stage!r}; do not search, re-search, "
+        "or submit the keyword. If Chrome with the dedicated Taobao collection page "
+        "is already visible, leave it as is and report foreground_recovery=recovered. "
+        "If another app such as WPS, Codex, Terminal, Cursor, or VS Code is foreground, "
+        "you may click an already visible Chrome window, Dock icon, or taskbar icon, "
+        "or use an OS-level app-switching shortcut to bring the existing Chrome window "
+        "forward. Do not type into any non-Chrome app. Do not read DOM, HTML, network, "
+        "cookies, storage, selector maps, page source, or JavaScript-evaluated data. "
+        "Do not run launchers, do not use scripts, do not use the browser address bar, "
+        "do not type a URL, do not open a new browser tab, do not navigate to Taobao "
+        "home, and do not change account state. If Chrome/Taobao cannot be made visible "
+        "within this bounded attempt, stop and report foreground_recovery=blocked. "
+        f"This is foreground recovery attempt {attempt_index}."
+    )
+
+
+def _run_initial_foreground_recovery(
+    client: MidsceneStdioClient,
+    contract: Dict[str, Any],
+    capture_plan: Dict[str, Any],
+    tools: List[str],
+    keyword: str,
+    diagnostics: Dict[str, Any],
+    foreground_recovery: Dict[str, Any],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    del client, capture_plan, tools, diagnostics, foreground_recovery, evidence_dir
+    del interrupt_check, keyword_deadline, timeout_seconds
+    return {
+        "status": "armed",
+        "mode": "bounded_foreground_recovery",
+        "keyword": keyword,
+        "message": (
+            "Foreground recovery is the first armed boundary for this keyword; "
+            "the following home-entry act must report chrome_not_foreground instead "
+            "of typing into a non-Chrome app, and the act wrapper performs bounded recovery."
+        ),
+    }
+
+
+def _perform_keyword_search(
+    client: MidsceneStdioClient,
+    contract: Dict[str, Any],
+    keyword: str,
+    scroll_distance: int,
+    capture_plan: Optional[Dict[str, Any]],
+    tools: Optional[List[str]],
+    diagnostics: Dict[str, Any],
+    foreground_recovery: Dict[str, Any],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    try:
+        search_result = _call_act_with_foreground_recovery(
+            client=client,
+            contract=contract,
+            prompt=_keyword_search_home_entry_prompt(keyword=keyword, contract=contract),
+            stage="keyword_search",
+            keyword=keyword,
+            capture_plan=capture_plan,
+            tools=tools,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
+        retry_from_act_exception = False
+    except Exception as exc:
+        if not _is_home_entry_retryable_act_exception(exc, diagnostics):
+            raise
+        diagnostics["home_entry_act_exception_retry"] = {
+            "status": "attempted",
+            "mode": "home_entry_retry_after_act_exception",
+            "trigger": {
+                "exception": str(exc),
+                "classification": classify_midscene_exception(exc),
+            },
+        }
+        search_result = _call_act_with_foreground_recovery(
+            client=client,
+            contract=contract,
+            prompt=_keyword_search_home_entry_retry_after_exception_prompt(
+                keyword=keyword,
+                contract=contract,
+            ),
+            stage="keyword_search_home_entry_exception_retry",
+            keyword=keyword,
+            capture_plan=capture_plan,
+            tools=tools,
+            diagnostics=diagnostics,
+            foreground_recovery=foreground_recovery,
+            evidence_dir=evidence_dir,
+            interrupt_check=interrupt_check,
+            keyword_deadline=keyword_deadline,
+            timeout_seconds=timeout_seconds,
+        )
+        retry_from_act_exception = True
     act_diagnostics = _search_submission_diagnostics(search_result, client=client)
     _raise_if_rate_limited_diagnostics(act_diagnostics, "keyword_search")
     _raise_if_abnormal_act(search_result, default_context="keyword_search")
-    return {"mode": "bounded_act_search", "steps": {"act": act_diagnostics}}
+    if retry_from_act_exception:
+        diagnostics["home_entry_act_exception_retry"]["steps"] = {"act": act_diagnostics}
+        diagnostics["home_entry_act_exception_retry"]["status"] = "completed"
+    return {
+        "mode": "bounded_act_search",
+        "boundary": "home_entry",
+        "retry_from_act_exception": retry_from_act_exception,
+        "steps": {"act": act_diagnostics},
+    }
 
 
 def _perform_page_scroll(
     client: MidsceneStdioClient,
+    contract: Dict[str, Any],
     keyword: str,
     tile_index: int,
     scroll_distance: int,
+    capture_plan: Optional[Dict[str, Any]],
+    tools: Optional[List[str]],
+    diagnostics: Dict[str, Any],
+    foreground_recovery: Dict[str, Any],
+    evidence_dir: str,
     interrupt_check: Optional[Callable[[], None]],
     keyword_deadline: float,
     timeout_seconds: float,
 ) -> Dict[str, Any]:
-    result = _call_act(
-        client,
-        _next_tile_prompt(
+    result = _call_act_with_foreground_recovery(
+        client=client,
+        contract=contract,
+        prompt=_next_tile_prompt(
             keyword=keyword,
             tile_index=tile_index,
             scroll_distance=scroll_distance,
         ),
+        stage=f"scroll_tile_{tile_index}",
+        keyword=keyword,
+        capture_plan=capture_plan,
+        tools=tools,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        evidence_dir=evidence_dir,
         interrupt_check=interrupt_check,
         keyword_deadline=keyword_deadline,
-        keyword=keyword,
         timeout_seconds=timeout_seconds,
     )
     diagnostics = _midscene_text_diagnostics(result, client=client)
@@ -2450,6 +3696,92 @@ def _raise_if_abnormal_act(result: Dict[str, Any], default_context: str) -> None
             rough_state=classification["rough_state"],
             message=classification["message"],
         )
+
+
+def _is_home_entry_retryable_act_exception(
+    exc: BaseException,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> bool:
+    text = str(exc or "")
+    normalized = " ".join(text.lower().split())
+    if not normalized:
+        return False
+    latest_page_state = _latest_foreground_exception_page_state(diagnostics)
+    if _foreground_loss_detected(text):
+        return _is_home_entry_retryable_exception_page_state(latest_page_state)
+    if _is_rate_limited_text(text):
+        return False
+    security_needles = [
+        "captcha",
+        "验证码",
+        "滑块",
+        "security verification",
+        "安全验证",
+        "risk",
+        "风控",
+        "风险",
+        "unusual account",
+        "异常账号",
+        "账号异常",
+        "login required",
+        "please login",
+        "sign in",
+        "登录",
+        "请登录",
+        "重新登录",
+        "white skeleton",
+        "白屏",
+        "骨架屏",
+        "blank page",
+    ]
+    if any(needle in normalized for needle in security_needles):
+        return False
+    old_results_needles = [
+        "old results",
+        "old keyword",
+        "results page",
+        "results-page",
+        "old results-page",
+        "旧结果",
+        "旧关键词",
+        "搜索结果页面",
+        "搜索关键词不正确",
+        "关键词不正确",
+        "关键词不符",
+        "与任务要求",
+        "不符合",
+        "不匹配",
+        "返回淘宝首页重新搜索",
+        "回到淘宝首页",
+        "返回首页",
+        "重新搜索正确",
+    ]
+    return any(needle in normalized for needle in old_results_needles)
+
+
+def _latest_foreground_exception_page_state(
+    diagnostics: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(diagnostics, dict):
+        return {}
+    checks = diagnostics.get("foreground_recovery_exception_checks")
+    if not isinstance(checks, list):
+        return {}
+    for check in reversed(checks):
+        if isinstance(check, dict) and isinstance(check.get("page_state"), dict):
+            return check["page_state"]
+    return {}
+
+
+def _is_home_entry_retryable_exception_page_state(page_state: Dict[str, Any]) -> bool:
+    status = str((page_state or {}).get("status") or "")
+    if not status:
+        return False
+    if _foreground_loss_detected(page_state):
+        return False
+    if status in HARD_ABNORMAL_REASONS:
+        return False
+    return status in ASSERTION_KEYWORD_BOUNDARY_STATES
 
 
 def classify_midscene_exception(exc: BaseException) -> Dict[str, Any]:
@@ -2473,6 +3805,13 @@ def classify_midscene_act_result(result: Dict[str, Any], default_context: str = 
     """Classify the MCP `act` ToolResult without trusting it as product data."""
     text = _tool_text(result)
     normalized = " ".join(text.lower().split())
+    if _foreground_loss_detected(text):
+        return {
+            "abnormal": True,
+            "rough_state": FOREGROUND_NOT_READY_REASON,
+            "stop_reason": FOREGROUND_NOT_READY_REASON,
+            "message": text or f"Chrome/Taobao was not foreground during {default_context}.",
+        }
     if _is_rate_limited_text(text):
         return {
             "abnormal": True,
@@ -2518,6 +3857,49 @@ def classify_midscene_act_result(result: Dict[str, Any], default_context: str = 
         "stop_reason": "",
         "message": text,
     }
+
+
+def _foreground_loss_detected(value: Any) -> bool:
+    if isinstance(value, dict):
+        texts = [
+            str(value.get("status") or ""),
+            str(value.get("state") or ""),
+            str(value.get("reason") or ""),
+            str(value.get("raw_text") or ""),
+            str(value.get("fallback_reason") or ""),
+        ]
+        if "content" in value:
+            texts.append(_tool_text(value))
+        diagnostics = value.get("probe_diagnostics")
+        if isinstance(diagnostics, dict):
+            texts.append(str(diagnostics.get("raw_text") or ""))
+            texts.append(str(diagnostics.get("fallback_reason") or ""))
+        text = " ".join(texts)
+    else:
+        text = str(value or "")
+    normalized = " ".join(text.lower().split())
+    if not normalized:
+        return False
+    needles = [
+        FOREGROUND_NOT_READY_REASON,
+        "not foreground",
+        "non-chrome",
+        "non chrome",
+        "chrome is not visible",
+        "chrome not visible",
+        "foreground_recovery=blocked",
+        "codex is visible",
+        "terminal is visible",
+        "cursor is visible",
+        "vs code is visible",
+        "wps is visible",
+        "wps office",
+        "非 chrome",
+        "非chrome",
+        "不是 chrome",
+        "不是chrome",
+    ]
+    return any(needle in normalized for needle in needles)
 
 
 def _is_security_abnormal_negated(normalized: str) -> bool:
@@ -2579,66 +3961,131 @@ def _classify_screenshot(path: str, contract: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
+    del scroll_distance
+    return _keyword_search_home_entry_prompt(keyword)
+
+
+def _allow_bookmark_home_entry_repair(contract: Optional[Dict[str, Any]] = None) -> bool:
+    if not isinstance(contract, dict):
+        return False
+    config = contract.get("config") or {}
+    policy = contract.get("hard_stop_policy") or {}
+    return bool(
+        config.get("allow_bookmark_home_entry_repair")
+        or policy.get("allow_bookmark_home_entry_repair")
+    )
+
+
+def _bookmark_home_entry_repair_prompt(contract: Optional[Dict[str, Any]] = None) -> str:
+    if not _allow_bookmark_home_entry_repair(contract):
+        return (
+            "Do not use the browser address bar, do not type a URL, do not open "
+            "a new browser tab, do not run scripts, and do not force browser "
+            "activation outside visible low-frequency actions. "
+        )
+    return (
+        "Do not use the browser address bar, do not type a URL, do not paste a "
+        "URL, and do not run scripts. A limited home-entry repair is allowed "
+        "only when the current visible page is an old Taobao results page, a "
+        "bottom-of-results page, or another old-keyword Taobao page: click the "
+        "visible browser new tab plus button with the mouse, then click the "
+        "visible Taobao bookmark button in the bookmarks bar to open the normal "
+        "Taobao homepage. Do not type anything into the address bar. Do not use "
+        "a new tab for any other purpose. If the Taobao bookmark button is not "
+        "visibly available, stop and report bookmark_home_entry_unavailable. "
+        "After the bookmark repair succeeds, you may close an obsolete old-results "
+        "tab only if the visible tab strip clearly shows more than one Chrome tab "
+        "will remain. Never close the final remaining Chrome tab; if the tab count "
+        "is unclear, leave the old tab open. "
+    )
+
+
+def _keyword_search_home_entry_prompt(
+    keyword: str,
+    contract: Optional[Dict[str, Any]] = None,
+) -> str:
+    navigation_rule = _bookmark_home_entry_repair_prompt(contract)
     return (
         "You are the bounded Taobao capture worker for one keyword. Use only "
         "visible-screen reasoning and system mouse/keyboard actions. Do not read "
-        "DOM, HTML, network, cookies, storage, selector maps, page source, or JS "
-        "evaluated data. Bring the existing Chrome window with the dedicated "
-        "Taobao profile to the foreground if needed. If Codex, Terminal, Cursor, "
-        "or another app is visible, switch to Chrome first and do not type the "
-        "keyword into that app. If Chrome/Taobao is unavailable, or login, "
-        "captcha, security verification, risk warning, unusual account state, "
-        "or an automation permission panel is visible, stop and report failure. "
-        "Prefer starting from a Taobao home page with a fresh empty visible search "
-        "box. If the current page is an old results page or stale keyword boundary, "
-        "leave that page or open/use a Taobao home tab before searching. Then search "
-        f"exactly this keyword: {keyword!r}. After the fresh search box visibly "
-        "contains the keyword, submit by mouse-clicking the visible search button "
+        "DOM, HTML, network, cookies, storage, selector maps, page source, JS "
+        "evaluated data, or clipboard contents. Do not use short action APIs "
+        "such as Tap, Input, KeyboardPress, Scroll, or ClearInput. If Codex, "
+        "Terminal, Cursor, VS Code, WPS, or another "
+        "non-Chrome app is visible, report chrome_not_foreground so the Python "
+        "worker can run bounded foreground recovery; do not type, scroll, search, "
+        "or navigate in that app. "
+        "If Chrome/Taobao is unavailable, or login, captcha, security verification, "
+        "risk warning, unusual account state, or an automation permission panel "
+        "is visible, stop and report failure. "
+        f"{navigation_rule}"
+        "Before searching, return through the existing visible Taobao home page or "
+        "ordinary Taobao home/search-entry UI. You may use visible low-frequency "
+        "page controls such as the Taobao logo, Home/首页 entry, a return-home "
+        "button, an already visible ordinary homepage search entrance, an already "
+        "visible Taobao homepage tab, or the configured visible bookmark home-entry "
+        "repair when it is allowed. Do not replace text inside an old results-page "
+        "search box and call that success. "
+        "Once the ordinary homepage/search-entry search box is visible, search "
+        f"exactly this keyword: {keyword!r}. After the search box visibly contains "
+        "exactly this keyword, submit by mouse-clicking the visible search button "
         "as the preferred method. Use Enter only as a fallback when the search "
         "button is not visible or cannot be clicked. In the final action message, "
-        "include submission_method=search_button or submission_method=enter_fallback "
-        "so diagnostics can trace whether Enter was used as a downgrade. Wait until "
-        "visible search results settle. Leave the page positioned at the first "
-        "results viewport. Do not output product rows. "
-        f"Later tile captures will use about {scroll_distance} px between viewports."
+        "include home_entry_used=true, bookmark_home_entry_used=true or false, "
+        "and submission_method=search_button or submission_method=enter_fallback "
+        "so diagnostics can trace the boundary. "
+        "Wait until visible search results settle. Leave the page positioned at "
+        "the first results viewport. Do not output product rows."
+    )
+
+
+def _keyword_search_home_entry_retry_after_exception_prompt(
+    keyword: str,
+    contract: Optional[Dict[str, Any]] = None,
+) -> str:
+    navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    return (
+        "The previous bounded search attempt stopped while an old Taobao results "
+        "page or old keyword was visible. Treat an old results page, bottom-of-results "
+        "footer, or visible old keyword as a recoverable home-entry condition, not "
+        "as success and not as a reason to type into the old results-page search box. "
+        "Use only visible-screen reasoning and system mouse/keyboard actions. Do "
+        "not read DOM, HTML, network, cookies, storage, selector maps, page source, "
+        "JS-evaluated data, or clipboard contents. Do not use short action APIs "
+        "such as Tap, Input, KeyboardPress, Scroll, or ClearInput. Do not use the "
+        "browser address bar, do not type a URL, and do not run scripts. "
+        f"{navigation_rule}"
+        "From the current visible Taobao page, first use a "
+        "visible Taobao logo, Home/首页 entry, return-home control, or ordinary "
+        "homepage/search-entry UI to get to the normal homepage search entry. If "
+        "the configured bookmark repair is allowed, an old results page may instead "
+        "be repaired by clicking the visible new tab plus button and then the visible "
+        "Taobao bookmark button. If no such visible home entry exists, report failure. "
+        "Once the ordinary "
+        "homepage/search-entry search box is visible, search exactly this keyword: "
+        f"{keyword!r}. After the box visibly contains exactly this keyword, submit "
+        "by mouse-clicking the visible search button as the preferred method; use "
+        "Enter only if the button is not visible or cannot be clicked. In the final "
+        "action message include home_entry_used=true, recovered_from_old_results=true, "
+        "bookmark_home_entry_used=true or false, and submission_method=search_button "
+        "or submission_method=enter_fallback. "
+        "Wait until visible search results settle. Leave the page positioned at "
+        "the first results viewport. Do not output product rows."
     )
 
 
 def _keyword_search_reset_prompt(keyword: str) -> str:
-    return (
-        "You are recovering a Taobao keyword boundary using only visible-screen "
-        "reasoning and system mouse/keyboard actions. Do not read DOM, HTML, "
-        "network, cookies, storage, selector maps, page source, JS evaluated data, "
-        "or clipboard contents. Do not use short action APIs such as Tap, Input, "
-        "KeyboardPress, Scroll, or ClearInput. Bring the existing Chrome window "
-        "with the dedicated Taobao profile to the foreground if Codex, Terminal, "
-        "Cursor, VS Code, or another app is visible. If login, captcha, security "
-        "verification, risk warning, unusual account state, or an automation "
-        "permission panel is visible, stop and report failure. Close only the "
-        "current Taobao results tab or otherwise leave the old results page, then "
-        "find an existing Taobao home tab if one is visible; if no Taobao home tab "
-        "is visible, open Taobao home in a normal browser tab. Use the fresh empty "
-        "visible Taobao home search box to search exactly this keyword: "
-        f"{keyword!r}. After the search box visibly contains exactly this keyword, "
-        "submit by mouse-clicking the visible search button as the preferred method. "
-        "Use Enter only as a fallback when the search button is not visible or "
-        "cannot be clicked. In the final action message, include "
-        "submission_method=search_button or submission_method=enter_fallback so "
-        "diagnostics can trace whether Enter was used as a downgrade. Wait until "
-        "the first visible results viewport settles. Do not open product detail "
-        "pages, do not scroll, do not output product rows, and do not change "
-        "account state."
-    )
+    return _keyword_search_home_entry_prompt(keyword)
 
 
 def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> str:
     return (
         "You are continuing the bounded Taobao capture session using only "
         "visible-screen reasoning and system mouse/keyboard/scroll actions. The "
-        f"current keyword is {keyword!r}. Bring the existing Chrome window with "
-        "the dedicated Taobao profile to the foreground if Codex, Terminal, "
-        "Cursor, VS Code, or another app is visible; do not type or scroll in "
-        "that app. If Chrome/Taobao is unavailable, or login, captcha, security/risk, "
+        f"current keyword is {keyword!r}. If Codex, Terminal, Cursor, VS Code, "
+        "WPS, or another non-Chrome app is visible, report chrome_not_foreground "
+        "so the Python worker can run bounded foreground recovery; do not type, "
+        "scroll, search, or navigate in that app. If Chrome/Taobao is unavailable, or login, captcha, security/risk, "
         "unusual account state, white skeleton, or a permission panel is visible, "
         "stop and report failure. If the visible page already appears to be at the bottom of "
         "Taobao results, do not keep trying to scroll; report that the results end is visible. "

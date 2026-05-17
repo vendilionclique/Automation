@@ -34,7 +34,7 @@ def run_codex_extract_drain(
     plan_id: str,
     session_index: int,
     config_file: str = "config/settings.ini",
-    start: bool = True,
+    start: bool = False,
     poll_seconds: Optional[float] = None,
     idle_timeout_seconds: Optional[float] = None,
     max_cycles: Optional[int] = None,

@@ -97,6 +97,10 @@ def cmd_setup(args):
                 "session_keyword_limit",
                 "keyword_timeout_seconds",
                 "consecutive_abnormal_stop",
+                "foreground_recovery_enabled",
+                "foreground_recovery_attempts_per_event",
+                "foreground_recovery_events_per_keyword",
+                "allow_bookmark_home_entry_repair",
             ],
             "SESSION": ["daily_keyword_budget", "hourly_keyword_budget", "max_consecutive_abnormal"],
         }

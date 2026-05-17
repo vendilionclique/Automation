@@ -103,7 +103,7 @@ def build_session_capsule(
         "expected_outputs": {
             "midscene_session_worker": "visual-session-run writes sessions/session_NN/midscene_session_worker_request.json for bounded small-session execution.",
             "worker_result": "Midscene writes session_worker_result.json plus each evidence/*/keyword_result.json after screenshot capture.",
-            "rows": "After screenshot capture, use visual-codex-extract-prepare / visual-codex-extract-dispatch for screenshot recognition, then visual-apply-extracted-rows for deterministic persistence.",
+            "rows": "Capture-only sessions stop at screenshot evidence, manifests, diagnostics, and worker results. Optional post-processing may use visual-codex-extract-prepare / visual-codex-extract-dispatch for screenshot recognition, then visual-apply-extracted-rows for deterministic persistence.",
             "events": "Append structured session events to this session events.jsonl and task_events.jsonl.",
             "summary": summary_path,
         },

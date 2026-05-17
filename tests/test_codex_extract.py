@@ -86,6 +86,77 @@ class CodexExtractTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(result["prepared_total"], 0)
 
+    def test_extract_drain_default_does_not_start_codex_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_id = "plan"
+            session_dir = os.path.join(tmp, "data", "tasks", plan_id, "sessions", "session_01")
+            contract_dir = os.path.join(session_dir, "codex_extract", "kw")
+            request_path = os.path.join(contract_dir, "extract_request.json")
+            prompt_path = os.path.join(contract_dir, "extract_prompt.md")
+            rows_path = os.path.join(contract_dir, "rows_result.json")
+            apply_path = os.path.join(contract_dir, "apply_result.json")
+            config_path = os.path.join(tmp, "settings.ini")
+            write_json(
+                request_path,
+                {
+                    "schema": codex_extract.REQUEST_SCHEMA,
+                    "plan_id": plan_id,
+                    "session_index": 1,
+                    "keyword": "kw",
+                    "prompt": prompt_path,
+                    "rows_output": rows_path,
+                    "apply_result": apply_path,
+                    "screenshots": [],
+                },
+            )
+            with open(prompt_path, "w", encoding="utf-8") as f:
+                f.write("extract")
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "[CODEX_EXTRACT]\n"
+                    "codex_bin = codex\n"
+                    "profile = \n"
+                    "model = \n"
+                    "sandbox = \n"
+                    "approval_policy = \n"
+                    "ignore_rules = false\n"
+                    "json_events = false\n"
+                    "ephemeral = false\n"
+                    "max_parallel = 1\n"
+                    "drain_poll_seconds = 1\n"
+                    "drain_idle_timeout_seconds = 60\n"
+                )
+            manifest = {
+                "records": [
+                    {
+                        "keyword": "kw",
+                        "status": "captured",
+                        "extra": {"daily_session_index": 1, "codex_extract_request": request_path},
+                    }
+                ]
+            }
+
+            with mock.patch.object(codex_extract, "get_project_root", return_value=tmp), \
+                mock.patch.object(codex_extract, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(codex_extract, "load_visual_manifest", return_value=manifest), \
+                mock.patch.object(visual_control, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_control, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(visual_pipeline, "get_project_root", return_value=tmp), \
+                mock.patch.object(visual_pipeline, "session_dir_for", return_value=session_dir), \
+                mock.patch.object(codex_extract, "_start_codex_worker") as start_worker:
+                result = codex_extract.run_codex_extract_drain(
+                    plan_id,
+                    1,
+                    config_file=config_path,
+                    max_cycles=1,
+                )
+
+            self.assertFalse(result["start"])
+            self.assertEqual(result["last_dispatch"]["start"], False)
+            self.assertEqual(result["dispatched_total"], 1)
+            self.assertEqual(result["last_dispatch"]["workers"][0]["status"], "advised")
+            start_worker.assert_not_called()
+
     def test_repeat_apply_returns_existing_success_after_screenshots_deleted(self):
         with tempfile.TemporaryDirectory() as tmp:
             request_path = os.path.join(tmp, "extract_request.json")

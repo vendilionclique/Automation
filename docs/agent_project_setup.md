@@ -19,13 +19,12 @@ This repository keeps project-specific agent knowledge and Midscene MCP launch d
 - Local Chrome profile and Taobao login state.
 
 `local/midscene-computer.env.example` and the sync scripts default the Midscene
-computer external VLM to paid high-speed Zhipu `glm-4.6v-flashx` with
-`MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`,
+computer external VLM to paid high-speed Zhipu `glm-5v-turbo` with
+`MIDSCENE_MODEL_BASE_URL=https://api.z.ai/api/paas/v4`,
 `MIDSCENE_MODEL_FAMILY=glm-v`, `MIDSCENE_MODEL_REASONING_ENABLED=false`, and
-`MIDSCENE_MODEL_TEMPERATURE=0`. Kimi/Moonshot has been abandoned for this
-workflow and is not the mainline. Keep the API key machine-local in
-`local/midscene-computer.env`; GLM-5V-Turbo is reserved only for later A/B
-evaluation.
+`MIDSCENE_MODEL_TEMPERATURE=0`. Thinking/reasoning stays disabled by default to
+keep real-time grounding latency low. Keep the API key machine-local in
+`local/midscene-computer.env`.
 
 ## New Machine Bootstrap
 

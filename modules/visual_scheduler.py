@@ -604,20 +604,25 @@ def _dispatch_advice(
             )
         )
     )
-    worker_commands = {
-        "codex_extract_prepare": (
-            f"python3 harness.py visual-codex-extract-prepare "
-            f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
-        ),
-        "codex_extract_dispatch_advice": (
-            f"python3 harness.py visual-codex-extract-dispatch "
-            f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
-        ),
-        "codex_extract_dispatch_start": (
-            f"python3 harness.py visual-codex-extract-dispatch "
-            f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)} --start"
-        ),
-    }
+    worker_commands = {}
+    codex_extract_advice_enabled = _codex_extract_advice_enabled(config_file)
+    if codex_extract_advice_enabled:
+        worker_commands.update(
+            {
+                "codex_extract_prepare": (
+                    f"python3 harness.py visual-codex-extract-prepare "
+                    f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
+                ),
+                "codex_extract_dispatch_advice": (
+                    f"python3 harness.py visual-codex-extract-dispatch "
+                    f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)}"
+                ),
+                "codex_extract_dispatch_start": (
+                    f"python3 harness.py visual-codex-extract-dispatch "
+                    f"--plan-id {json.dumps(plan_id, ensure_ascii=False)} --session {int(session_index)} --start"
+                ),
+            }
+        )
     reason = recovery_reason or liveness.get("reason", "")
     if liveness.get("stale") and capture_start_allowed:
         worker_commands["capture"] = capture_command
@@ -636,6 +641,7 @@ def _dispatch_advice(
         "capture_worker_liveness": liveness,
         "capture_worker_stale": bool(liveness.get("stale")),
         "capture_start_allowed": capture_start_allowed,
+        "codex_extract_advice_enabled": codex_extract_advice_enabled,
         "manifest_recovery_state": manifest_state,
         "recovery_prepare_result": recovery_prepare_result,
         "reason": reason,
@@ -650,6 +656,11 @@ def _dispatch_advice(
             "after session_worker_result.json exists."
         ),
     }
+
+
+def _codex_extract_advice_enabled(config_file: str) -> bool:
+    config = ConfigManager(config_file)
+    return config.getboolean("CODEX_EXTRACT", "advice_enabled", fallback=False)
 
 
 def _mark_stale_capture_workers_for_heartbeat(
