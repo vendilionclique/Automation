@@ -19,8 +19,8 @@ This repository keeps project-specific agent knowledge and Midscene MCP launch d
 - Local Chrome profile and Taobao login state.
 
 `local/midscene-computer.env.example` and the sync scripts default the Midscene
-computer external VLM to paid high-speed Zhipu `glm-5v-turbo` with
-`MIDSCENE_MODEL_BASE_URL=https://api.z.ai/api/paas/v4`,
+computer external VLM to paid high-speed Zhipu `glm-4.6v-flashx` with
+`MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`,
 `MIDSCENE_MODEL_FAMILY=glm-v`, `MIDSCENE_MODEL_REASONING_ENABLED=false`, and
 `MIDSCENE_MODEL_TEMPERATURE=0`. Thinking/reasoning stays disabled by default to
 keep real-time grounding latency low. Keep the API key machine-local in
@@ -86,8 +86,8 @@ as missing, then attempt to start a duplicate profile and surface misleading
 Chrome crash reports.
 
 The pre-approved Midscene tool set is limited to the bounded act mainline:
-display listing/connection, system screenshots, bounded `act`, assertion, and
-disconnect. Short action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`,
+display listing/connection, system screenshots, bounded `act`, and disconnect.
+Short action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`,
 and `ClearInput` are not pre-approved for unattended cron. The approved set does
 not grant DOM, HTML, network, cookie, storage, or CDP extraction capabilities.
 

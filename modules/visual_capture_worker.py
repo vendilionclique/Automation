@@ -29,6 +29,10 @@ from modules.page_state import (
     detect_page_state,
     verify_visible_keyword,
 )
+from modules.page_state_classifier import (
+    PageStateClassifierUnavailable,
+    classify_screenshot_json,
+)
 from modules.utils import ensure_dir
 from modules.visual_control import (
     apply_control_action,
@@ -53,7 +57,7 @@ MCP_REQUIRED_TOOLS = {
     "take_screenshot",
     "act",
 }
-MCP_OPTIONAL_TOOLS = {"assert"}
+MCP_OPTIONAL_TOOLS: set = set()
 REAL_NOT_AVAILABLE_STATUS = "real_not_available"
 CAPTURED_STATUSES = {"captured"}
 CAPTURABLE_PAGE_STATES = {
@@ -64,7 +68,7 @@ CAPTURABLE_PAGE_STATES = {
     "search_results",
     "visible_results",
 }
-ASSERTION_KEYWORD_BOUNDARY_STATES = CAPTURABLE_PAGE_STATES - {EMPTY_RESULT}
+CLASSIFIER_KEYWORD_BOUNDARY_STATES = CAPTURABLE_PAGE_STATES - {EMPTY_RESULT}
 FOREGROUND_RECOVERY_STOP_REASON = "foreground_recovery_exhausted"
 FOREGROUND_NOT_READY_REASON = "chrome_not_foreground"
 HARD_ABNORMAL_REASONS = {
@@ -798,7 +802,7 @@ def _capture_keyword_from_home_with_mcp(
                     "reason": "results_end",
                     "keyword_boundary_ok": boundary_verification["ok"],
                     "message": (
-                        "Visible page-state probe reported the bottom/end of results; retained this tile "
+                        "Visible JSON page-state classifier reported the bottom/end of results; retained this tile "
                         "and moved to the next keyword without resetting the current keyword."
                     ),
                 }
@@ -1812,22 +1816,11 @@ def _verify_keyword_after_act(
             "diagnostics": verification_diagnostics,
         }
 
-    if "assert" not in set(tools or []):
-        return {
-            "ok": True,
-            "stop_reason": "",
-            "rough_state": page_state.get("status") or VISIBLE_READY,
-            "message": "Post-act screenshot keyword and page state verified.",
-            "screenshot": screenshot_payload,
-            "page_state": page_state,
-            "diagnostics": verification_diagnostics,
-        }
-
     return {
         "ok": True,
         "stop_reason": "",
         "rough_state": page_state.get("status") or VISIBLE_READY,
-        "message": "Post-act screenshot verified against the current keyword.",
+        "message": "Post-act screenshot keyword and page state verified.",
         "screenshot": screenshot_payload,
         "page_state": page_state,
         "diagnostics": verification_diagnostics,
@@ -1857,7 +1850,7 @@ def _capture_and_classify_with_foreground_recovery(
             keyword_deadline=keyword_deadline,
             keyword=keyword,
         )
-        page_state = _classify_screenshot_with_optional_probe(
+        page_state = _classify_screenshot_page_state(
             client=client,
             path=path,
             contract=contract,
@@ -1887,83 +1880,7 @@ def _capture_and_classify_with_foreground_recovery(
         )
 
 
-def _assertion_text_is_true(normalized_text: str) -> bool:
-    positives = [
-        '"success":true',
-        '"success": true',
-        '"passed":true',
-        '"passed": true',
-        "assertion passed",
-        "true",
-        "是",
-        "匹配",
-        "一致",
-    ]
-    negatives = ["false", "not match", "不匹配", "不一致", "不是", "并非", "无法", "不能", "未"]
-    return any(item in normalized_text for item in positives) and not any(
-        item in normalized_text for item in negatives
-    )
-
-
-def _assertion_text_is_false(normalized_text: str) -> bool:
-    negatives = [
-        '"success":false',
-        '"success": false',
-        '"passed":false',
-        '"passed": false',
-        "assertion failed",
-        "false",
-        "not match",
-        "different keyword",
-        "不匹配",
-        "不一致",
-        "不是",
-        "并非",
-        "不同",
-    ]
-    return any(item in normalized_text for item in negatives)
-
-
-def _page_state_probe_assertion_passed(page_state: Dict[str, Any]) -> bool:
-    texts: List[str] = []
-
-    def collect(value: Any) -> None:
-        if isinstance(value, dict):
-            raw_text = value.get("raw_text")
-            if raw_text:
-                raw_text_value = str(raw_text)
-                try:
-                    parsed_raw_text = json.loads(raw_text_value)
-                except (TypeError, ValueError):
-                    parsed_raw_text = None
-                if isinstance(parsed_raw_text, (dict, list)):
-                    collect(parsed_raw_text)
-                else:
-                    texts.append(raw_text_value)
-            diagnostics = value.get("probe_diagnostics")
-            if isinstance(diagnostics, dict):
-                collect(diagnostics)
-            checks = value.get("checks")
-            if isinstance(checks, list):
-                for check in checks:
-                    collect(check)
-        elif isinstance(value, list):
-            for item in value:
-                collect(item)
-
-    collect(page_state)
-    for text in texts:
-        normalized = " ".join(str(text or "").lower().split())
-        if _assertion_text_is_false(normalized):
-            return False
-    return any(_assertion_text_is_true(" ".join(str(text or "").lower().split())) for text in texts)
-
-
-def _page_state_allows_assertion_keyword_boundary(page_state: Dict[str, Any]) -> bool:
-    return str(page_state.get("status") or "") in ASSERTION_KEYWORD_BOUNDARY_STATES
-
-
-def _classify_screenshot_with_optional_probe(
+def _classify_screenshot_page_state(
     client: "MidsceneStdioClient",
     path: str,
     contract: Dict[str, Any],
@@ -1975,52 +1892,61 @@ def _classify_screenshot_with_optional_probe(
     keyword_deadline: float,
     timeout_seconds: float,
 ) -> Dict[str, Any]:
-    if not _allow_midscene_page_state_probe(contract, capture_plan):
-        return _heuristic_page_state_with_probe_fallback(path, contract, "probe_disabled")
-    if "assert" not in set(tools or []):
-        return _heuristic_page_state_with_probe_fallback(path, contract, "assert_tool_missing")
+    del client, tools, interrupt_check
+    if not _allow_json_page_state_classifier(contract, capture_plan):
+        return _heuristic_page_state_fallback(path, contract, "classifier_disabled")
 
-    probe = _probe_midscene_page_state(
-        client=client,
-        keyword=keyword,
-        tile_id=tile_id,
-        interrupt_check=interrupt_check,
-        keyword_deadline=keyword_deadline,
-        timeout_seconds=timeout_seconds,
-    )
-    if probe["status"] == "parsed":
-        return {
-            "status": probe["page_state"],
-            "confidence": probe["confidence"],
-            "reason": "midscene_page_state_probe",
-            "metrics": {},
-            "source": "midscene_assert_probe",
-            "raw_text": probe["raw_text"],
-            "visible_search_keyword": probe.get("visible_search_keyword") or "",
-            "keyword_match": probe.get("keyword_match"),
-        }
-    if probe.get("fallback_reason") == "probe_rate_limited":
+    try:
+        request_timeout = min(max(float(timeout_seconds or 1.0), 1.0), 30.0)
+        if keyword_deadline is not None:
+            remaining = max(0.0, float(keyword_deadline) - time.monotonic())
+            if remaining <= 0:
+                raise KeywordTimeout(f"Keyword capture timed out before page-state classifier: {keyword}")
+            request_timeout = min(request_timeout, remaining)
+        state = classify_screenshot_json(
+            path,
+            contract=contract,
+            keyword=keyword,
+            timeout_seconds=request_timeout,
+        )
+        state["tile_id"] = tile_id
+        return state
+    except PageStateClassifierUnavailable as exc:
+        fallback_reason = str(exc) or "classifier_unavailable"
+    except (WorkerControlInterrupt, KeywordTimeout):
+        raise
+    except Exception as exc:
+        fallback_reason = f"classifier_error:{type(exc).__name__}"
+
+    if _is_rate_limited_text(fallback_reason):
         return {
             "status": "rate_limited",
             "confidence": 0.1,
-            "reason": "midscene_page_state_probe_rate_limited",
+            "reason": "page_state_json_classifier_rate_limited",
             "metrics": {},
-            "source": "midscene_assert_probe",
-            "raw_text": probe.get("raw_text", ""),
-            "fallback_reason": "probe_rate_limited",
-            "probe_diagnostics": probe,
+            "source": "json_classifier",
+            "raw_text": "",
+            "fallback_reason": fallback_reason,
         }
 
     state = _classify_screenshot(path, contract)
     state["source"] = "heuristic"
-    state["raw_text"] = probe.get("raw_text", "")
-    state["fallback_reason"] = probe.get("fallback_reason") or "probe_unavailable"
-    state["probe_diagnostics"] = probe
+    state["raw_text"] = ""
+    state["fallback_reason"] = fallback_reason
+    state["classifier_diagnostics"] = {
+        "status": "fallback",
+        "fallback_reason": fallback_reason,
+        "tile_id": tile_id,
+    }
     return state
 
 
-def _allow_midscene_page_state_probe(contract: Dict[str, Any], capture_plan: Dict[str, Any]) -> bool:
+def _allow_json_page_state_classifier(contract: Dict[str, Any], capture_plan: Dict[str, Any]) -> bool:
     page_sampling = contract.get("page_sampling") or {}
+    if "allow_page_state_json_classifier" in page_sampling:
+        return _config_bool(page_sampling.get("allow_page_state_json_classifier"))
+    if "allow_page_state_json_classifier" in capture_plan:
+        return _config_bool(capture_plan.get("allow_page_state_json_classifier"))
     if "allow_midscene_page_state_probe" in page_sampling:
         return _config_bool(page_sampling.get("allow_midscene_page_state_probe"))
     if "allow_midscene_page_state_probe" in capture_plan:
@@ -2043,7 +1969,7 @@ def _config_bool(value: Any) -> bool:
     return False
 
 
-def _heuristic_page_state_with_probe_fallback(
+def _heuristic_page_state_fallback(
     path: str,
     contract: Dict[str, Any],
     fallback_reason: str,
@@ -2053,289 +1979,6 @@ def _heuristic_page_state_with_probe_fallback(
     state["raw_text"] = ""
     state["fallback_reason"] = fallback_reason
     return state
-
-
-def _probe_midscene_page_state(
-    client: "MidsceneStdioClient",
-    keyword: str,
-    tile_id: str,
-    interrupt_check: Optional[Callable[[], None]],
-    keyword_deadline: float,
-    timeout_seconds: float,
-) -> Dict[str, Any]:
-    prompt = (
-        "Using only the current visible screenshot, classify the operational state of the Taobao page. "
-        "Return only a compact JSON object like "
-        '{"state":"visible_results","confidence":0.82,"reason":"readable listings visible",'
-        '"visible_search_keyword":"万智牌 示例","keyword_match":true}. '
-        "The state must be exactly one of: chrome_not_foreground, captcha_required, login_required, "
-        "risk_suspected, popup_blocked, white_skeleton, empty_result, results_end, visible_results, search_results, "
-        "results_page, visible_ready, unknown. Use chrome_not_foreground when Codex, Terminal, Cursor, "
-        "VS Code, WPS, or another non-Chrome app is the visible foreground window. Treat login, captcha, security/risk warnings, "
-        "blocking popups, and white skeleton/loading pages as higher priority than visible listings. "
-        "Use results_end when the current viewport is a readable results page and clearly shows "
-        "the bottom/end/no-more-results area. Taobao bottom indicators include a long pagination "
-        "row in the middle or lower part of the viewport, previous/next page buttons, a page jump "
-        "input or page count with current/total pages, a horizontal separator followed by footer columns, "
-        "rules/agreements/help links, copyright/ICP/license/filing text, partner/friend links, "
-        "or a scrollbar at the bottom. A literal no-more-results label is not required when these "
-        "footer/pagination/bottom-scrollbar signals are visible. "
-        f"For result states, the current keyword is {keyword!r}. Also read the visible Taobao search "
-        "box text when it is visible and put it in visible_search_keyword. If the search box is not "
-        "visible or not readable on an ordinary non-bottom results viewport, leave visible_search_keyword "
-        "empty and do not downgrade the results state for that reason. Set keyword_match true only when "
-        "the visible search keyword clearly equals the current keyword; otherwise false. "
-        "Do not output product rows, prices, shop names, item titles, business filtering, or price trust decisions."
-    )
-    try:
-        result = client.call_tool(
-            "assert",
-            {"prompt": prompt},
-            timeout_seconds=timeout_seconds,
-            interrupt_check=interrupt_check,
-            keyword_deadline=keyword_deadline,
-            keyword=keyword,
-        )
-    except Exception as exc:
-        text = str(exc)
-        return {
-            "status": "fallback",
-            "fallback_reason": "probe_rate_limited" if _is_rate_limited_text(text) else "probe_unavailable",
-            "raw_text": text,
-            "checks": [
-                {
-                    "tile_id": tile_id,
-                    "status": "error",
-                    "raw_text": text,
-                    "rate_limited": _is_rate_limited_text(text),
-                }
-            ],
-        }
-
-    text = _tool_text(result)
-    parsed_payload = _parse_page_state_probe_payload(text)
-    parsed = parsed_payload.get("state") or _parse_page_state_probe_text(text)
-    diagnostics = [
-        {
-            "tile_id": tile_id,
-            "status": "classified" if parsed else "unknown",
-            "raw_text": text,
-            "parsed_state": parsed,
-            "rate_limited": _is_rate_limited_text(text),
-        }
-    ]
-    if result.get("isError") or _is_rate_limited_text(text):
-        return {
-            "status": "fallback",
-            "fallback_reason": "probe_rate_limited" if _is_rate_limited_text(text) else "probe_unavailable",
-            "raw_text": text,
-            "checks": diagnostics,
-        }
-    if not parsed:
-        return {
-            "status": "fallback",
-            "fallback_reason": "probe_unparseable",
-            "raw_text": json.dumps({"checks": diagnostics}, ensure_ascii=False),
-            "checks": diagnostics,
-        }
-
-    confidence = parsed_payload.get("confidence")
-    if not isinstance(confidence, (int, float)):
-        confidence = 0.82 if parsed != UNKNOWN else 0.35
-    return {
-        "status": "parsed",
-        "page_state": parsed,
-        "confidence": float(confidence),
-        "raw_text": json.dumps(
-            {
-                "state": parsed,
-                "confidence": float(confidence),
-                "reason": parsed_payload.get("reason") or "midscene_page_state_probe",
-                "visible_search_keyword": parsed_payload.get("visible_search_keyword") or "",
-                "keyword_match": parsed_payload.get("keyword_match"),
-                "raw_text": text,
-            },
-            ensure_ascii=False,
-        ),
-        "visible_search_keyword": parsed_payload.get("visible_search_keyword") or "",
-        "keyword_match": parsed_payload.get("keyword_match"),
-        "checks": diagnostics,
-    }
-
-
-def _assert_page_state_candidate(
-    client: "MidsceneStdioClient",
-    state: str,
-    assertion: str,
-    keyword: str,
-    tile_id: str,
-    interrupt_check: Optional[Callable[[], None]],
-    keyword_deadline: float,
-    timeout_seconds: float,
-) -> Dict[str, Any]:
-    prompt = (
-        f"Using only the current visible screenshot, assert whether {assertion}. "
-        "Return true if the assertion is clearly correct. Return false if it is not clearly correct. "
-        "Do not output product rows, prices, shop names, item titles, business filtering, or price trust decisions."
-    )
-    try:
-        result = client.call_tool(
-            "assert",
-            {"prompt": prompt},
-            timeout_seconds=timeout_seconds,
-            interrupt_check=interrupt_check,
-            keyword_deadline=keyword_deadline,
-            keyword=keyword,
-        )
-    except Exception as exc:
-        text = str(exc)
-        return {
-            "state": state,
-            "tile_id": tile_id,
-            "status": "not_matched",
-            "raw_text": text,
-            "rate_limited": _is_rate_limited_text(text),
-        }
-
-    text = _tool_text(result)
-    normalized = " ".join(text.lower().split())
-    parsed = _parse_page_state_probe_text(text)
-    if parsed:
-        matched = parsed == state or (state == "visible_results" and parsed in CAPTURABLE_PAGE_STATES)
-        return {
-            "state": state,
-            "tile_id": tile_id,
-            "status": "matched" if matched else "not_matched",
-            "raw_text": text,
-            "parsed_state": parsed,
-            "rate_limited": _is_rate_limited_text(text),
-        }
-    if result.get("isError") or _assertion_text_is_false(normalized):
-        return {
-            "state": state,
-            "tile_id": tile_id,
-            "status": "not_matched",
-            "raw_text": text,
-            "rate_limited": _is_rate_limited_text(text),
-        }
-    if _assertion_text_is_true(normalized):
-        return {
-            "state": state,
-            "tile_id": tile_id,
-            "status": "matched",
-            "raw_text": text,
-            "rate_limited": _is_rate_limited_text(text),
-        }
-    return {
-        "state": state,
-        "tile_id": tile_id,
-        "status": "unknown",
-        "raw_text": text,
-        "rate_limited": _is_rate_limited_text(text),
-    }
-
-
-def _parse_page_state_probe_text(text: str) -> str:
-    normalized = " ".join(str(text or "").strip().lower().split())
-    if not normalized:
-        return ""
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            value = str(parsed.get("state") or parsed.get("status") or "").strip().lower()
-            mapped = _normalize_page_state_probe_value(value)
-            if mapped:
-                return mapped
-    except Exception:
-        pass
-    state_match = re.search(r'\b(?:state|status)\s*[:=]\s*["\']?([a-z_]+)', normalized)
-    if state_match:
-        return _normalize_page_state_probe_value(state_match.group(1))
-    return _normalize_page_state_probe_value(normalized, allow_alias_substrings=False)
-
-
-def _parse_page_state_probe_payload(text: str) -> Dict[str, Any]:
-    raw = str(text or "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return {}
-    if not isinstance(parsed, dict):
-        return {}
-    state = _normalize_page_state_probe_value(
-        str(parsed.get("state") or parsed.get("status") or "").strip().lower()
-    )
-    payload: Dict[str, Any] = {"state": state} if state else {}
-    try:
-        payload["confidence"] = float(parsed.get("confidence"))
-    except (TypeError, ValueError):
-        pass
-    reason = str(parsed.get("reason") or "").strip()
-    if reason:
-        payload["reason"] = reason
-    visible_keyword = str(
-        parsed.get("visible_search_keyword")
-        or parsed.get("observed_keyword")
-        or parsed.get("search_keyword")
-        or ""
-    ).strip()
-    if visible_keyword:
-        payload["visible_search_keyword"] = visible_keyword
-    if "keyword_match" in parsed:
-        parsed_keyword_match = _parse_optional_bool(parsed.get("keyword_match"))
-        if parsed_keyword_match is not None:
-            payload["keyword_match"] = parsed_keyword_match
-    return payload
-
-
-def _parse_optional_bool(value: Any) -> Optional[bool]:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        if value == 1:
-            return True
-        if value == 0:
-            return False
-        return None
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return None
-
-
-def _normalize_page_state_probe_value(value: str, allow_alias_substrings: bool = True) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return ""
-    aliases = [
-        (FOREGROUND_NOT_READY_REASON, [FOREGROUND_NOT_READY_REASON, "not foreground", "non-chrome", "codex", "terminal", "cursor", "vs code", "wps"]),
-        ("captcha_required", ["captcha_required", "captcha", "验证码", "滑块"]),
-        ("login_required", ["login_required", "login", "sign in", "请登录", "登录"]),
-        ("risk_suspected", ["risk_suspected", "security", "risk", "风控", "风险", "安全验证", "安全检查"]),
-        ("popup_blocked", ["popup_blocked", "popup", "permission", "弹窗", "权限"]),
-        (WHITE_SKELETON, [WHITE_SKELETON, "white skeleton", "skeleton", "blank", "白屏", "骨架"]),
-        (EMPTY_RESULT, [EMPTY_RESULT, "no result", "no_results", "empty", "没有结果", "未找到"]),
-        ("results_end", ["results_end", "end_of_results", "bottom", "end of results", "到底", "底部", "没有更多"]),
-        ("visible_results", ["visible_results", "visible listings", "visible listing"]),
-        ("search_results", ["search_results", "search results"]),
-        ("results_page", ["results_page", "results page"]),
-        (VISIBLE_READY, [VISIBLE_READY]),
-        (UNKNOWN, [UNKNOWN]),
-    ]
-    for status, needles in aliases:
-        if allow_alias_substrings:
-            matched = any(needle in text for needle in needles)
-        else:
-            matched = any(needle == text for needle in needles)
-        if matched:
-            return status
-    return ""
 
 
 def _page_state_review_reason(page_state: Dict[str, Any]) -> str:
@@ -3217,6 +2860,7 @@ def _maybe_recover_foreground_after_act_exception(
     classification = classify_midscene_exception(exc)
     if classification.get("stop_reason") != "midscene_mcp_action_failed":
         return False
+    exception_reports_foreground_loss = _foreground_loss_detected(str(exc))
     path = _foreground_exception_screenshot_path(evidence_dir, stage)
     screenshot: Dict[str, Any] = {}
     page_state: Dict[str, Any] = {}
@@ -3227,11 +2871,14 @@ def _maybe_recover_foreground_after_act_exception(
             keyword_deadline=keyword_deadline,
             keyword=keyword,
         )
-        page_state = _classify_screenshot_with_optional_probe(
+        page_state = _classify_screenshot_page_state(
             client=client,
             path=path,
             contract=contract,
-            capture_plan={**(capture_plan or {}), "allow_midscene_page_state_probe": True},
+            capture_plan={
+                **(capture_plan or {}),
+                "allow_page_state_json_classifier": True,
+            },
             tools=tools,
             tile_id=f"{stage}_act_exception",
             keyword=keyword,
@@ -3239,14 +2886,14 @@ def _maybe_recover_foreground_after_act_exception(
             keyword_deadline=keyword_deadline,
             timeout_seconds=timeout_seconds,
         )
-    except Exception as probe_exc:
+    except Exception as classifier_exc:
         if diagnostics is not None:
             diagnostics.setdefault("foreground_recovery_exception_checks", []).append(
                 {
                     "stage": stage,
-                    "status": "probe_failed",
+                    "status": "classifier_check_failed",
                     "exception": str(exc),
-                    "probe_error": str(probe_exc),
+                    "classifier_error": str(classifier_exc),
                     "screenshot_path": path,
                 }
             )
@@ -3261,7 +2908,12 @@ def _maybe_recover_foreground_after_act_exception(
     if diagnostics is not None:
         diagnostics.setdefault("foreground_recovery_exception_checks", []).append(record)
     if not _foreground_loss_detected(page_state):
-        return False
+        if not exception_reports_foreground_loss:
+            return False
+        if _page_state_blocks_foreground_exception_recovery(page_state):
+            return False
+        record["status"] = "checked_exception_foreground_override"
+        record["foreground_recovery_trigger"] = "exception_text"
     _maybe_recover_foreground(
         client=client,
         contract=contract,
@@ -3414,11 +3066,14 @@ def _maybe_recover_foreground(
         after_page_state: Dict[str, Any] = {}
         if "after_error" not in attempt:
             try:
-                after_page_state = _classify_screenshot_with_optional_probe(
+                after_page_state = _classify_screenshot_page_state(
                     client=client,
                     path=after_path,
                     contract=contract,
-                    capture_plan={**(capture_plan or {}), "allow_midscene_page_state_probe": True},
+                    capture_plan={
+                        **(capture_plan or {}),
+                        "allow_page_state_json_classifier": True,
+                    },
                     tools=tools or [],
                     tile_id=f"{stage}_foreground_recovery_after",
                     keyword=keyword,
@@ -3444,7 +3099,7 @@ def _maybe_recover_foreground(
                 message=classification["message"],
                 diagnostics={"foreground_recovery_attempts": records},
             )
-        if _foreground_recovery_result_ok(result) and after_page_state and not _foreground_loss_detected(after_page_state):
+        if _foreground_recovery_result_ok(result) and _foreground_recovery_after_state_ok(after_page_state):
             event_record["status"] = "recovered"
             event_record["recovered_attempt"] = attempt_index
             return event_record
@@ -3470,6 +3125,79 @@ def _foreground_recovery_records(diagnostics: Optional[Dict[str, Any]]) -> List[
         return records
     diagnostics["foreground_recovery_attempts"] = []
     return diagnostics["foreground_recovery_attempts"]
+
+
+def _page_state_blocks_foreground_exception_recovery(page_state: Dict[str, Any]) -> bool:
+    """Keep real account/security blockers from being masked by foreground recovery."""
+    status = str((page_state or {}).get("status") or "")
+    if status in CAPTURABLE_PAGE_STATES:
+        return True
+    return status in {
+        "login_required",
+        "captcha_required",
+        "captcha_or_risk",
+        "risk_suspected",
+        "popup_blocked",
+        WHITE_SKELETON,
+        "account_state_changed_or_unusual",
+        "automation_permission_blocked",
+        "rate_limited",
+    }
+
+
+def _foreground_recovery_after_state_ok(page_state: Dict[str, Any]) -> bool:
+    if not page_state:
+        return False
+    if str(page_state.get("source") or "") == "heuristic":
+        return False
+    status = str(page_state.get("status") or "")
+    if not status:
+        return False
+    if status == FOREGROUND_NOT_READY_REASON:
+        return False
+    if status == WHITE_SKELETON:
+        return False
+    if status == UNKNOWN:
+        return _page_state_mentions_chrome_foreground(page_state)
+    if status in HARD_ABNORMAL_REASONS:
+        return False
+    if status in CAPTURABLE_PAGE_STATES:
+        return True
+    if _foreground_loss_detected(page_state) and not _page_state_mentions_chrome_foreground(page_state):
+        return False
+    return True
+
+
+def _page_state_mentions_chrome_foreground(page_state: Dict[str, Any]) -> bool:
+    if str((page_state or {}).get("source") or "") == "heuristic":
+        return False
+    texts = [
+        str(page_state.get("reason") or ""),
+        str(page_state.get("raw_text") or ""),
+    ]
+    diagnostics = page_state.get("probe_diagnostics")
+    if isinstance(diagnostics, dict):
+        texts.append(str(diagnostics.get("raw_text") or ""))
+    normalized = " ".join(" ".join(texts).lower().split())
+    if not normalized:
+        return False
+    chrome_needles = [
+        "chrome browser",
+        "chrome is foreground",
+        "chrome new tab",
+        "google search",
+        "google homepage",
+        "google new tab",
+        "chrome在前台",
+        "chrome浏览器",
+        "当前可见的前台窗口是chrome",
+        "当前显示的是chrome",
+        "google搜索主页",
+        "google新标签页",
+        "chrome的新标签页",
+        "chrome 新标签页",
+    ]
+    return any(needle in normalized for needle in chrome_needles)
 
 
 def _foreground_recovery_screenshot_path(
@@ -3781,7 +3509,7 @@ def _is_home_entry_retryable_exception_page_state(page_state: Dict[str, Any]) ->
         return False
     if status in HARD_ABNORMAL_REASONS:
         return False
-    return status in ASSERTION_KEYWORD_BOUNDARY_STATES
+    return status in CLASSIFIER_KEYWORD_BOUNDARY_STATES
 
 
 def classify_midscene_exception(exc: BaseException) -> Dict[str, Any]:
@@ -3936,7 +3664,9 @@ def _is_rate_limited_text(text: str) -> bool:
         "429",
         "rate limit",
         "rate-limit",
+        "rate_limited",
         "ratelimit",
+        "rate limited",
         "too many requests",
         "quota",
         "访问量过大",
@@ -3986,13 +3716,17 @@ def _bookmark_home_entry_repair_prompt(contract: Optional[Dict[str, Any]] = None
     return (
         "Do not use the browser address bar, do not type a URL, do not paste a "
         "URL, and do not run scripts. A limited home-entry repair is allowed "
-        "only when the current visible page is an old Taobao results page, a "
+        "when the current visible page is an old Taobao results page, a "
         "bottom-of-results page, or another old-keyword Taobao page: click the "
         "visible browser new tab plus button with the mouse, then click the "
         "visible Taobao bookmark button in the bookmarks bar to open the normal "
-        "Taobao homepage. Do not type anything into the address bar. Do not use "
-        "a new tab for any other purpose. If the Taobao bookmark button is not "
-        "visibly available, stop and report bookmark_home_entry_unavailable. "
+        "Taobao homepage. If Chrome is already foreground on a visible new tab "
+        "or start page and the Taobao bookmark button is visible in the bookmarks "
+        "bar, click that Taobao bookmark directly to open the normal Taobao "
+        "homepage; do not open another new tab first. Do not type anything into "
+        "the address bar. Do not use a new tab for any other purpose. If the "
+        "Taobao bookmark button is not visibly available, stop and report "
+        "bookmark_home_entry_unavailable. "
         "After the bookmark repair succeeds, you may close an obsolete old-results "
         "tab only if the visible tab strip clearly shows more than one Chrome tab "
         "will remain. Never close the final remaining Chrome tab; if the tab count "

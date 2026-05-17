@@ -295,7 +295,7 @@ class ConfigManager:
             'min_new_rows_per_tile': '2',
             'allow_second_page': 'false',
             'retain_screenshots': 'human_required_only',
-            'allow_midscene_page_state_probe': 'true',
+            'allow_page_state_json_classifier': 'true',
             'calibration_top_reserved_ratio': '0.24',
             'calibration_bottom_reserved_ratio': '0.06',
         }

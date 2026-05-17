@@ -49,8 +49,8 @@ Use this skill for project-specific Taobao collection work in this repository. I
   coordinate click, keyboard input, and scroll actions; locating the Taobao
   search box, confirming result pages, recognizing abnormal states, and deciding
   visible-screen progress all require a reliable VLM.
-- `glm-5v-turbo` is the tracked GLM mainline for Midscene grounding. Use
-  `MIDSCENE_MODEL_BASE_URL=https://api.z.ai/api/paas/v4`,
+- `glm-4.6v-flashx` is the tracked GLM mainline for Midscene grounding. Use
+  `MIDSCENE_MODEL_BASE_URL=https://open.bigmodel.cn/api/paas/v4`,
   `MIDSCENE_MODEL_FAMILY=glm-v`, `MIDSCENE_MODEL_REASONING_ENABLED=false`, and
   `MIDSCENE_MODEL_TEMPERATURE=0`. Keep thinking/reasoning disabled by default
   because this workflow needs low-latency visual grounding.
@@ -102,7 +102,7 @@ bash scripts/start_taobao_visual_chrome.sh
 - The same sync scripts create Codex profiles named `taobao_visual_cron` and `taobao_visual_extract` with `model = "gpt-5.5"`, `sandbox_mode = "danger-full-access"`, and `approval_policy = "never"`. Run Taobao visual cron jobs with `taobao_visual_cron`; run short-lived Codex extract workers with `taobao_visual_extract`. Both profiles are intended to avoid unattended automation pausing for tool approvals.
 - Codex extract dispatch must use CLI options supported by the bundled Codex CLI: use `-c sandbox_mode=...` and `-c approval_policy=...`, add `--ignore-rules` by default, attach screenshots with `-i`, and pass the worker prompt through stdin instead of as the final CLI argument so image varargs do not consume the prompt.
 - On macOS, run `bash scripts/check_taobao_visual_cron_permissions.sh` from the repository root before relying on an unattended cron. It must be able to see Chrome with `pgrep` when Chrome is running and save a system screenshot with `screencapture`.
-- The sync scripts write Codex-side per-tool `approval_mode = "approve"` only for the bounded act mainline tools: `computer_connect`, `computer_disconnect`, `computer_list_displays`, `ListDisplays`, `take_screenshot`, `act`, and `assert`. Short action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`, and `ClearInput` remain manual/debug fallback capabilities, not unattended cron pre-approvals.
+- The sync scripts write Codex-side per-tool `approval_mode = "approve"` only for the bounded act mainline tools: `computer_connect`, `computer_disconnect`, `computer_list_displays`, `ListDisplays`, `take_screenshot`, and `act`. `assert` and short action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`, and `ClearInput` remain manual/debug fallback capabilities, not unattended cron pre-approvals.
 - If a cron worker still asks for these approvals, or if shell `pgrep`/`screencapture` fails under ordinary sandboxing, treat it as project setup drift: rerun the sync script, use the `taobao_visual_cron` profile or equivalent app setting, and restart Codex if the app cached MCP settings. Do not proceed by manually approving one tool at a time for unattended collection.
 - If the run reaches macOS Accessibility/System Settings, or any prompt asking for GUI automation/screen recording permission, stop the session as `needs_review`/`setup_drift`. Do not keep switching windows or use Computer Use as a workaround.
 

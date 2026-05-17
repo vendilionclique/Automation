@@ -37,7 +37,7 @@ class PageSamplingConfig:
     min_new_rows_per_tile: int = 2
     allow_second_page: bool = False
     retain_screenshots: str = "human_required_only"
-    allow_midscene_page_state_probe: bool = False
+    allow_page_state_json_classifier: bool = False
     calibration_top_reserved_ratio: float = 0.24
     calibration_bottom_reserved_ratio: float = 0.06
 
@@ -47,6 +47,9 @@ class PageSamplingConfig:
 
 def page_sampling_config_from_settings(config) -> PageSamplingConfig:
     section = "PAGE_SAMPLING"
+    json_classifier_value = config.get(section, "allow_page_state_json_classifier", fallback=None)
+    if json_classifier_value is None:
+        json_classifier_value = config.get(section, "allow_midscene_page_state_probe", fallback=False)
     return PageSamplingConfig(
         target_listings_per_keyword=config.getint(
             section, "target_listings_per_keyword", fallback=48
@@ -62,9 +65,7 @@ def page_sampling_config_from_settings(config) -> PageSamplingConfig:
             section, "retain_screenshots", fallback="human_required_only"
         ).strip()
         or "human_required_only",
-        allow_midscene_page_state_probe=config.getboolean(
-            section, "allow_midscene_page_state_probe", fallback=False
-        ),
+        allow_page_state_json_classifier=_bool_value(json_classifier_value),
         calibration_top_reserved_ratio=config.getfloat(
             section, "calibration_top_reserved_ratio", fallback=0.24
         ),
@@ -72,6 +73,21 @@ def page_sampling_config_from_settings(config) -> PageSamplingConfig:
             section, "calibration_bottom_reserved_ratio", fallback=0.06
         ),
     )
+
+
+def _bool_value(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled", ""}:
+        return False
+    return False
 
 
 def estimate_tile_scroll_distance(

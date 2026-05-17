@@ -28,11 +28,11 @@ class MidsceneConfigTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIsNone(personal_path.search(text), f"personal absolute path leaked in {path}")
 
-    def test_glm_5v_turbo_env_example_points_to_local_secret_env(self):
+    def test_glm_flashx_env_example_points_to_local_secret_env(self):
         text = (ROOT / "local" / "midscene-computer.env.example").read_text(encoding="utf-8")
 
-        self.assertIn('MIDSCENE_MODEL_NAME="glm-5v-turbo"', text)
-        self.assertIn('MIDSCENE_MODEL_BASE_URL="https://api.z.ai/api/paas/v4"', text)
+        self.assertIn('MIDSCENE_MODEL_NAME="glm-4.6v-flashx"', text)
+        self.assertIn('MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"', text)
         self.assertIn('MIDSCENE_MODEL_FAMILY="glm-v"', text)
         self.assertIn('MIDSCENE_MODEL_REASONING_ENABLED="false"', text)
         self.assertIn('MIDSCENE_MODEL_TEMPERATURE="0"', text)
@@ -55,7 +55,6 @@ class MidsceneConfigTests(unittest.TestCase):
             "computer_list_displays",
             "take_screenshot",
             "act",
-            "assert",
         }
         legacy_short_actions = {
             "Tap",
@@ -95,9 +94,9 @@ mcp_request_timeout_seconds = 180
 
 [MIDSCENE_MODEL]
 enabled = true
-model_name = glm-5v-turbo
+model_name = glm-4.6v-flashx
 model_family = glm-v
-base_url = https://api.z.ai/api/paas/v4
+base_url = https://open.bigmodel.cn/api/paas/v4
 api_key_env = MIDSCENE_MODEL_API_KEY
 reasoning_enabled = false
 temperature = 0
@@ -125,15 +124,15 @@ inter_keyword_pause_max = 18
                 payload = json.load(f)
 
         self.assertEqual(payload["config"]["page_load_wait"], 2.0)
-        self.assertEqual(payload["config"]["model_name"], "glm-5v-turbo")
+        self.assertEqual(payload["config"]["model_name"], "glm-4.6v-flashx")
         self.assertFalse(payload["config"]["reasoning_enabled"])
         self.assertEqual(payload["config"]["temperature"], 0.0)
         self.assertTrue(payload["model_boundary"]["midscene_vlm_enabled"])
-        self.assertEqual(payload["model_boundary"]["midscene_model_name"], "glm-5v-turbo")
+        self.assertEqual(payload["model_boundary"]["midscene_model_name"], "glm-4.6v-flashx")
         self.assertEqual(payload["model_boundary"]["midscene_model_family"], "glm-v")
         self.assertEqual(
             payload["model_boundary"]["midscene_model_base_url"],
-            "https://api.z.ai/api/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4",
         )
         self.assertEqual(payload["model_boundary"]["midscene_api_key_env"], "MIDSCENE_MODEL_API_KEY")
         self.assertFalse(payload["model_boundary"]["midscene_model_reasoning_enabled"])
@@ -145,7 +144,7 @@ inter_keyword_pause_max = 18
             "0.2,0.8,0.90",
         )
 
-    def test_session_worker_contract_uses_glm_5v_turbo_mainline(self):
+    def test_session_worker_contract_uses_glm_flashx_mainline(self):
         parser = configparser.ConfigParser()
         parser.read_string(
             """
@@ -157,9 +156,9 @@ page_load_wait = 2
 
 [MIDSCENE_MODEL]
 enabled = true
-model_name = glm-5v-turbo
+model_name = glm-4.6v-flashx
 model_family = glm-v
-base_url = https://api.z.ai/api/paas/v4
+base_url = https://open.bigmodel.cn/api/paas/v4
 api_key_env = MIDSCENE_MODEL_API_KEY
 reasoning_enabled = false
 temperature = 0
@@ -182,19 +181,19 @@ final_extraction_owner = codex
             with open(contract["contract"], "r", encoding="utf-8") as f:
                 payload = json.load(f)
 
-        self.assertEqual(config.model_name, "glm-5v-turbo")
-        self.assertEqual(payload["config"]["model_name"], "glm-5v-turbo")
+        self.assertEqual(config.model_name, "glm-4.6v-flashx")
+        self.assertEqual(payload["config"]["model_name"], "glm-4.6v-flashx")
         self.assertEqual(payload["config"]["model_family"], "glm-v")
-        self.assertEqual(payload["config"]["model_base_url"], "https://api.z.ai/api/paas/v4")
+        self.assertEqual(payload["config"]["model_base_url"], "https://open.bigmodel.cn/api/paas/v4")
         self.assertEqual(payload["config"]["model_api_key_env"], "MIDSCENE_MODEL_API_KEY")
         self.assertFalse(payload["config"]["reasoning_enabled"])
         self.assertEqual(payload["config"]["temperature"], 0.0)
         self.assertTrue(payload["model_boundary"]["midscene_vlm_enabled"])
-        self.assertEqual(payload["model_boundary"]["midscene_model_name"], "glm-5v-turbo")
+        self.assertEqual(payload["model_boundary"]["midscene_model_name"], "glm-4.6v-flashx")
         self.assertEqual(payload["model_boundary"]["midscene_model_family"], "glm-v")
         self.assertEqual(
             payload["model_boundary"]["midscene_model_base_url"],
-            "https://api.z.ai/api/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4",
         )
         self.assertEqual(payload["model_boundary"]["midscene_api_key_env"], "MIDSCENE_MODEL_API_KEY")
         self.assertFalse(payload["model_boundary"]["midscene_model_reasoning_enabled"])

@@ -8,24 +8,14 @@
   ],
   "env_file": "local/midscene-computer.env",
   "tool_approval": {
-    "default": "approve",
+    "default": "manual",
     "tools": {
       "ListDisplays": "approve",
       "computer_connect": "approve",
       "computer_disconnect": "approve",
       "computer_list_displays": "approve",
       "take_screenshot": "approve",
-      "Tap": "approve",
-      "DoubleClick": "approve",
-      "RightClick": "approve",
-      "MouseMove": "approve",
-      "Input": "approve",
-      "Scroll": "approve",
-      "KeyboardPress": "approve",
-      "DragAndDrop": "approve",
-      "ClearInput": "approve",
-      "act": "approve",
-      "assert": "approve"
+      "act": "approve"
     }
   },
   "notes": [

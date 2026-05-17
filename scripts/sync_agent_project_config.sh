@@ -26,7 +26,6 @@ tools = [
     "computer_list_displays",
     "take_screenshot",
     "act",
-    "assert",
 ]
 tool_blocks = "".join(
     f"[mcp_servers.midscene-computer.tools.{tool}]\n"
@@ -113,9 +112,9 @@ if [[ ! -f "${LOCAL_ENV}" ]]; then
   mkdir -p "$(dirname "${LOCAL_ENV}")"
   cat > "${LOCAL_ENV}" <<EOF
 # Local Midscene computer VLM config. Gitignored; do not commit.
-export MIDSCENE_MODEL_NAME="glm-5v-turbo"
+export MIDSCENE_MODEL_NAME="glm-4.6v-flashx"
 export MIDSCENE_MODEL_API_KEY=""
-export MIDSCENE_MODEL_BASE_URL="https://api.z.ai/api/paas/v4"
+export MIDSCENE_MODEL_BASE_URL="https://open.bigmodel.cn/api/paas/v4"
 export MIDSCENE_MODEL_FAMILY="glm-v"
 export MIDSCENE_MODEL_REASONING_ENABLED="false"
 export MIDSCENE_MODEL_TEMPERATURE="0"
