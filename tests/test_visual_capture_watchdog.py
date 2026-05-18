@@ -301,6 +301,18 @@ class VisualCaptureWatchdogTests(unittest.TestCase):
         self.assertEqual(process.terminate_calls, 0)
         self.assertEqual(process.wait_calls, [5.0])
 
+    def test_recorded_midscene_mcp_group_cleanup_uses_capture_runtime_pgid(self):
+        with mock.patch.object(
+            visual_capture_watchdog,
+            "load_worker_runtime",
+            return_value={"mcp_pgid": 4567},
+        ), mock.patch.object(visual_capture_watchdog.os, "killpg") as killpg:
+            result = visual_capture_watchdog._terminate_recorded_mcp_process_group("plan", 1)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mcp_pgid"], 4567)
+        killpg.assert_called_once_with(4567, visual_capture_watchdog.signal.SIGTERM)
+
     def test_allowed_capture_starts_despite_old_paused_session_result(self):
         heartbeat = HeartbeatScript(
             heartbeat_allowed_with_old_paused_result(),

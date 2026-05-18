@@ -154,6 +154,31 @@ inter_keyword_pause_max = 18
             payload["visual_behavior"]["micro_pause_distribution"]["short"],
             "0.2,0.8,0.90",
         )
+        self.assertTrue(payload["business_boundaries_enabled"])
+        self.assertTrue(payload["three_stage_business_boundaries"])
+        self.assertTrue(payload["config"]["business_boundaries_enabled"])
+        self.assertTrue(payload["hard_stop_policy"]["business_boundaries_enabled"])
+        self.assertEqual(
+            payload["action_boundary"]["business_boundaries"],
+            [
+                "desktop_chrome_ready_boundary",
+                "home_entry_boundary",
+                "search_submit_boundary",
+                "capture_tiles_boundary",
+                "safe_popup_repair_boundary",
+                "human_stop_boundary",
+            ],
+        )
+        policy = payload["midscene_internal_action_policy"]
+        self.assertEqual(policy["schema"], "midscene_internal_action_policy_v1")
+        self.assertEqual(policy["python_codex_direct_short_action_tools"], "forbidden")
+        self.assertTrue(policy["midscene_act_internal_gui_primitives"]["allowed"])
+        self.assertIn("Tap", policy["midscene_act_internal_gui_primitives"]["tools"])
+        self.assertIn("DOM", policy["red_lines"])
+        self.assertEqual(
+            payload["action_boundary"]["midscene_internal_action_policy"]["schema"],
+            "midscene_internal_action_policy_v1",
+        )
 
     def test_session_worker_contract_uses_glm_flashx_mainline(self):
         parser = configparser.ConfigParser()
@@ -297,7 +322,9 @@ page_load_wait = 2
         self.assertIn("browser address bar", text)
         self.assertIn("new tab", text)
         self.assertIn("scripted force-activation", text)
-        self.assertIn("short-action tools", text)
+        self.assertIn("Python/Codex worker", text)
+        self.assertIn("must not directly call short-action MCP tools", text)
+        self.assertIn("Midscene may use visible system GUI primitives", text)
         for tool in ("`Tap`", "`Input`", "`KeyboardPress`", "`Scroll`", "`ClearInput`"):
             self.assertIn(tool, text)
         self.assertIn("`tile_00` as the hard\n  acceptance boundary", text)
@@ -356,7 +383,8 @@ page_load_wait = 2
         self.assertIn("if tab count is unclear, leave the tab open", text)
         self.assertIn("Do not use the browser address bar", text)
         self.assertIn("do not type or paste a URL", text)
-        self.assertIn("short-action tools", text)
+        self.assertIn("must not directly call short-action MCP tools", text)
+        self.assertIn("Midscene may use visible system GUI primitives", text)
 
     def test_session_worker_contract_carries_foreground_recovery_defaults(self):
         parser = configparser.ConfigParser()

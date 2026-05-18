@@ -17,6 +17,9 @@ SCHEMA = GOAL_CONTRACT_SCHEMA
 HOME_ENTRY_BOUNDARY = "HOME_ENTRY_BOUNDARY"
 SEARCH_SUBMIT_BOUNDARY = "SEARCH_SUBMIT_BOUNDARY"
 CAPTURE_TILES_BOUNDARY = "CAPTURE_TILES_BOUNDARY"
+DESKTOP_CHROME_READY_BOUNDARY = "DESKTOP_CHROME_READY_BOUNDARY"
+SAFE_POPUP_REPAIR_BOUNDARY = "SAFE_POPUP_REPAIR_BOUNDARY"
+HUMAN_STOP_BOUNDARY = "HUMAN_STOP_BOUNDARY"
 BOUNDARY_VERIFY = "BOUNDARY_VERIFY"
 CAPTURING = "CAPTURING"
 
@@ -163,17 +166,23 @@ def build_goal_contract(
         "session_index": contract.get("session_index") or 0,
         "goal": "reach_current_keyword_taobao_results_from_visible_home_search_entry",
         "business_boundaries": [
+            DESKTOP_CHROME_READY_BOUNDARY,
             HOME_ENTRY_BOUNDARY,
             SEARCH_SUBMIT_BOUNDARY,
             CAPTURE_TILES_BOUNDARY,
+            SAFE_POPUP_REPAIR_BOUNDARY,
+            HUMAN_STOP_BOUNDARY,
         ],
         "success_evidence": [
+            "desktop_chrome_ready_boundary proves the dedicated Chrome/Taobao collection window is foreground before page actions",
             "home_entry_boundary proves the ordinary Taobao homepage/search-entry surface before typing a keyword",
             "chrome_or_taobao_related_foreground",
             "taobao_results_or_empty_results_page",
             "visible evidence belongs to current keyword",
             "search_submit_boundary tile_00 proves the search was submitted into a results-page structure and not a homepage feed",
             "capture_tiles_boundary only samples within the accepted current-keyword results page",
+            "safe_popup_repair_boundary may close only ordinary non-account marketing overlays with a clear gray X",
+            "human_stop_boundary stops on login captcha risk permission unknown high-risk pages or hidden-data needs",
             "no login captcha risk white skeleton permission panel or account-state-changing popup",
         ],
         "forbidden": [

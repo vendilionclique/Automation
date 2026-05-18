@@ -48,6 +48,12 @@ display, system screenshot, and `act`. `assert` and short action tools such as
 the unattended capture approval surface. The approval is scoped to the Midscene
 computer MCP action surface; it does not add DOM, HTML, network, cookie,
 storage, clipboard, or CDP extraction tools.
+That approval boundary applies to direct Python/Codex MCP calls. Midscene may
+still use visible system GUI primitives internally while completing one bounded
+`act` business boundary.
+The active boundary set is Chrome-ready, home-entry, search-submit,
+capture-tiles, safe popup repair, and human stop; home/search/capture are only
+the capture trunk.
 
 For screenshot state checks, the capture mainline treats each retained screenshot
 as a single VLM/page-state decision point. One coarse state probe must provide

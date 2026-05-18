@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Optional
 from modules import visual_scheduler
 from modules.page_sampling import write_task_event
 from modules.utils import ConfigManager, ensure_dir, get_project_root
+from modules.visual_control import load_worker_runtime
 
 
 TERMINAL_SESSION_STATUSES = {
@@ -336,7 +337,10 @@ def run_capture_watchdog(
     finally:
         if worker is not None:
             _terminate_worker_process_group(worker, timeout_seconds=5.0)
+            mcp_cleanup = _terminate_recorded_mcp_process_group(plan_id, session_index)
             runtime["current_capture_pid"] = None
+            if mcp_cleanup:
+                runtime["last_mcp_cleanup"] = mcp_cleanup
             _write_runtime(paths["runtime_path"], runtime, now_fn)
             _event(
                 project_root,
@@ -344,6 +348,7 @@ def run_capture_watchdog(
                 session_index,
                 "capture_watchdog_cleaned_worker_process_group",
                 capture_pid=getattr(worker, "pid", None),
+                mcp_cleanup=mcp_cleanup,
             )
         _close_quietly(worker_stdout)
         _close_quietly(worker_stderr)
@@ -641,6 +646,27 @@ def _terminate_worker_process_group(worker: Any, timeout_seconds: float = 5.0) -
         worker.wait(timeout=1.0)
     except Exception:
         pass
+
+
+def _terminate_recorded_mcp_process_group(plan_id: str, session_index: int) -> Dict[str, Any]:
+    try:
+        capture_runtime = load_worker_runtime(plan_id, session_index, "capture")
+    except Exception as exc:
+        return {"ok": False, "reason": "runtime_unreadable", "error": str(exc)}
+    raw_pgid = capture_runtime.get("mcp_pgid") or (capture_runtime.get("mcp_diagnostics") or {}).get("mcp_pgid")
+    try:
+        pgid = int(raw_pgid)
+    except (TypeError, ValueError):
+        return {}
+    if pgid <= 0:
+        return {}
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+        return {"ok": True, "mcp_pgid": pgid, "signal": "SIGTERM"}
+    except ProcessLookupError:
+        return {"ok": True, "mcp_pgid": pgid, "already_exited": True}
+    except Exception as exc:
+        return {"ok": False, "mcp_pgid": pgid, "error": str(exc)}
 
 
 def _terminate_worker_process(worker: Any) -> None:

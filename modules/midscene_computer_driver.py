@@ -37,6 +37,42 @@ HARD_STOP_STATES = [
     "unknown",
 ]
 
+MIDSCENE_INTERNAL_ACTION_POLICY = {
+    "schema": "midscene_internal_action_policy_v1",
+    "principle": (
+        "Python/Codex hands Midscene one business boundary through bounded act; "
+        "Midscene may complete the continuous visible GUI steps inside that act."
+    ),
+    "python_codex_direct_short_action_tools": "forbidden",
+    "midscene_act_internal_gui_primitives": {
+        "allowed": True,
+        "tools": [
+            "Tap",
+            "Input",
+            "Scroll",
+            "KeyboardPress",
+            "MouseMove",
+            "DragAndDrop",
+            "RightClick",
+            "DoubleClick",
+            "ClearInput",
+        ],
+        "scope": "visible-screen system mouse, keyboard, and wheel actions inside a bounded act only",
+    },
+    "red_lines": [
+        "DOM",
+        "network",
+        "storage",
+        "cookies",
+        "JS",
+        "HTML",
+        "selector map",
+        "hidden data",
+        "automated login/captcha/security/risk handling",
+        "cart/favorite/checkout/reward/account-state mutation",
+    ],
+}
+
 
 @dataclass
 class MidsceneComputerConfig:
@@ -67,9 +103,9 @@ class MidsceneComputerConfig:
     micro_pause_long: str = "1.5,2.5,0.02"
     inter_keyword_pause_min: float = 180.0
     inter_keyword_pause_max: float = 420.0
-    detail_page_peek_probability: float = 0.08
-    cart_or_favorites_peek_probability: float = 0.03
-    allow_cart_or_favorites_peek: bool = True
+    detail_page_peek_probability: float = 0.0
+    cart_or_favorites_peek_probability: float = 0.0
+    allow_cart_or_favorites_peek: bool = False
     allow_claim_rewards: bool = False
     foreground_recovery_enabled: bool = True
     foreground_recovery_attempts_per_event: int = 3
@@ -79,6 +115,7 @@ class MidsceneComputerConfig:
     rate_limit_backoff: float = 1.5
     allow_bookmark_home_entry_repair: bool = False
     require_initial_home_entry: bool = True
+    business_boundaries_enabled: bool = True
     three_stage_business_boundaries: bool = True
     home_entry_boundary_required: bool = True
     search_submit_boundary_required: bool = True
@@ -136,13 +173,13 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
             behavior_section, "inter_keyword_pause_max", fallback=420.0
         ),
         detail_page_peek_probability=config.getfloat(
-            behavior_section, "detail_page_peek_probability", fallback=0.08
+            behavior_section, "detail_page_peek_probability", fallback=0.0
         ),
         cart_or_favorites_peek_probability=config.getfloat(
-            behavior_section, "cart_or_favorites_peek_probability", fallback=0.03
+            behavior_section, "cart_or_favorites_peek_probability", fallback=0.0
         ),
         allow_cart_or_favorites_peek=config.getboolean(
-            behavior_section, "allow_cart_or_favorites_peek", fallback=True
+            behavior_section, "allow_cart_or_favorites_peek", fallback=False
         ),
         allow_claim_rewards=config.getboolean(
             behavior_section, "allow_claim_rewards", fallback=False
@@ -176,9 +213,8 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
         require_initial_home_entry=config.getboolean(
             section, "require_initial_home_entry", fallback=True
         ),
-        three_stage_business_boundaries=config.getboolean(
-            section, "three_stage_business_boundaries", fallback=True
-        ),
+        business_boundaries_enabled=_business_boundaries_enabled_from_settings(config, section),
+        three_stage_business_boundaries=_business_boundaries_enabled_from_settings(config, section),
         home_entry_boundary_required=config.getboolean(
             section, "home_entry_boundary_required", fallback=True
         ),
@@ -278,8 +314,9 @@ def write_midscene_session_worker_contract(
         "manual_state": manual_state or "",
         "reference_url": TAOBAO_HOME,
         "entry_context": "taobao_homepage_visible_search_entry_required",
-        "business_boundary_model": "home_entry_boundary -> search_submit_boundary -> capture_tiles_boundary",
-        "three_stage_business_boundaries": config.three_stage_business_boundaries,
+        "business_boundary_model": "desktop_chrome_ready_boundary -> home_entry_boundary -> search_submit_boundary -> capture_tiles_boundary (+ safe_popup_repair_boundary / human_stop_boundary)",
+        "business_boundaries_enabled": config.business_boundaries_enabled,
+        "three_stage_business_boundaries": config.business_boundaries_enabled,
         "navigation_instruction": (
             "visual_homepage_entry_only_no_address_bar_url_or_script"
             if config.allow_bookmark_home_entry_repair
@@ -327,7 +364,8 @@ def write_midscene_session_worker_contract(
             "foreground_recovery_events_per_keyword": config.foreground_recovery_events_per_keyword,
             "allow_bookmark_home_entry_repair": config.allow_bookmark_home_entry_repair,
             "require_initial_home_entry": config.require_initial_home_entry,
-            "three_stage_business_boundaries": config.three_stage_business_boundaries,
+            "business_boundaries_enabled": config.business_boundaries_enabled,
+            "three_stage_business_boundaries": config.business_boundaries_enabled,
             "home_entry_boundary_required": config.home_entry_boundary_required,
             "search_submit_boundary_required": config.search_submit_boundary_required,
             "capture_tiles_boundary_required": config.capture_tiles_boundary_required,
@@ -339,16 +377,33 @@ def write_midscene_session_worker_contract(
             "input": "system screenshots only",
             "actions": ["coordinate click", "keyboard input", "keyboard shortcut", "page-level scroll"],
             "allowed_act_scope": "bounded visual act through visible Taobao homepage entry only",
+            "midscene_internal_action_policy": MIDSCENE_INTERNAL_ACTION_POLICY,
             "business_boundaries": [
+                "desktop_chrome_ready_boundary",
                 "home_entry_boundary",
                 "search_submit_boundary",
                 "capture_tiles_boundary",
+                "safe_popup_repair_boundary",
+                "human_stop_boundary",
             ],
             "boundary_principle": "split by business boundaries that must not be conflated, not by UI micro-actions",
+            "desktop_chrome_ready_boundary": "bring an existing dedicated Chrome/Taobao collection window foreground; stop on wrong profile, permission, login, captcha, or risk",
             "home_entry_boundary": "reach verified ordinary Taobao homepage/search-entry; do not type keyword or submit search",
             "search_submit_boundary": f"submit current keyword from verified homepage and accept {config.search_submit_boundary_tile_id}",
             "capture_tiles_boundary": "sample only within the accepted current-keyword results page",
-            "forbidden_live_tools": ["Tap", "Input", "KeyboardPress", "Scroll", "ClearInput"],
+            "safe_popup_repair_boundary": "close only safe ordinary marketing overlay controls, then re-screenshot and reclassify",
+            "human_stop_boundary": "stop for login, captcha, security, risk, permission panels, unknown high-risk pages, or any hidden-data need",
+            "python_codex_forbidden_direct_short_action_tools": [
+                "Tap",
+                "Input",
+                "KeyboardPress",
+                "Scroll",
+                "ClearInput",
+                "MouseMove",
+                "DragAndDrop",
+                "RightClick",
+                "DoubleClick",
+            ],
             "forbidden_navigation": [
                 "browser address bar",
                 "typed URL",
@@ -369,6 +424,7 @@ def write_midscene_session_worker_contract(
             "forbidden_strategy_scope": "no daily planning, no cross-session routing, no final exception strategy",
             "product_rows_source": "Codex-reviewed visible screenshots only",
         },
+        "midscene_internal_action_policy": MIDSCENE_INTERNAL_ACTION_POLICY,
         "model_boundary": {
             "midscene_vlm_enabled": config.model_enabled,
             "midscene_vlm_role": "visual grounding and coarse operational state only",
@@ -490,11 +546,14 @@ Per-keyword homepage entry rule:
 - After a bookmark repair succeeds, obsolete old-results tabs may be closed only
   if the tab strip visibly shows more than one Chrome tab remains. Never close
   the final remaining Chrome tab; if tab count is unclear, leave the tab open.
-- Do not use the browser address bar, do not type or paste a URL, do not run
-  AppleScript/shell/scripted force-activation helpers, and do not use
-  short-action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`, or
-  `ClearInput` for unattended capture. Use bounded visual `act` only for the
-  homepage entry/search step.
+- Do not use the browser address bar, do not type or paste a URL, and do not run
+  AppleScript/shell/scripted force-activation helpers. The Python/Codex worker
+  must not directly call short-action MCP tools such as `Tap`, `Input`,
+  `KeyboardPress`, `Scroll`, or `ClearInput` for unattended capture. Inside a
+  bounded visual `act`, Midscene may use visible system GUI primitives such as
+  tapping, typing, keyboard press, mouse movement, dragging, right/double click,
+  clearing visible input, and one-step scrolling to complete the named business
+  boundary, then stop for Python to screenshot and verify.
 - After submitting the homepage search, save and classify `tile_00` as the hard
   acceptance boundary. `tile_00` must prove a visible Taobao results page for
   the current keyword before any scrolling or later tile capture. If `tile_00`
@@ -586,6 +645,13 @@ Expected session_worker_result.json shape:
 
 def _split_csv(value: str) -> List[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _business_boundaries_enabled_from_settings(config, section: str) -> bool:
+    sentinel = object()
+    if config.get(section, "business_boundaries_enabled", fallback=sentinel) is not sentinel:
+        return config.getboolean(section, "business_boundaries_enabled", fallback=True)
+    return config.getboolean(section, "three_stage_business_boundaries", fallback=True)
 
 
 def _safe_keyword_dir(value: str) -> str:

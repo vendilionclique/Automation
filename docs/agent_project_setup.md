@@ -90,6 +90,13 @@ display listing/connection, system screenshots, bounded `act`, and disconnect.
 Short action tools such as `Tap`, `Input`, `KeyboardPress`, `Scroll`,
 and `ClearInput` are not pre-approved for unattended cron. The approved set does
 not grant DOM, HTML, network, cookie, storage, or CDP extraction capabilities.
+This approval boundary limits direct Python/Codex MCP calls; it does not forbid
+Midscene from using visible system GUI primitives inside one bounded `act`.
+The active business-boundary set is
+`desktop_chrome_ready_boundary`, `home_entry_boundary`,
+`search_submit_boundary`, `capture_tiles_boundary`,
+`safe_popup_repair_boundary`, and `human_stop_boundary`; the middle three are
+only the capture trunk, not the whole boundary model.
 
 Cron automations for this workflow should request the latest GPT-5.5 model by
 default. Codex extract dispatch may use `codex exec -p taobao_visual_extract`

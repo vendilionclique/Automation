@@ -12,6 +12,7 @@ import queue
 import random
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -193,6 +194,9 @@ def run_capture_worker(contract_path: str) -> Dict[str, Any]:
         "created_at": now,
         "updated_at": _now(),
     }
+    diagnostics = real_result.get("diagnostics")
+    if diagnostics:
+        session_result["diagnostics"] = diagnostics
     _write_json(session_result_path, session_result)
     write_task_event(
         task_dir,
@@ -270,6 +274,14 @@ def _run_real_capture_contract(
                     notes=f"Midscene MCP missing required tools: {', '.join(missing)}.",
                 )
 
+            mcp_lifecycle = client.lifecycle_diagnostics()
+            _refresh_capture_runtime(
+                run_id,
+                session_index,
+                contract_path,
+                progress_event="mcp_started",
+                **mcp_lifecycle,
+            )
             write_task_event(
                 task_dir,
                 event="visual_capture_real_mcp_connected",
@@ -277,12 +289,40 @@ def _run_real_capture_contract(
                 session_index=session_index,
                 contract_path=contract_path,
                 tools=sorted(set(tools) & (MCP_REQUIRED_TOOLS | MCP_OPTIONAL_TOOLS)),
+                **mcp_lifecycle,
             )
             client.call_tool(
                 "computer_connect",
                 {},
                 interrupt_check=lambda: _raise_if_controlled(run_id, session_index),
             )
+            preflight = _run_midscene_preflight(
+                client=client,
+                task_dir=task_dir,
+                run_id=run_id,
+                session_index=session_index,
+                contract_path=contract_path,
+            )
+            if not preflight.get("ok"):
+                diagnostics = {"mcp_lifecycle": client.lifecycle_diagnostics(), "preflight": preflight}
+                _refresh_capture_runtime(
+                    run_id,
+                    session_index,
+                    contract_path,
+                    progress_event="setup_drift",
+                    mcp_diagnostics=diagnostics["mcp_lifecycle"],
+                    preflight=preflight,
+                )
+                result = _real_unavailable_results(
+                    keyword_tasks,
+                    run_id,
+                    session_index,
+                    task_dir,
+                    stop_reason="setup_drift",
+                    notes=f"Midscene preflight failed: {preflight.get('error') or preflight.get('stop_reason')}",
+                )
+                result["diagnostics"] = diagnostics
+                return result
 
             keyword_results = []
             consecutive_abnormal = 0
@@ -352,6 +392,7 @@ def _run_real_capture_contract(
                         "stop_reason": reason or status,
                         "keyword_results": keyword_results,
                         "notes": "Real Midscene computer MCP capture interrupted by supervisor control.",
+                        "diagnostics": {"mcp_lifecycle": client.lifecycle_diagnostics(), "preflight": preflight},
                     }
                 if status == "failed" and reason in {"stopped", "stop_or_locked"}:
                     return {
@@ -359,6 +400,7 @@ def _run_real_capture_contract(
                         "stop_reason": reason,
                         "keyword_results": keyword_results,
                         "notes": "Real Midscene computer MCP capture stopped by supervisor control.",
+                        "diagnostics": {"mcp_lifecycle": client.lifecycle_diagnostics(), "preflight": preflight},
                     }
                 if status == "needs_review" and reason in {"home_entry_unverified", "home_entry_not_reached", "home_entry_reset_failed"}:
                     return {
@@ -369,6 +411,7 @@ def _run_real_capture_contract(
                             "Pre-keyword home-entry failed after bounded reset; "
                             "stopped the session before the next keyword to avoid context pollution."
                         ),
+                        "diagnostics": {"mcp_lifecycle": client.lifecycle_diagnostics(), "preflight": preflight},
                     }
                 if _should_stop_immediately(status, reason):
                     _request_worker_cooldown(run_id, session_index, reason)
@@ -377,6 +420,7 @@ def _run_real_capture_contract(
                         "stop_reason": reason or "keyword_needs_review",
                         "keyword_results": keyword_results,
                         "notes": "Real Midscene computer MCP capture stopped for human-in-the-loop review.",
+                        "diagnostics": {"mcp_lifecycle": client.lifecycle_diagnostics(), "preflight": preflight},
                     }
                 if consecutive_abnormal >= abnormal_limit:
                     stop_reason = reason or "consecutive_abnormal_limit"
@@ -389,6 +433,7 @@ def _run_real_capture_contract(
                             "Real Midscene computer MCP capture reached the consecutive abnormal "
                             "limit and requested session cooldown."
                         ),
+                        "diagnostics": {"mcp_lifecycle": client.lifecycle_diagnostics(), "preflight": preflight},
                     }
 
             session_status = (
@@ -404,6 +449,7 @@ def _run_real_capture_contract(
                     "Real Midscene computer MCP capture completed. Product rows are still "
                     "owned by extract/ingest from retained visible screenshots."
                 ),
+                "diagnostics": {"mcp_lifecycle": client.lifecycle_diagnostics(), "preflight": preflight},
             }
     except WorkerControlInterrupt as exc:
         return {
@@ -421,6 +467,75 @@ def _run_real_capture_contract(
             stop_reason="midscene_mcp_stdio_unavailable",
             notes=f"Midscene computer MCP was not usable from this Python worker: {exc}",
         )
+
+
+def _run_midscene_preflight(
+    client: "MidsceneStdioClient",
+    task_dir: str,
+    run_id: str,
+    session_index: int,
+    contract_path: str,
+) -> Dict[str, Any]:
+    """Verify the MCP screenshot and bounded-act path before Taobao capture starts."""
+    screenshot_path = os.path.join(task_dir, "midscene_preflight.png")
+    diagnostics: Dict[str, Any] = {
+        "schema": "midscene_preflight_v1",
+        "checks": {
+            "tools_list": True,
+            "computer_connect": True,
+        },
+    }
+    try:
+        screenshot = client.capture_screenshot(path=screenshot_path, timeout_seconds=30)
+        diagnostics["checks"]["take_screenshot"] = True
+        diagnostics["screenshot_path"] = screenshot.get("path") or screenshot_path
+        result = client.call_tool(
+            "act",
+            {
+                "prompt": (
+                    "Midscene boundary preflight only. Do not click, type, scroll, "
+                    "switch windows, navigate, or change page/account state. Confirm "
+                    "that the system GUI action backend is initialized and can later "
+                    "perform visible mouse, keyboard input, keyboard press, and scroll "
+                    "inside a bounded act. Reply preflight_ok if ready. If any backend "
+                    "is unavailable, reply setup_drift with the missing capability."
+                )
+            },
+            timeout_seconds=30,
+        )
+        text = _tool_text(result)
+        if "setup_drift" in text.lower():
+            diagnostics["checks"]["act_backend"] = False
+            diagnostics["ok"] = False
+            diagnostics["stop_reason"] = "setup_drift"
+            diagnostics["error"] = text[:500]
+            return diagnostics
+        diagnostics["checks"]["act_backend"] = True
+        diagnostics["ok"] = True
+        diagnostics["act_preflight_text"] = text[:500]
+        write_task_event(
+            task_dir,
+            event="visual_capture_midscene_preflight_ok",
+            run_id=run_id,
+            session_index=session_index,
+            contract_path=contract_path,
+            screenshot_path=screenshot_path,
+        )
+        return diagnostics
+    except Exception as exc:
+        diagnostics["ok"] = False
+        diagnostics["stop_reason"] = "setup_drift"
+        diagnostics["error"] = str(exc)
+        write_task_event(
+            task_dir,
+            event="visual_capture_midscene_preflight_failed",
+            level="warning",
+            run_id=run_id,
+            session_index=session_index,
+            contract_path=contract_path,
+            error=str(exc),
+        )
+        return diagnostics
 
 
 def _capture_keyword_with_mcp(
@@ -460,9 +575,13 @@ def _require_initial_home_entry(contract: Dict[str, Any]) -> bool:
     return bool(hard_stop.get("require_initial_home_entry") or config.get("require_initial_home_entry"))
 
 
-def _three_stage_business_boundaries_enabled(contract: Dict[str, Any]) -> bool:
+def _business_boundaries_enabled(contract: Dict[str, Any]) -> bool:
     hard_stop = contract.get("hard_stop_policy") or {}
     config = contract.get("config") or {}
+    if "business_boundaries_enabled" in hard_stop:
+        return _config_bool(hard_stop.get("business_boundaries_enabled"))
+    if "business_boundaries_enabled" in config:
+        return _config_bool(config.get("business_boundaries_enabled"))
     if "three_stage_business_boundaries" in hard_stop:
         return _config_bool(hard_stop.get("three_stage_business_boundaries"))
     if "three_stage_business_boundaries" in config:
@@ -665,7 +784,7 @@ def _capture_keyword_from_home_with_mcp(
             timeout_seconds=mcp_timeout_seconds,
         )
         diagnostics["initial_foreground_recovery"] = foreground_record
-        if _three_stage_business_boundaries_enabled(contract) or _require_initial_home_entry(contract):
+        if _business_boundaries_enabled(contract) or _require_initial_home_entry(contract):
             home_entry_diagnostics = _prepare_home_entry_before_keyword(
                 client=client,
                 contract=contract,
@@ -3385,6 +3504,11 @@ class MidsceneStdioClient:
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
         self.process: Optional[subprocess.Popen] = None
+        self.mcp_pid: Optional[int] = None
+        self.mcp_pgid: Optional[int] = None
+        self.mcp_command = " ".join(command)
+        self.mcp_started_at: str = ""
+        self.mcp_stopped_at: str = ""
         self._next_id = 1
         self._responses: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._stderr_lines: "queue.Queue[str]" = queue.Queue()
@@ -3401,7 +3525,14 @@ class MidsceneStdioClient:
             text=True,
             encoding="utf-8",
             bufsize=1,
+            start_new_session=True,
         )
+        self.mcp_pid = self.process.pid
+        try:
+            self.mcp_pgid = os.getpgid(self.process.pid)
+        except Exception:
+            self.mcp_pgid = None
+        self.mcp_started_at = _now()
         self._reader_thread = threading.Thread(target=self._read_stdout, daemon=True)
         self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self._reader_thread.start()
@@ -3421,12 +3552,40 @@ class MidsceneStdioClient:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if self.process:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=5)
-            except Exception:
-                self.process.kill()
+        self.stop_process_group()
+
+    def lifecycle_diagnostics(self) -> Dict[str, Any]:
+        return {
+            "mcp_pid": self.mcp_pid,
+            "mcp_pgid": self.mcp_pgid,
+            "mcp_command": self.mcp_command,
+            "mcp_started_at": self.mcp_started_at,
+            "mcp_stopped_at": self.mcp_stopped_at,
+        }
+
+    def stop_process_group(self) -> None:
+        process = self.process
+        if not process:
+            return
+        try:
+            if process.poll() is None:
+                if self.mcp_pgid is not None:
+                    os.killpg(self.mcp_pgid, signal.SIGTERM)
+                else:
+                    process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except Exception:
+                    if self.mcp_pgid is not None:
+                        os.killpg(self.mcp_pgid, signal.SIGKILL)
+                    else:
+                        process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except Exception:
+                        pass
+        finally:
+            self.mcp_stopped_at = _now()
 
     def list_tools(self, interrupt_check: Optional[Callable[[], None]] = None) -> List[str]:
         result = self.request("tools/list", {}, interrupt_check=interrupt_check)
@@ -4272,8 +4431,10 @@ def _foreground_recovery_result_ok(result: Dict[str, Any]) -> bool:
 
 
 def _foreground_recovery_prompt(keyword: str, stage: str, attempt_index: int) -> str:
+    internal_policy = _midscene_internal_action_policy_prompt("desktop_chrome_ready_boundary")
     return (
         "Recover only the foreground window for the bounded Taobao visual capture. "
+        f"{internal_policy}"
         "Use visible-screen reasoning only. The current keyword remains "
         f"{keyword!r}, and the current stage is {stage!r}; do not search, re-search, "
         "or submit the keyword. If Chrome with the dedicated Taobao collection page "
@@ -4287,14 +4448,20 @@ def _foreground_recovery_prompt(keyword: str, stage: str, attempt_index: int) ->
         "do not type a URL, do not open a new browser tab, do not navigate to Taobao "
         "home, and do not change account state. If Chrome/Taobao cannot be made visible "
         "within this bounded attempt, stop and report foreground_recovery=blocked. "
+        "In the final action message, include boundary_name=desktop_chrome_ready_boundary, "
+        "boundary_completed=true or false, blocker if any, actions_summary, and "
+        "foreground_recovery=recovered or foreground_recovery=blocked. "
         f"This is foreground recovery attempt {attempt_index}."
     )
 
 
 def _closeable_popup_overlay_prompt(keyword: str, stage: str, repair_index: int) -> str:
+    internal_policy = _midscene_internal_action_policy_prompt("safe_popup_repair_boundary")
     return (
         "Handle one normal Taobao in-page closeable popup overlay using only visible-screen "
-        "reasoning and system mouse actions. The current keyword remains "
+        "reasoning and system mouse actions. "
+        f"{internal_policy}"
+        "The current keyword remains "
         f"{keyword!r}, and the current stage is {stage!r}; do not search, re-search, "
         "scroll, type, submit, navigate, use the browser address bar, open a new tab, "
         "or change account state. If the Taobao page is dimmed by a translucent overlay "
@@ -4305,7 +4472,9 @@ def _closeable_popup_overlay_prompt(keyword: str, stage: str, repair_index: int)
         "claim, coupon-use, or account-state-changing controls. If the visible overlay "
         "does not clearly have a safe gray X close control, stop and report "
         "closeable_overlay_blocked. In the final action message include "
-        "closeable_overlay_closed=true or closeable_overlay_closed=false. "
+        "boundary_name=safe_popup_repair_boundary, boundary_completed=true or false, "
+        "blocker if any, actions_summary, and closeable_overlay_closed=true or "
+        "closeable_overlay_closed=false. "
         f"This is closeable popup overlay repair {repair_index}."
     )
 
@@ -4394,36 +4563,6 @@ def _perform_search_submit_boundary(
     _raise_if_rate_limited_diagnostics(act_diagnostics, "search_submit_boundary")
     _raise_if_abnormal_act(search_result, default_context="search_submit_boundary")
     return payload
-
-
-def _perform_keyword_search(
-    client: MidsceneStdioClient,
-    contract: Dict[str, Any],
-    keyword: str,
-    scroll_distance: int,
-    capture_plan: Optional[Dict[str, Any]],
-    tools: Optional[List[str]],
-    diagnostics: Dict[str, Any],
-    foreground_recovery: Dict[str, Any],
-    evidence_dir: str,
-    interrupt_check: Optional[Callable[[], None]],
-    keyword_deadline: float,
-    timeout_seconds: float,
-) -> Dict[str, Any]:
-    return _perform_search_submit_boundary(
-        client=client,
-        contract=contract,
-        keyword=keyword,
-        scroll_distance=scroll_distance,
-        capture_plan=capture_plan,
-        tools=tools,
-        diagnostics=diagnostics,
-        foreground_recovery=foreground_recovery,
-        evidence_dir=evidence_dir,
-        interrupt_check=interrupt_check,
-        keyword_deadline=keyword_deadline,
-        timeout_seconds=timeout_seconds,
-    )
 
 
 def _perform_page_scroll(
@@ -4740,11 +4879,6 @@ def _classify_screenshot(path: str, contract: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
-def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
-    del scroll_distance
-    return _search_submit_boundary_prompt(keyword)
-
-
 def _allow_bookmark_home_entry_repair(contract: Optional[Dict[str, Any]] = None) -> bool:
     if not isinstance(contract, dict):
         return False
@@ -4784,12 +4918,24 @@ def _bookmark_home_entry_repair_prompt(contract: Optional[Dict[str, Any]] = None
     )
 
 
+def _midscene_internal_action_policy_prompt(boundary_name: str) -> str:
+    return (
+        f"This bounded visual act owns the internal continuous GUI steps for {boundary_name}. "
+        "Inside this act, Midscene may use visible-screen system GUI primitives as needed: "
+        "Tap, Input, Scroll, KeyboardPress, MouseMove, DragAndDrop, RightClick, "
+        "DoubleClick, and ClearInput. Use them only as ordinary visible mouse, "
+        "keyboard, and wheel actions on the current screen. Python/Codex must not "
+        "directly call those short-action MCP tools outside this bounded act. "
+    )
+
+
 def _pre_keyword_home_entry_prompt(
     keyword: str,
     contract: Optional[Dict[str, Any]] = None,
 ) -> str:
     navigation_rule = _bookmark_home_entry_repair_prompt(contract)
     popup_tool = _closeable_popup_overlay_toolbox_prompt()
+    internal_policy = _midscene_internal_action_policy_prompt("home_entry_boundary")
     return (
         "Prepare the Taobao homepage/search-entry boundary for the next keyword. "
         "The business rule is simple: the active page must be the ordinary taobao.com "
@@ -4798,8 +4944,8 @@ def _pre_keyword_home_entry_prompt(
         "ordinary Taobao homepage. "
         "Use only visible-screen reasoning and system mouse/keyboard actions. Do "
         "not read DOM, HTML, network, cookies, storage, selector maps, page source, "
-        "JS-evaluated data, or clipboard contents. Do not use short action APIs "
-        "such as Tap, Input, KeyboardPress, Scroll, or ClearInput. "
+        "JS-evaluated data, or clipboard contents. "
+        f"{internal_policy}"
         "Do not type the next keyword yet, do not submit a search, do not use the "
         "browser address bar, do not type a URL, and do not run scripts. "
         "If Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome app is "
@@ -4822,7 +4968,8 @@ def _pre_keyword_home_entry_prompt(
         "or suggestion text is acceptable only on the ordinary taobao.com homepage. Stop after "
         "the ordinary Taobao homepage/search-entry search box is visible "
         f"and ready for the next keyword {keyword!r}. In the final action message, "
-        "include home_entry_prepared=true, home_entry_used=true, "
+        "include boundary_name=home_entry_boundary, boundary_completed=true or false, "
+        "blocker if any, actions_summary, home_entry_prepared=true, home_entry_used=true, "
         "recovered_from_old_results=true or false, and bookmark_home_entry_used=true "
         "or false. Do not output product rows."
     )
@@ -4834,6 +4981,7 @@ def _pre_keyword_home_entry_retry_prompt(
 ) -> str:
     navigation_rule = _bookmark_home_entry_repair_prompt(contract)
     popup_tool = _closeable_popup_overlay_toolbox_prompt()
+    internal_policy = _midscene_internal_action_policy_prompt("home_entry_boundary")
     return (
         "The previous pre-keyword boundary check still saw an old results page, "
         "a bottom-of-results page, an activity/campaign page, an unrelated page, "
@@ -4842,8 +4990,8 @@ def _pre_keyword_home_entry_retry_prompt(
         "the next keyword. Use only visible-screen reasoning and system mouse/"
         "keyboard actions. Do not read DOM, HTML, network, cookies, storage, "
         "selector maps, page source, JS-evaluated data, or clipboard contents. "
-        "Do not use short action APIs such as Tap, Input, KeyboardPress, Scroll, "
-        "or ClearInput. Do not type the next keyword yet, do not submit a search, "
+        f"{internal_policy}"
+        "Do not type the next keyword yet, do not submit a search, "
         "do not use the browser address bar, do not type a URL, and do not run "
         "scripts. "
         "If login, captcha, security verification, risk warning, unusual account "
@@ -4863,7 +5011,8 @@ def _pre_keyword_home_entry_retry_prompt(
         "placeholder, recommendation, hot-search, or suggestion text is acceptable "
         "only on the ordinary taobao.com homepage. Stop ready "
         f"for the next keyword {keyword!r}. "
-        "In the final action message, include home_entry_prepared=true, "
+        "In the final action message, include boundary_name=home_entry_boundary, "
+        "boundary_completed=true or false, blocker if any, actions_summary, home_entry_prepared=true, "
         "home_entry_used=true, recovered_from_old_results=true, and "
         "bookmark_home_entry_used=true or false. Do not output product rows."
     )
@@ -4874,39 +5023,38 @@ def _post_keyword_cleanup_prompt(
     contract: Optional[Dict[str, Any]] = None,
 ) -> str:
     navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    internal_policy = _midscene_internal_action_policy_prompt("home_entry_boundary")
     return (
         "The current keyword capture has finished successfully. Clean up the current "
         "Taobao results page before the next keyword. Use only visible-screen reasoning "
         "and system mouse/keyboard actions. Do not read DOM, HTML, network, cookies, "
         "storage, selector maps, page source, JS-evaluated data, or clipboard contents. "
-        "Do not use short action APIs such as Tap, Input, KeyboardPress, Scroll, or "
-        "ClearInput. Do not use the browser address bar, do not type a URL, do not "
+        f"{internal_policy}"
+        "Do not use the browser address bar, do not type a URL, do not "
         "paste a URL, and do not run scripts. "
         "If login, captcha, security verification, risk warning, unusual account state, "
         "or an automation permission panel is visible, stop and report failure. If Codex, "
         "Terminal, Cursor, VS Code, WPS, or another non-Chrome app is visible, report "
         "chrome_not_foreground so the Python worker can recover foreground safely. "
         f"{navigation_rule}"
-        "Close the current completed Taobao results tab with the normal browser close-tab "
-        "keyboard shortcut: Command+W on macOS, or Ctrl+W on Windows/Linux. Use that "
-        "shortcut once; do not close the browser window deliberately. If this reveals a "
-        "normal Taobao homepage/search-entry tab, stop there. If it reveals a visible "
-        "Chrome new tab/start page and the Taobao bookmark button is visible, click that "
-        "visible Taobao bookmark to open the normal Taobao homepage; do not open extra "
-        "tabs for any other purpose. If the normal Taobao homepage/search-entry is already "
-        "visible, leave it ready. "
+        "Leave the completed Taobao results page through visible Chrome/Taobao UI in the "
+        "lowest-risk way available: an already visible normal Taobao homepage/search-entry "
+        "tab, a visible close-tab control for only the completed results tab, a visible "
+        "Taobao logo/Home entry, or the configured visible bookmark home-entry repair. "
+        "Do not deliberately close the browser window, do not close the last remaining tab, "
+        "and do not use fixed keyboard shortcuts when a visible UI path is available. If a "
+        "normal Taobao homepage/search-entry tab is revealed, stop there. If a visible "
+        "Chrome new tab/start page is revealed and the Taobao bookmark button is visible, "
+        "click that visible Taobao bookmark to open the normal Taobao homepage; do not open "
+        "extra tabs for any other purpose. If the normal Taobao homepage/search-entry is "
+        "already visible, leave it ready. "
         f"Do not type the next keyword. Stop ready for the next keyword after cleaning up {keyword!r}. "
-        "In the final action message, include home_entry_prepared=true or false, "
+        "In the final action message, include boundary_name=home_entry_boundary, "
+        "boundary_completed=true or false, blocker if any, actions_summary, "
+        "home_entry_prepared=true or false, "
         "home_entry_used=true or false, current_results_tab_closed=true or false, and "
         "bookmark_home_entry_used=true or false. Do not output product rows."
     )
-
-
-def _keyword_search_home_entry_prompt(
-    keyword: str,
-    contract: Optional[Dict[str, Any]] = None,
-) -> str:
-    return _search_submit_boundary_prompt(keyword=keyword, contract=contract)
 
 
 def _search_submit_boundary_prompt(
@@ -4915,14 +5063,16 @@ def _search_submit_boundary_prompt(
 ) -> str:
     del contract
     popup_tool = _closeable_popup_overlay_toolbox_prompt()
+    internal_policy = _midscene_internal_action_policy_prompt("search_submit_boundary")
     return (
         "Submit the current keyword search from the already verified ordinary Taobao homepage. "
         "This is the search_submit_boundary only; home-entry repair belongs to the previous "
         "home_entry_boundary and must not be performed in this step. Use only "
         "visible-screen reasoning and system mouse/keyboard actions. Do not read "
         "DOM, HTML, network, cookies, storage, selector maps, page source, JS "
-        "evaluated data, or clipboard contents. Do not use short action APIs "
-        "such as Tap, Input, KeyboardPress, Scroll, or ClearInput. If Codex, "
+        "evaluated data, or clipboard contents. "
+        f"{internal_policy}"
+        "If Codex, "
         "Terminal, Cursor, VS Code, WPS, or another "
         "non-Chrome app is visible, report chrome_not_foreground so the Python "
         "worker can run bounded foreground recovery; do not type, scroll, search, "
@@ -4950,7 +5100,8 @@ def _search_submit_boundary_prompt(
         "button fails and the page remains a homepage/search-entry feed, stop and "
         "report search_submit_failed or submission_method=unconfirmed instead of "
         "starting capture. In the final action message, "
-        "include search_submitted=true or false, submission_method=search_button "
+        "include boundary_name=search_submit_boundary, boundary_completed=true or false, "
+        "blocker if any, actions_summary, search_submitted=true or false, submission_method=search_button "
         "or submission_method=enter_fallback, visible_search_keyword, "
         "result_page_ready=true or false, and blocker if any. "
         "Wait until visible search results settle. Leave the page positioned at "
@@ -4958,22 +5109,14 @@ def _search_submit_boundary_prompt(
     )
 
 
-def _keyword_search_home_entry_retry_after_exception_prompt(
-    keyword: str,
-    contract: Optional[Dict[str, Any]] = None,
-) -> str:
-    return _search_submit_boundary_prompt(keyword=keyword, contract=contract)
-
-
-def _keyword_search_reset_prompt(keyword: str) -> str:
-    return _keyword_search_home_entry_prompt(keyword)
-
-
 def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> str:
+    internal_policy = _midscene_internal_action_policy_prompt("capture_tiles_boundary")
     return (
         "Continue the capture_tiles_boundary for the already accepted current-keyword "
         "Taobao results page using only "
-        "visible-screen reasoning and system mouse/keyboard/scroll actions. The "
+        "visible-screen reasoning and system mouse/keyboard/scroll actions. "
+        f"{internal_policy}"
+        "The "
         f"current keyword is {keyword!r}. If Codex, Terminal, Cursor, VS Code, "
         "WPS, or another non-Chrome app is visible, report chrome_not_foreground "
         "so the Python worker can run bounded foreground recovery; do not type, "
@@ -4996,6 +5139,9 @@ def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> st
         "and do not skip over intermediate result rows. Stop immediately after that "
         "single short scroll and wait only for visible content to settle so the "
         "Python worker can save the next screenshot at this intermediate position. "
+        "In the final action message, include boundary_name=capture_tiles_boundary, "
+        "boundary_completed=true or false, blocker if any, actions_summary, "
+        "results_end_visible=true or false, and scroll_performed=true or false. "
         "Do not output product rows and do not change account state."
     )
 

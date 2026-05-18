@@ -35,7 +35,6 @@ def cmd_setup(args):
             ("requests", "requests"),
             ("configparser", "configparser"),
             ("Pillow", "PIL"),
-            ("pyperclip", "pyperclip"),
         ]
         missing = []
         for name, mod in required:

@@ -1,5 +1,6 @@
 import json
 import os
+import io
 import tempfile
 import time
 import unittest
@@ -112,6 +113,34 @@ class DummyProcess:
 
     def poll(self):
         return None
+
+
+class FakePopenProcess:
+    def __init__(self):
+        self.pid = 12345
+        self.stdin = DummyStdin()
+        self.stdout = io.StringIO('{"jsonrpc":"2.0","id":1,"result":{}}\n')
+        self.stderr = io.StringIO("")
+        self.returncode = None
+        self.wait_calls = 0
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        self.returncode = 0
+        return 0
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
 
 
 def _parse_test_optional_bool(value):
@@ -411,13 +440,13 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertEqual(classified["rough_state"], "act_completed")
 
     def test_search_and_scroll_prompts_keep_search_submission_and_foreground_rules(self):
-        search_prompt = worker._keyword_search_prompt("万智牌 中止", 560)
+        search_prompt = worker._search_submit_boundary_prompt("万智牌 中止")
         pre_keyword_home_entry_prompt = worker._pre_keyword_home_entry_prompt(
             "万智牌 中止",
             {"config": {"allow_bookmark_home_entry_repair": True}},
         )
         scroll_prompt = worker._next_tile_prompt("万智牌 中止", 1, 560)
-        reset_prompt = worker._keyword_search_reset_prompt("万智牌 中止")
+        reset_prompt = worker._search_submit_boundary_prompt("万智牌 中止")
 
         self.assertIn("search_submit_boundary only", search_prompt)
         self.assertIn("home-entry repair belongs to the previous home_entry_boundary", search_prompt)
@@ -478,8 +507,12 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertNotIn("submit with Enter or the visible search button", reset_prompt)
         self.assertIn("Do not read DOM, HTML, network", reset_prompt)
         self.assertIn("or clipboard contents", reset_prompt)
-        self.assertIn("Do not use short action APIs", reset_prompt)
-        self.assertIn("Tap, Input, KeyboardPress, Scroll, or ClearInput", reset_prompt)
+        self.assertIn("This bounded visual act owns the internal continuous GUI steps", reset_prompt)
+        self.assertIn("Midscene may use visible-screen system GUI primitives", reset_prompt)
+        self.assertIn("Python/Codex must not directly call those short-action MCP tools", reset_prompt)
+        self.assertIn("Tap, Input, Scroll, KeyboardPress", reset_prompt)
+        self.assertIn("boundary_name=search_submit_boundary", reset_prompt)
+        self.assertIn("actions_summary", reset_prompt)
         self.assertNotIn("Bring the existing Chrome window", search_prompt)
         self.assertNotIn("Bring the existing Chrome window", scroll_prompt)
         self.assertIn("Prepare the Taobao homepage/search-entry boundary", pre_keyword_home_entry_prompt)
@@ -646,7 +679,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             ]
         )
 
-        search_result = worker._perform_keyword_search(
+        search_result = worker._perform_search_submit_boundary(
             client=client,
             contract={},
             keyword="万智牌 中止",
@@ -716,7 +749,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         diagnostics = {}
 
         with mock.patch.object(worker, "_interruptible_sleep", return_value=None) as sleep_mock:
-            search_result = worker._perform_keyword_search(
+            search_result = worker._perform_search_submit_boundary(
                 client=client,
                 contract=contract,
                 keyword="万智牌 中止",
@@ -798,7 +831,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         diagnostics = {}
 
         with self.assertRaises(RuntimeError):
-            worker._perform_keyword_search(
+            worker._perform_search_submit_boundary(
                 client=client,
                 contract={},
                 keyword="万智牌 唤兽师贾路",
@@ -824,7 +857,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         )
 
         with self.assertRaises(RuntimeError):
-            worker._perform_keyword_search(
+            worker._perform_search_submit_boundary(
                 client=client,
                 contract={},
                 keyword="万智牌 唤兽师贾路",
@@ -874,7 +907,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         diagnostics = {}
 
         with self.assertRaises(RuntimeError):
-            worker._perform_keyword_search(
+            worker._perform_search_submit_boundary(
                 client=client,
                 contract={"page_sampling": {"allow_page_state_json_classifier": True}},
                 keyword="万智牌 唤兽师贾路",
@@ -2196,6 +2229,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             def list_tools(self, **kwargs):
                 return sorted(worker.MCP_REQUIRED_TOOLS)
 
+            def lifecycle_diagnostics(self):
+                return {"mcp_pid": 123, "mcp_pgid": 123, "mcp_command": "fake", "mcp_started_at": "now"}
+
             def call_tool(self, name, arguments, **kwargs):
                 self.connected = name == "computer_connect"
                 return {"content": [{"type": "text", "text": "ok"}]}
@@ -2226,6 +2262,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 mock.patch.object(worker, "_raise_if_controlled", return_value=None), \
                 mock.patch.object(worker, "_mcp_launcher_path", return_value="/tmp/fake_midscene_launcher.sh"), \
                 mock.patch.object(worker, "MidsceneStdioClient", return_value=FakeMcpSession()), \
+                mock.patch.object(worker, "_run_midscene_preflight", return_value={"ok": True}), \
                 mock.patch.object(worker, "_capture_keyword_with_mcp", side_effect=capture_results) as capture_mock, \
                 mock.patch.object(worker, "_should_run_post_keyword_cleanup", return_value=False), \
                 mock.patch.object(worker, "_sleep_between_keywords", return_value=None), \
@@ -2373,8 +2410,8 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertTrue(cleanup["steps"]["act"]["reported_current_results_tab_closed"])
             self.assertTrue(cleanup["verification_screenshot"].endswith("post_keyword_cleanup.png"))
             prompt = client.calls[0]["arguments"]["prompt"]
-            self.assertIn("Command+W", prompt)
-            self.assertIn("Ctrl+W", prompt)
+            self.assertIn("visible close-tab control", prompt)
+            self.assertIn("do not use fixed keyboard shortcuts", prompt)
             self.assertIn("Do not type the next keyword", prompt)
 
     def test_post_keyword_cleanup_blocks_when_results_page_remains(self):
@@ -2420,7 +2457,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(cleanup["stop_reason"], "home_entry_not_reached")
 
     def test_home_search_prompt_does_not_allow_url_or_short_action_fallbacks(self):
-        prompt = worker._keyword_search_home_entry_prompt("万智牌 中止")
+        prompt = worker._search_submit_boundary_prompt("万智牌 中止")
         pre_keyword_prompt = worker._pre_keyword_home_entry_prompt("万智牌 中止")
 
         self.assertIn("search_submit_boundary only", prompt)
@@ -2434,8 +2471,12 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("search_submit_requires_home_entry", prompt)
         self.assertIn("browser address bar", prompt)
         self.assertIn("URL typing", prompt)
-        self.assertIn("Do not use short action APIs", prompt)
-        self.assertIn("Tap, Input, KeyboardPress, Scroll, or ClearInput", prompt)
+        self.assertIn("This bounded visual act owns the internal continuous GUI steps", prompt)
+        self.assertIn("Midscene may use visible-screen system GUI primitives", prompt)
+        self.assertIn("Python/Codex must not directly call those short-action MCP tools", prompt)
+        self.assertIn("Tap, Input, Scroll, KeyboardPress", prompt)
+        self.assertIn("boundary_name=search_submit_boundary", prompt)
+        self.assertIn("actions_summary", prompt)
         self.assertIn("Do not type the next keyword yet", pre_keyword_prompt)
         self.assertIn("open or return to the ordinary Taobao homepage", pre_keyword_prompt)
         self.assertIn("Home/首页 entry", pre_keyword_prompt)
@@ -5176,6 +5217,43 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 {"name": "act", "arguments": {}},
                 interrupt_check=raise_interrupt,
             )
+
+    def test_midscene_stdio_client_records_and_cleans_process_group(self):
+        fake_process = FakePopenProcess()
+        killed = []
+
+        with mock.patch.object(worker.subprocess, "Popen", return_value=fake_process) as popen, \
+            mock.patch.object(worker.os, "getpgid", return_value=4321), \
+            mock.patch.object(worker.os, "killpg", side_effect=lambda pgid, sig: killed.append((pgid, sig))):
+            with worker.MidsceneStdioClient(["node", "launcher.cjs"], cwd="/tmp", timeout_seconds=2) as client:
+                self.assertEqual(client.mcp_pid, 12345)
+                self.assertEqual(client.mcp_pgid, 4321)
+                self.assertEqual(client.mcp_command, "node launcher.cjs")
+                self.assertTrue(client.mcp_started_at)
+                self.assertFalse(client.mcp_stopped_at)
+
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(killed, [(4321, worker.signal.SIGTERM)])
+        self.assertEqual(fake_process.wait_calls, 1)
+        self.assertTrue(client.mcp_stopped_at)
+
+    def test_midscene_preflight_reports_setup_drift_when_act_backend_unavailable(self):
+        client = FakeClient(
+            {"content": [{"type": "text", "text": "setup_drift missing scroll backend"}]},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = worker._run_midscene_preflight(
+                client=client,
+                task_dir=tmp,
+                run_id="run",
+                session_index=1,
+                contract_path=os.path.join(tmp, "contract.json"),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stop_reason"], "setup_drift")
+        self.assertFalse(result["checks"]["act_backend"])
 
     def test_mcp_request_exits_on_keyword_deadline_while_waiting(self):
         client = worker.MidsceneStdioClient(["dummy"], cwd="/tmp", timeout_seconds=60)

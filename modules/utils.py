@@ -282,9 +282,9 @@ class ConfigManager:
             'micro_pause_long': '6,10,0.04',
             'inter_keyword_pause_min': '120',
             'inter_keyword_pause_max': '300',
-            'detail_page_peek_probability': '0.08',
-            'cart_or_favorites_peek_probability': '0.03',
-            'allow_cart_or_favorites_peek': 'true',
+            'detail_page_peek_probability': '0',
+            'cart_or_favorites_peek_probability': '0',
+            'allow_cart_or_favorites_peek': 'false',
             'allow_claim_rewards': 'false',
         }
 
