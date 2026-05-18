@@ -74,8 +74,16 @@ class MidsceneComputerConfig:
     foreground_recovery_enabled: bool = True
     foreground_recovery_attempts_per_event: int = 3
     foreground_recovery_events_per_keyword: int = 2
+    rate_limit_retry_attempts: int = 2
+    rate_limit_cooldown: float = 180.0
+    rate_limit_backoff: float = 1.5
     allow_bookmark_home_entry_repair: bool = False
     require_initial_home_entry: bool = True
+    three_stage_business_boundaries: bool = True
+    home_entry_boundary_required: bool = True
+    search_submit_boundary_required: bool = True
+    capture_tiles_boundary_required: bool = True
+    search_submit_boundary_tile_id: str = "tile_00"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -150,11 +158,38 @@ def midscene_computer_config_from_settings(config) -> MidsceneComputerConfig:
             0,
             config.getint(section, "foreground_recovery_events_per_keyword", fallback=2),
         ),
+        rate_limit_retry_attempts=max(
+            0,
+            config.getint("RATE_LIMIT", "rate_limit_retry_attempts", fallback=2),
+        ),
+        rate_limit_cooldown=max(
+            0.0,
+            config.getfloat("RATE_LIMIT", "rate_limit_cooldown", fallback=180.0),
+        ),
+        rate_limit_backoff=max(
+            1.0,
+            config.getfloat("RATE_LIMIT", "rate_limit_backoff", fallback=1.5),
+        ),
         allow_bookmark_home_entry_repair=config.getboolean(
             section, "allow_bookmark_home_entry_repair", fallback=True
         ),
         require_initial_home_entry=config.getboolean(
             section, "require_initial_home_entry", fallback=True
+        ),
+        three_stage_business_boundaries=config.getboolean(
+            section, "three_stage_business_boundaries", fallback=True
+        ),
+        home_entry_boundary_required=config.getboolean(
+            section, "home_entry_boundary_required", fallback=True
+        ),
+        search_submit_boundary_required=config.getboolean(
+            section, "search_submit_boundary_required", fallback=True
+        ),
+        capture_tiles_boundary_required=config.getboolean(
+            section, "capture_tiles_boundary_required", fallback=True
+        ),
+        search_submit_boundary_tile_id=config.get(
+            section, "search_submit_boundary_tile_id", fallback="tile_00"
         ),
     )
 
@@ -243,6 +278,8 @@ def write_midscene_session_worker_contract(
         "manual_state": manual_state or "",
         "reference_url": TAOBAO_HOME,
         "entry_context": "taobao_homepage_visible_search_entry_required",
+        "business_boundary_model": "home_entry_boundary -> search_submit_boundary -> capture_tiles_boundary",
+        "three_stage_business_boundaries": config.three_stage_business_boundaries,
         "navigation_instruction": (
             "visual_homepage_entry_only_no_address_bar_url_or_script"
             if config.allow_bookmark_home_entry_repair
@@ -282,11 +319,19 @@ def write_midscene_session_worker_contract(
             "stop_after_consecutive_abnormal": config.consecutive_abnormal_stop,
             "timeout_per_keyword_seconds": config.keyword_timeout_seconds,
             "mcp_request_timeout_seconds": config.mcp_request_timeout_seconds,
+            "rate_limit_retry_attempts": config.rate_limit_retry_attempts,
+            "rate_limit_cooldown": config.rate_limit_cooldown,
+            "rate_limit_backoff": config.rate_limit_backoff,
             "foreground_recovery_enabled": config.foreground_recovery_enabled,
             "foreground_recovery_attempts_per_event": config.foreground_recovery_attempts_per_event,
             "foreground_recovery_events_per_keyword": config.foreground_recovery_events_per_keyword,
             "allow_bookmark_home_entry_repair": config.allow_bookmark_home_entry_repair,
             "require_initial_home_entry": config.require_initial_home_entry,
+            "three_stage_business_boundaries": config.three_stage_business_boundaries,
+            "home_entry_boundary_required": config.home_entry_boundary_required,
+            "search_submit_boundary_required": config.search_submit_boundary_required,
+            "capture_tiles_boundary_required": config.capture_tiles_boundary_required,
+            "search_submit_boundary_tile_id": config.search_submit_boundary_tile_id,
             "retain_abnormal_screenshots": True,
         },
         "action_boundary": {
@@ -294,6 +339,15 @@ def write_midscene_session_worker_contract(
             "input": "system screenshots only",
             "actions": ["coordinate click", "keyboard input", "keyboard shortcut", "page-level scroll"],
             "allowed_act_scope": "bounded visual act through visible Taobao homepage entry only",
+            "business_boundaries": [
+                "home_entry_boundary",
+                "search_submit_boundary",
+                "capture_tiles_boundary",
+            ],
+            "boundary_principle": "split by business boundaries that must not be conflated, not by UI micro-actions",
+            "home_entry_boundary": "reach verified ordinary Taobao homepage/search-entry; do not type keyword or submit search",
+            "search_submit_boundary": f"submit current keyword from verified homepage and accept {config.search_submit_boundary_tile_id}",
+            "capture_tiles_boundary": "sample only within the accepted current-keyword results page",
             "forbidden_live_tools": ["Tap", "Input", "KeyboardPress", "Scroll", "ClearInput"],
             "forbidden_navigation": [
                 "browser address bar",

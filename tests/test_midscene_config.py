@@ -92,6 +92,11 @@ page_load_wait = 2
 keyword_timeout_seconds = 180
 mcp_request_timeout_seconds = 180
 
+[RATE_LIMIT]
+rate_limit_retry_attempts = 3
+rate_limit_cooldown = 45
+rate_limit_backoff = 2.0
+
 [MIDSCENE_MODEL]
 enabled = true
 model_name = glm-4.6v-flashx
@@ -138,6 +143,12 @@ inter_keyword_pause_max = 18
         self.assertFalse(payload["model_boundary"]["midscene_model_reasoning_enabled"])
         self.assertEqual(payload["model_boundary"]["midscene_model_temperature"], 0.0)
         self.assertEqual(payload["hard_stop_policy"]["mcp_request_timeout_seconds"], 180)
+        self.assertEqual(payload["config"]["rate_limit_retry_attempts"], 3)
+        self.assertEqual(payload["config"]["rate_limit_cooldown"], 45.0)
+        self.assertEqual(payload["config"]["rate_limit_backoff"], 2.0)
+        self.assertEqual(payload["hard_stop_policy"]["rate_limit_retry_attempts"], 3)
+        self.assertEqual(payload["hard_stop_policy"]["rate_limit_cooldown"], 45.0)
+        self.assertEqual(payload["hard_stop_policy"]["rate_limit_backoff"], 2.0)
         self.assertEqual(payload["visual_behavior"]["inter_keyword_pause_seconds"], [8.0, 18.0])
         self.assertEqual(
             payload["visual_behavior"]["micro_pause_distribution"]["short"],

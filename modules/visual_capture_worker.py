@@ -460,6 +460,16 @@ def _require_initial_home_entry(contract: Dict[str, Any]) -> bool:
     return bool(hard_stop.get("require_initial_home_entry") or config.get("require_initial_home_entry"))
 
 
+def _three_stage_business_boundaries_enabled(contract: Dict[str, Any]) -> bool:
+    hard_stop = contract.get("hard_stop_policy") or {}
+    config = contract.get("config") or {}
+    if "three_stage_business_boundaries" in hard_stop:
+        return _config_bool(hard_stop.get("three_stage_business_boundaries"))
+    if "three_stage_business_boundaries" in config:
+        return _config_bool(config.get("three_stage_business_boundaries"))
+    return True
+
+
 def _post_keyword_cleanup_after_success(
     client: "MidsceneStdioClient",
     task: Dict[str, Any],
@@ -655,7 +665,7 @@ def _capture_keyword_from_home_with_mcp(
             timeout_seconds=mcp_timeout_seconds,
         )
         diagnostics["initial_foreground_recovery"] = foreground_record
-        if fallback_index > 1 or _require_initial_home_entry(contract):
+        if _three_stage_business_boundaries_enabled(contract) or _require_initial_home_entry(contract):
             home_entry_diagnostics = _prepare_home_entry_before_keyword(
                 client=client,
                 contract=contract,
@@ -674,7 +684,7 @@ def _capture_keyword_from_home_with_mcp(
                 task_dir=task_dir,
             )
             _merge_diagnostics_in_place(diagnostics, {"pre_keyword_home_entry": home_entry_diagnostics})
-        search_diagnostics = _perform_keyword_search(
+        search_diagnostics = _perform_search_submit_boundary(
             client=client,
             contract=contract,
             keyword=keyword,
@@ -688,17 +698,17 @@ def _capture_keyword_from_home_with_mcp(
             keyword_deadline=keyword_deadline,
             timeout_seconds=mcp_timeout_seconds,
         )
-        _merge_diagnostics_in_place(diagnostics, {"keyword_search": search_diagnostics})
+        _merge_diagnostics_in_place(diagnostics, {"search_submit_boundary": search_diagnostics})
         _record_action_trace(
             evidence_dir=evidence_dir,
             keyword=keyword,
-            action="keyword_search",
+            action="search_submit_boundary",
             tile_id="tile_00",
             payload=search_diagnostics,
             diagnostics=diagnostics,
         )
         for step_name, step_diagnostics in search_diagnostics.get("steps", {}).items():
-            _raise_if_rate_limited_diagnostics(step_diagnostics, f"keyword_search:{step_name}")
+            _raise_if_rate_limited_diagnostics(step_diagnostics, f"search_submit_boundary:{step_name}")
         _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_keyword_search_act")
         _interruptible_sleep(
             page_load_wait,
@@ -726,7 +736,7 @@ def _capture_keyword_from_home_with_mcp(
         )
         search_observation = _observation_from_search_verification(
             keyword=keyword,
-            stage="post_act_verification",
+            stage="search_submit_boundary_verification",
             verification=search_verification,
             action_payload=search_diagnostics,
         )
@@ -734,7 +744,7 @@ def _capture_keyword_from_home_with_mcp(
             evidence_dir=evidence_dir,
             keyword=keyword,
             observation=search_observation,
-            goal_state="BOUNDARY_VERIFY",
+            goal_state="SEARCH_SUBMIT_BOUNDARY",
             goal_contract=goal_contract,
             diagnostics=diagnostics,
             boundary=True,
@@ -792,7 +802,7 @@ def _capture_keyword_from_home_with_mcp(
                     screenshots.append(search_verification["screenshot"])
                 retry_observation = _observation_from_search_verification(
                     keyword=keyword,
-                    stage="post_act_home_entry_retry_verification",
+                    stage="search_submit_boundary_retry_verification",
                     verification=search_verification,
                     action_payload=(diagnostics.get("post_act_reset_retry") or {}).get("steps", {}).get("act") or {},
                 )
@@ -800,7 +810,7 @@ def _capture_keyword_from_home_with_mcp(
                     evidence_dir=evidence_dir,
                     keyword=keyword,
                     observation=retry_observation,
-                    goal_state="BOUNDARY_VERIFY",
+                    goal_state="SEARCH_SUBMIT_BOUNDARY",
                     goal_contract=goal_contract,
                     diagnostics=diagnostics,
                     boundary=True,
@@ -911,7 +921,7 @@ def _capture_keyword_from_home_with_mcp(
                 evidence_dir=evidence_dir,
                 keyword=keyword,
                 observation=tile_observation,
-                goal_state="CAPTURING",
+                goal_state="CAPTURE_TILES_BOUNDARY",
                 goal_contract=goal_contract,
                 diagnostics=diagnostics,
                 boundary=page_state.get("status") == "results_end",
@@ -1378,35 +1388,43 @@ def _reset_and_retry_keyword_search_once(
     if preservation:
         initial_diagnostics["failed_screenshot_preservation"] = preservation
     diagnostics[initial_diagnostics_key] = initial_diagnostics
-    result = _call_act_with_foreground_recovery(
+    previous_home_entry_diagnostics = diagnostics.get("pre_keyword_home_entry")
+    home_entry_retry = _prepare_home_entry_before_keyword(
         client=client,
         contract=contract,
-        prompt=_keyword_search_home_entry_retry_after_exception_prompt(keyword, contract=contract),
-        stage="post_act_home_entry_retry",
+        task=task,
+        capture_plan=capture_plan,
         keyword=keyword,
+        tools=tools,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery or {"events_used": 0},
+        evidence_dir=evidence_dir,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+        run_id=run_id,
+        session_index=session_index,
+        task_dir=task_dir,
+    )
+    if previous_home_entry_diagnostics:
+        diagnostics["pre_keyword_home_entry"] = previous_home_entry_diagnostics
+    submit_retry = _perform_search_submit_boundary(
+        client=client,
+        contract=contract,
+        keyword=keyword,
+        scroll_distance=int((capture_plan or {}).get("tile_scroll_distance_px") or 1),
         capture_plan=capture_plan,
         tools=tools,
         diagnostics=diagnostics,
-        foreground_recovery=foreground_recovery,
+        foreground_recovery=foreground_recovery or {"events_used": 0},
         evidence_dir=evidence_dir,
         interrupt_check=interrupt_check,
         keyword_deadline=keyword_deadline,
         timeout_seconds=timeout_seconds,
     )
-    reset_diagnostics = _search_submission_diagnostics(result, client=client)
-    _record_action_trace(
-        evidence_dir=evidence_dir,
-        keyword=keyword,
-        action="post_act_home_entry_retry",
-        tile_id="tile_00",
-        payload=reset_diagnostics,
-        diagnostics=diagnostics,
-    )
-    _raise_if_rate_limited_diagnostics(reset_diagnostics, "keyword_search_home_entry_retry")
-    _raise_if_abnormal_act(result, default_context="keyword_search_home_entry_retry")
     diagnostics["post_act_reset_retry"] = {
         "status": "attempted",
-        "mode": "home_entry_retry",
+        "mode": "home_entry_then_search_submit_retry",
         "trigger": {
             "stop_reason": search_verification.get("stop_reason") or "",
             "rough_state": search_verification.get("rough_state") or "",
@@ -1415,11 +1433,11 @@ def _reset_and_retry_keyword_search_once(
         },
         "attempted": {
             "status": "attempted",
-            "mode": "home_entry_retry",
-            "steps": {"act": reset_diagnostics},
+            "mode": "home_entry_then_search_submit_retry",
+            "steps": {"home_entry_boundary": home_entry_retry, "search_submit_boundary": submit_retry},
             "failed_screenshot_preservation": preservation,
         },
-        "steps": {"act": reset_diagnostics},
+        "steps": {"home_entry_boundary": home_entry_retry, "search_submit_boundary": submit_retry},
     }
     _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_search_reset_retry")
     retry_verification = _verify_keyword_after_act(
@@ -1515,6 +1533,12 @@ def _prepare_home_entry_before_keyword(
         payload=action_diagnostics,
         diagnostics=diagnostics,
     )
+    diagnostics["pre_keyword_home_entry"] = {
+        "status": "action_attempted",
+        "mode": "pre_keyword_home_entry",
+        "gate": _home_entry_gate_policy(),
+        "steps": {"act": action_diagnostics},
+    }
     _raise_if_rate_limited_diagnostics(action_diagnostics, "pre_keyword_home_entry")
     _raise_if_abnormal_act(result, default_context="pre_keyword_home_entry")
     _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_pre_keyword_home_entry")
@@ -1631,6 +1655,20 @@ def _retry_prepare_home_entry_before_keyword_once(
         payload=retry_action_diagnostics,
         diagnostics=diagnostics,
     )
+    diagnostics["pre_keyword_home_entry_retry"] = {
+        "status": "action_attempted",
+        "mode": "pre_keyword_home_entry_retry",
+        "trigger": {
+            "stop_reason": initial_payload.get("stop_reason") or "",
+            "page_state": initial_payload.get("page_state") or {},
+            "verification_screenshot": initial_payload.get("verification_screenshot") or "",
+        },
+        "gate": dict(initial_payload.get("gate") or {}),
+        "steps": {
+            "initial": initial_payload,
+            "repair_act": retry_action_diagnostics,
+        },
+    }
     _raise_if_rate_limited_diagnostics(retry_action_diagnostics, "pre_keyword_home_entry_retry")
     _raise_if_abnormal_act(result, default_context="pre_keyword_home_entry_retry")
     _sleep_micro_pause(contract, run_id, session_index, task_dir, keyword, "after_pre_keyword_home_entry_retry")
@@ -1681,6 +1719,9 @@ def _retry_prepare_home_entry_before_keyword_once(
 def _home_entry_gate_policy() -> Dict[str, Any]:
     return {
         "allowed_statuses": ["visible_ready"],
+        "requires_home_entry_ready": True,
+        "requires_home_url_status": "normal_taobao_home",
+        "requires_home_structure_status": "ordinary_home_search_entry",
         "allows_homepage_placeholder_or_suggestion": True,
         "requires_no_actual_old_query": False,
         "blocks_results_page_states": [
@@ -1700,6 +1741,9 @@ def _home_entry_review_reason(page_state: Dict[str, Any]) -> str:
     review_reason = _page_state_review_reason(page_state)
     if review_reason:
         return review_reason
+    explicit_issue = _explicit_home_entry_evidence_issue(page_state)
+    if explicit_issue:
+        return explicit_issue
     if status in {"results_end", "results_page", "search_results", "visible_results"}:
         return "home_entry_not_reached"
     if status == "visible_ready" and _home_entry_has_non_ordinary_taobao_evidence(page_state):
@@ -1707,6 +1751,39 @@ def _home_entry_review_reason(page_state: Dict[str, Any]) -> str:
     if status != "visible_ready":
         return "home_entry_unverified"
     return ""
+
+
+def _explicit_home_entry_evidence_issue(page_state: Dict[str, Any]) -> str:
+    if not _has_explicit_home_entry_evidence(page_state):
+        return ""
+    hard_blocking_reason = str((page_state or {}).get("hard_blocking_reason") or "").strip()
+    if hard_blocking_reason:
+        return hard_blocking_reason
+    source_state = str((page_state or {}).get("source_state") or "").strip()
+    if source_state == "chrome_not_foreground":
+        return FOREGROUND_NOT_READY_REASON
+    if source_state == "hard_blocked":
+        return "manual_review_needed"
+    if (page_state or {}).get("home_entry_ready") is not True:
+        return "home_entry_unverified"
+    if str((page_state or {}).get("home_url_status") or "") != "normal_taobao_home":
+        return "home_entry_unverified"
+    if str((page_state or {}).get("home_structure_status") or "") != "ordinary_home_search_entry":
+        return "home_entry_unverified"
+    if float((page_state or {}).get("confidence") or 0.0) < 0.70:
+        return "home_entry_unverified"
+    return ""
+
+
+def _has_explicit_home_entry_evidence(page_state: Dict[str, Any]) -> bool:
+    keys = {
+        "source_state",
+        "home_entry_ready",
+        "home_url_status",
+        "home_structure_status",
+        "hard_blocking_reason",
+    }
+    return any(key in (page_state or {}) and (page_state or {}).get(key) not in {None, ""} for key in keys)
 
 
 def _home_entry_has_non_ordinary_taobao_evidence(page_state: Dict[str, Any]) -> bool:
@@ -2340,7 +2417,7 @@ def _verify_keyword_after_act(
         tile_id="tile_00",
         keyword=keyword,
         evidence_dir=evidence_dir,
-        stage="post_act_verification",
+        stage="search_submit_boundary_verification",
         diagnostics=diagnostics,
         foreground_recovery=foreground_recovery,
         interrupt_check=interrupt_check,
@@ -2540,12 +2617,15 @@ def _maybe_close_closeable_popup_overlay(
         "trigger_page_state": trigger_page_state or {},
     }
     records.append(record)
-    result = _call_act(
-        client,
-        _closeable_popup_overlay_prompt(keyword=keyword, stage=stage, repair_index=repair_index),
+    result = _call_act_with_rate_limit_retry(
+        client=client,
+        contract=contract,
+        prompt=_closeable_popup_overlay_prompt(keyword=keyword, stage=stage, repair_index=repair_index),
+        stage=f"{stage}_closeable_popup_overlay_repair",
+        keyword=keyword,
+        diagnostics=diagnostics,
         interrupt_check=interrupt_check,
         keyword_deadline=keyword_deadline,
-        keyword=keyword,
         timeout_seconds=timeout_seconds,
     )
     action_diagnostics = _midscene_text_diagnostics(result, client=client)
@@ -2926,8 +3006,10 @@ def _fallback_goal_contract(
         "run_id": contract.get("run_id") or "",
         "session_index": contract.get("session_index") or 0,
         "acceptance": {
-            "tile_00": "current keyword must be verified on a visible Taobao results page before capture",
-            "capturing": "retain visible result-page tiles; results_end ends only the current keyword",
+            "home_entry_boundary": "ordinary Taobao homepage/search-entry must be verified before typing a keyword",
+            "search_submit_boundary": "tile_00 must verify submitted current-keyword Taobao results before capture",
+            "capture_tiles_boundary": "retain visible result-page tiles only within the accepted current-keyword results page; results_end ends only the current keyword",
+            "tile_00": "search submit boundary accepted first result viewport",
         },
         "repair_policy": {
             "boundary_repair_limit": 1,
@@ -3002,17 +3084,17 @@ def _fallback_evidence_check(
         "review_required": bool(review_reason),
         "results_end": state == "results_end",
     }
-    if goal_state == "CAPTURING" and state in CAPTURABLE_PAGE_STATES and not review_reason:
+    if goal_state in {"CAPTURING", "CAPTURE_TILES_BOUNDARY"} and state in CAPTURABLE_PAGE_STATES and not review_reason:
         checks["keyword_verified"] = keyword_match is not False
     status = "pass"
     reason = "evidence_matches_goal"
     if review_reason:
         status = "stop"
         reason = review_reason
-    elif goal_state == "BOUNDARY_VERIFY" and checks["keyword_mismatch"]:
+    elif goal_state in {"BOUNDARY_VERIFY", "SEARCH_SUBMIT_BOUNDARY"} and checks["keyword_mismatch"]:
         status = "repairable"
         reason = "visible_keyword_mismatch"
-    elif goal_state == "BOUNDARY_VERIFY" and not checks["keyword_verified"]:
+    elif goal_state in {"BOUNDARY_VERIFY", "SEARCH_SUBMIT_BOUNDARY"} and not checks["keyword_verified"]:
         status = "repairable"
         reason = "visible_keyword_unverified"
     elif not checks["visible_results_state"]:
@@ -3219,7 +3301,7 @@ def _fallback_capture_decision(
         reason = review_reason
     elif verification.get("ok") is False:
         reason = str(verification.get("stop_reason") or "verification_failed")
-        if goal_state == "BOUNDARY_VERIFY" and not repair_attempted and reason in {
+        if goal_state in {"BOUNDARY_VERIFY", "SEARCH_SUBMIT_BOUNDARY"} and not repair_attempted and reason in {
             "visible_keyword_mismatch",
             "visible_keyword_unverified",
             "search_submit_unconfirmed",
@@ -3509,6 +3591,190 @@ def _call_act(
     )
 
 
+def _rate_limit_retry_policy(contract: Dict[str, Any]) -> Dict[str, Any]:
+    hard_stop = contract.get("hard_stop_policy") or {}
+    config = contract.get("config") or {}
+    attempts = hard_stop.get("rate_limit_retry_attempts")
+    if attempts is None:
+        attempts = config.get("rate_limit_retry_attempts", 2)
+    cooldown = hard_stop.get("rate_limit_cooldown")
+    if cooldown is None:
+        cooldown = config.get("rate_limit_cooldown", 180.0)
+    backoff = hard_stop.get("rate_limit_backoff")
+    if backoff is None:
+        backoff = config.get("rate_limit_backoff", 1.5)
+    try:
+        attempts_int = max(0, int(attempts))
+    except (TypeError, ValueError):
+        attempts_int = 2
+    try:
+        cooldown_float = max(0.0, float(cooldown))
+    except (TypeError, ValueError):
+        cooldown_float = 180.0
+    try:
+        backoff_float = max(1.0, float(backoff))
+    except (TypeError, ValueError):
+        backoff_float = 1.5
+    return {
+        "attempts": attempts_int,
+        "cooldown": cooldown_float,
+        "backoff": backoff_float,
+    }
+
+
+def _call_act_with_rate_limit_retry(
+    client: MidsceneStdioClient,
+    contract: Dict[str, Any],
+    prompt: str,
+    stage: str,
+    keyword: str,
+    diagnostics: Optional[Dict[str, Any]],
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    policy = _rate_limit_retry_policy(contract)
+    max_retries = int(policy["attempts"])
+    attempts = max_retries + 1
+    records = _rate_limit_retry_records(diagnostics)
+    last_exception: Optional[BaseException] = None
+    for attempt_index in range(1, attempts + 1):
+        try:
+            result = _call_act(
+                client,
+                prompt,
+                interrupt_check=interrupt_check,
+                keyword_deadline=keyword_deadline,
+                keyword=keyword,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:
+            exception_diagnostics = _midscene_exception_diagnostics(exc).get("exception") or {}
+            if not exception_diagnostics.get("rate_limited"):
+                raise
+            last_exception = exc
+            record = _rate_limit_retry_record(
+                stage=stage,
+                source="exception",
+                attempt_index=attempt_index,
+                max_retries=max_retries,
+                diagnostics=exception_diagnostics,
+                policy=policy,
+            )
+            records.append(record)
+            if attempt_index > max_retries:
+                break
+            _sleep_rate_limit_cooldown(
+                record=record,
+                run_id=str((contract or {}).get("run_id") or ""),
+                session_index=int((contract or {}).get("session_index") or 0),
+                task_dir=str((contract or {}).get("task_dir") or ""),
+                keyword=keyword,
+                started=time.monotonic(),
+                timeout_seconds=None,
+            )
+            continue
+
+        action_diagnostics = _midscene_text_diagnostics(result, client=client)
+        if not action_diagnostics.get("rate_limited"):
+            return result
+        record = _rate_limit_retry_record(
+            stage=stage,
+            source="act_result",
+            attempt_index=attempt_index,
+            max_retries=max_retries,
+            diagnostics=action_diagnostics,
+            policy=policy,
+        )
+        records.append(record)
+        if attempt_index > max_retries:
+            return result
+        _sleep_rate_limit_cooldown(
+            record=record,
+            run_id=str((contract or {}).get("run_id") or ""),
+            session_index=int((contract or {}).get("session_index") or 0),
+            task_dir=str((contract or {}).get("task_dir") or ""),
+            keyword=keyword,
+            started=time.monotonic(),
+            timeout_seconds=None,
+        )
+
+    final_diagnostics: Dict[str, Any] = {}
+    if last_exception is not None:
+        final_diagnostics = _midscene_exception_diagnostics(last_exception).get("exception") or {}
+    raise MidsceneActionAbnormal(
+        reason="rate_limited",
+        rough_state="rate_limited",
+        message=f"Midscene/VLM rate limit persisted after retries during {stage}.",
+        diagnostics={stage: final_diagnostics, "rate_limit_retries": records},
+    )
+
+
+def _rate_limit_retry_records(diagnostics: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if diagnostics is None:
+        return []
+    records = diagnostics.setdefault("rate_limit_retries", [])
+    if isinstance(records, list):
+        return records
+    diagnostics["rate_limit_retries"] = []
+    return diagnostics["rate_limit_retries"]
+
+
+def _rate_limit_retry_record(
+    stage: str,
+    source: str,
+    attempt_index: int,
+    max_retries: int,
+    diagnostics: Dict[str, Any],
+    policy: Dict[str, Any],
+) -> Dict[str, Any]:
+    wait_seconds = float(policy["cooldown"]) * (float(policy["backoff"]) ** max(0, attempt_index - 1))
+    return {
+        "stage": stage,
+        "source": source,
+        "attempt_index": attempt_index,
+        "max_retries": max_retries,
+        "will_retry": attempt_index <= max_retries,
+        "cooldown_seconds": round(wait_seconds, 3) if attempt_index <= max_retries else 0,
+        "diagnostics": diagnostics,
+    }
+
+
+def _sleep_rate_limit_cooldown(
+    record: Dict[str, Any],
+    run_id: str,
+    session_index: int,
+    task_dir: str,
+    keyword: str,
+    started: Optional[float],
+    timeout_seconds: Optional[float],
+) -> None:
+    seconds = float(record.get("cooldown_seconds") or 0.0)
+    if seconds <= 0:
+        return
+    if task_dir:
+        write_task_event(
+            task_dir,
+            event="visual_capture_rate_limit_cooldown",
+            run_id=run_id,
+            session_index=session_index,
+            keyword=keyword,
+            stage=record.get("stage") or "",
+            attempt_index=record.get("attempt_index") or 0,
+            seconds=round(seconds, 3),
+        )
+    _interruptible_sleep(
+        seconds,
+        run_id,
+        session_index,
+        task_dir,
+        keyword=keyword,
+        reason=f"rate_limit_cooldown:{record.get('stage') or ''}",
+        started=started,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def _call_act_with_foreground_recovery(
     client: MidsceneStdioClient,
     contract: Dict[str, Any],
@@ -3526,12 +3792,15 @@ def _call_act_with_foreground_recovery(
 ) -> Dict[str, Any]:
     while True:
         try:
-            result = _call_act(
-                client,
-                prompt,
+            result = _call_act_with_rate_limit_retry(
+                client=client,
+                contract=contract,
+                prompt=prompt,
+                stage=stage,
+                keyword=keyword,
+                diagnostics=diagnostics,
                 interrupt_check=interrupt_check,
                 keyword_deadline=keyword_deadline,
-                keyword=keyword,
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:
@@ -3782,12 +4051,15 @@ def _maybe_recover_foreground(
             )
         except Exception as exc:
             attempt["before_error"] = str(exc)
-        result = _call_act(
-            client,
-            _foreground_recovery_prompt(keyword=keyword, stage=stage, attempt_index=attempt_index),
+        result = _call_act_with_rate_limit_retry(
+            client=client,
+            contract=contract,
+            prompt=_foreground_recovery_prompt(keyword=keyword, stage=stage, attempt_index=attempt_index),
+            stage=f"{stage}_foreground_recovery",
+            keyword=keyword,
+            diagnostics=diagnostics,
             interrupt_check=interrupt_check,
             keyword_deadline=keyword_deadline,
-            keyword=keyword,
             timeout_seconds=timeout_seconds,
         )
         attempt["act"] = _midscene_text_diagnostics(result, client=client)
@@ -4065,6 +4337,49 @@ def _run_initial_foreground_recovery(
     }
 
 
+def _perform_search_submit_boundary(
+    client: MidsceneStdioClient,
+    contract: Dict[str, Any],
+    keyword: str,
+    scroll_distance: int,
+    capture_plan: Optional[Dict[str, Any]],
+    tools: Optional[List[str]],
+    diagnostics: Dict[str, Any],
+    foreground_recovery: Dict[str, Any],
+    evidence_dir: str,
+    interrupt_check: Optional[Callable[[], None]],
+    keyword_deadline: float,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    del scroll_distance
+    search_result = _call_act_with_foreground_recovery(
+        client=client,
+        contract=contract,
+        prompt=_search_submit_boundary_prompt(keyword=keyword, contract=contract),
+        stage="search_submit_boundary",
+        keyword=keyword,
+        capture_plan=capture_plan,
+        tools=tools,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        evidence_dir=evidence_dir,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+    )
+    act_diagnostics = _search_submission_diagnostics(search_result, client=client)
+    payload = {
+        "mode": "bounded_act_search_submit",
+        "boundary": "search_submit",
+        "retry_from_act_exception": False,
+        "steps": {"act": act_diagnostics},
+    }
+    diagnostics["search_submit_boundary"] = payload
+    _raise_if_rate_limited_diagnostics(act_diagnostics, "search_submit_boundary")
+    _raise_if_abnormal_act(search_result, default_context="search_submit_boundary")
+    return payload
+
+
 def _perform_keyword_search(
     client: MidsceneStdioClient,
     contract: Dict[str, Any],
@@ -4079,65 +4394,20 @@ def _perform_keyword_search(
     keyword_deadline: float,
     timeout_seconds: float,
 ) -> Dict[str, Any]:
-    try:
-        search_result = _call_act_with_foreground_recovery(
-            client=client,
-            contract=contract,
-            prompt=_keyword_search_home_entry_prompt(keyword=keyword, contract=contract),
-            stage="keyword_search",
-            keyword=keyword,
-            capture_plan=capture_plan,
-            tools=tools,
-            diagnostics=diagnostics,
-            foreground_recovery=foreground_recovery,
-            evidence_dir=evidence_dir,
-            interrupt_check=interrupt_check,
-            keyword_deadline=keyword_deadline,
-            timeout_seconds=timeout_seconds,
-        )
-        retry_from_act_exception = False
-    except Exception as exc:
-        if not _is_home_entry_retryable_act_exception(exc, diagnostics):
-            raise
-        diagnostics["home_entry_act_exception_retry"] = {
-            "status": "attempted",
-            "mode": "home_entry_retry_after_act_exception",
-            "trigger": {
-                "exception": str(exc),
-                "classification": classify_midscene_exception(exc),
-            },
-        }
-        search_result = _call_act_with_foreground_recovery(
-            client=client,
-            contract=contract,
-            prompt=_keyword_search_home_entry_retry_after_exception_prompt(
-                keyword=keyword,
-                contract=contract,
-            ),
-            stage="keyword_search_home_entry_exception_retry",
-            keyword=keyword,
-            capture_plan=capture_plan,
-            tools=tools,
-            diagnostics=diagnostics,
-            foreground_recovery=foreground_recovery,
-            evidence_dir=evidence_dir,
-            interrupt_check=interrupt_check,
-            keyword_deadline=keyword_deadline,
-            timeout_seconds=timeout_seconds,
-        )
-        retry_from_act_exception = True
-    act_diagnostics = _search_submission_diagnostics(search_result, client=client)
-    _raise_if_rate_limited_diagnostics(act_diagnostics, "keyword_search")
-    _raise_if_abnormal_act(search_result, default_context="keyword_search")
-    if retry_from_act_exception:
-        diagnostics["home_entry_act_exception_retry"]["steps"] = {"act": act_diagnostics}
-        diagnostics["home_entry_act_exception_retry"]["status"] = "completed"
-    return {
-        "mode": "bounded_act_search",
-        "boundary": "home_entry",
-        "retry_from_act_exception": retry_from_act_exception,
-        "steps": {"act": act_diagnostics},
-    }
+    return _perform_search_submit_boundary(
+        client=client,
+        contract=contract,
+        keyword=keyword,
+        scroll_distance=scroll_distance,
+        capture_plan=capture_plan,
+        tools=tools,
+        diagnostics=diagnostics,
+        foreground_recovery=foreground_recovery,
+        evidence_dir=evidence_dir,
+        interrupt_check=interrupt_check,
+        keyword_deadline=keyword_deadline,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _perform_page_scroll(
@@ -4456,7 +4726,7 @@ def _classify_screenshot(path: str, contract: Dict[str, Any]) -> Dict[str, Any]:
 
 def _keyword_search_prompt(keyword: str, scroll_distance: int) -> str:
     del scroll_distance
-    return _keyword_search_home_entry_prompt(keyword)
+    return _search_submit_boundary_prompt(keyword)
 
 
 def _allow_bookmark_home_entry_repair(contract: Optional[Dict[str, Any]] = None) -> bool:
@@ -4620,9 +4890,18 @@ def _keyword_search_home_entry_prompt(
     keyword: str,
     contract: Optional[Dict[str, Any]] = None,
 ) -> str:
-    navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    return _search_submit_boundary_prompt(keyword=keyword, contract=contract)
+
+
+def _search_submit_boundary_prompt(
+    keyword: str,
+    contract: Optional[Dict[str, Any]] = None,
+) -> str:
+    del contract
     return (
-        "You are the bounded Taobao capture worker for one keyword. Use only "
+        "Submit the current keyword search from the already verified ordinary Taobao homepage. "
+        "This is the search_submit_boundary only; home-entry repair belongs to the previous "
+        "home_entry_boundary and must not be performed in this step. Use only "
         "visible-screen reasoning and system mouse/keyboard actions. Do not read "
         "DOM, HTML, network, cookies, storage, selector maps, page source, JS "
         "evaluated data, or clipboard contents. Do not use short action APIs "
@@ -4640,15 +4919,12 @@ def _keyword_search_home_entry_prompt(
         "click only that popup/overlay gray X and then continue from the same "
         "visible step. Do not click browser/window close buttons or account-state "
         "controls. "
-        f"{navigation_rule}"
-        "Before searching, return through the existing visible Taobao home page or "
-        "ordinary Taobao home/search-entry UI. You may use visible low-frequency "
-        "page controls such as the Taobao logo, Home/首页 entry, a return-home "
-        "button, an already visible ordinary homepage search entrance, an already "
-        "visible Taobao homepage tab, or the configured visible bookmark home-entry "
-        "repair when it is allowed. Do not replace text inside an old results-page "
-        "search box and call that success. "
-        "Once the ordinary homepage/search-entry search box is visible, search "
+        "The current page should already be the ordinary taobao.com homepage/search-entry "
+        "surface. If it is not, stop and report search_submit_requires_home_entry. "
+        "Do not use a Taobao logo, Home/首页 entry, return-home control, bookmark, new "
+        "tab, old results-page search box, activity/campaign search box, browser address "
+        "bar, or URL typing in this step. "
+        "Click the ordinary Taobao homepage search box and search "
         f"exactly this keyword: {keyword!r}. After the search box visibly contains "
         "exactly this keyword, submit by mouse-clicking the visible search button "
         "as the preferred method. Use Enter only as a fallback when the search "
@@ -4662,9 +4938,9 @@ def _keyword_search_home_entry_prompt(
         "button fails and the page remains a homepage/search-entry feed, stop and "
         "report search_submit_failed or submission_method=unconfirmed instead of "
         "starting capture. In the final action message, "
-        "include home_entry_used=true, bookmark_home_entry_used=true or false, "
-        "and submission_method=search_button or submission_method=enter_fallback "
-        "so diagnostics can trace the boundary. "
+        "include search_submitted=true or false, submission_method=search_button "
+        "or submission_method=enter_fallback, visible_search_keyword, "
+        "result_page_ready=true or false, and blocker if any. "
         "Wait until visible search results settle. Leave the page positioned at "
         "the first results viewport. Do not output product rows."
     )
@@ -4674,52 +4950,7 @@ def _keyword_search_home_entry_retry_after_exception_prompt(
     keyword: str,
     contract: Optional[Dict[str, Any]] = None,
 ) -> str:
-    navigation_rule = _bookmark_home_entry_repair_prompt(contract)
-    return (
-        "The previous bounded search attempt stopped while an old Taobao results "
-        "page or old keyword was visible. Treat an old results page, bottom-of-results "
-        "footer, or visible old keyword as a recoverable home-entry condition, not "
-        "as success and not as a reason to type into the old results-page search box. "
-        "Do not replace text inside an old results-page search box. "
-        "Use only visible-screen reasoning and system mouse/keyboard actions. Do "
-        "not read DOM, HTML, network, cookies, storage, selector maps, page source, "
-        "JS-evaluated data, or clipboard contents. Do not use short action APIs "
-        "such as Tap, Input, KeyboardPress, Scroll, or ClearInput. Do not use the "
-        "browser address bar, do not type a URL, and do not run scripts. "
-        "If Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome app is "
-        "visible, report chrome_not_foreground so the Python worker can recover "
-        "foreground safely; do not type, scroll, search, or navigate in that app. "
-        "If a normal Taobao in-page modal or marketing overlay dims the page and "
-        "has a clear gray X close control around the popup itself, usually near "
-        "the popup's own upper-right corner, click only that popup/overlay gray X "
-        "before continuing; never click browser/window close buttons or account-state "
-        "controls. "
-        f"{navigation_rule}"
-        "From the current visible Taobao page, first use a "
-        "visible Taobao logo, Home/首页 entry, return-home control, or ordinary "
-        "Taobao home/search-entry UI to get to the normal homepage search entry. If "
-        "the configured bookmark repair is allowed, an old results page may instead "
-        "be repaired by clicking the visible new tab plus button and then the visible "
-        "Taobao bookmark button. If no such visible home entry exists, report failure. "
-        "Once the ordinary "
-        "homepage/search-entry search box is visible, search exactly this keyword: "
-        f"{keyword!r}. After the box visibly contains exactly this keyword, submit "
-        "by mouse-clicking the visible search button as the preferred method; use "
-        "Enter only if the button is not visible or cannot be clicked. After submitting, "
-        "wait until the page visibly becomes a Taobao search results structure, such as "
-        "a search results URL/address cue, a results sort/filter bar like 综合/销量/价格/"
-        "区间/筛选, or pagination/previous/next/jump controls. Do not scroll the "
-        "homepage recommendation feed, hot recommendations, channels, campaigns, or 猜你喜欢. "
-        "Do not report success merely because the search box contains the keyword or "
-        "because homepage product cards are visible. If clicking the search button fails "
-        "and the page remains a homepage/search-entry feed, stop and report search_submit_failed "
-        "or submission_method=unconfirmed instead of starting capture. In the final "
-        "action message include home_entry_used=true, recovered_from_old_results=true, "
-        "bookmark_home_entry_used=true or false, and submission_method=search_button "
-        "or submission_method=enter_fallback. "
-        "Wait until visible search results settle. Leave the page positioned at "
-        "the first results viewport. Do not output product rows."
-    )
+    return _search_submit_boundary_prompt(keyword=keyword, contract=contract)
 
 
 def _keyword_search_reset_prompt(keyword: str) -> str:
@@ -4728,7 +4959,8 @@ def _keyword_search_reset_prompt(keyword: str) -> str:
 
 def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> str:
     return (
-        "You are continuing the bounded Taobao capture session using only "
+        "Continue the capture_tiles_boundary for the already accepted current-keyword "
+        "Taobao results page using only "
         "visible-screen reasoning and system mouse/keyboard/scroll actions. The "
         f"current keyword is {keyword!r}. If Codex, Terminal, Cursor, VS Code, "
         "WPS, or another non-Chrome app is visible, report chrome_not_foreground "
@@ -4746,6 +4978,8 @@ def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> st
         "license/filing text, partner/friend links, or the scrollbar already at the bottom. "
         "During ordinary non-bottom scrolling, do not stop just because the search box text is not readable; "
         "keyword text confirmation belongs at results-end or keyword-boundary handling. "
+        "Do not return home, do not repair home entry, do not type or submit a search, "
+        "do not clear the search box, and do not use old-page recovery in this boundary. "
         "Otherwise move only one short step toward the next visible results "
         f"viewport for tile_{tile_index:02d}; use exactly one normal page-level "
         f"downward wheel/trackpad scroll of about {scroll_distance} px if appropriate. "

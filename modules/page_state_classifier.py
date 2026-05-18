@@ -140,7 +140,10 @@ def _request_payload(model: str, image_path: Path, keyword: str, temperature: fl
         "Using only this saved screenshot image, classify the coarse operational state of the visible page. "
         "Return only a valid JSON object with exactly these fields: state, confidence, reason, "
         "visible_search_keyword, keyword_match, search_box_text_kind, search_submitted, "
-        "is_home_feed, result_page_evidence, url_or_page_evidence. "
+        "is_home_feed, result_page_evidence, url_or_page_evidence, source_state, "
+        "home_entry_ready, home_url_status, visible_url_or_address_text, home_structure_status, "
+        "home_structure_evidence, bookmark_visible, bookmark_home_entry_used, recovered_from_old_results, "
+        "hard_blocking_reason, recommended_next. "
         "state must be one of: chrome_not_foreground, captcha_required, login_required, risk_suspected, "
         "popup_blocked, closeable_popup_overlay, white_skeleton, empty_result, results_end, "
         "visible_results, search_results, results_page, visible_ready, unknown. "
@@ -174,6 +177,15 @@ def _request_payload(model: str, image_path: Path, keyword: str, temperature: fl
         "result_page_evidence and address/page evidence in url_or_page_evidence when available. Set "
         "state visible_ready and is_home_feed true for a normal taobao.com homepage recommendation feed. "
         "Set is_home_feed true for a homepage recommendation feed; product cards alone do not prove submitted search. "
+        "For home-entry boundary screenshots, classify source_state as ordinary_taobao_home, "
+        "chrome_start_page_with_taobao_bookmark, old_taobao_results_page, unrelated_page, "
+        "chrome_not_foreground, hard_blocked, or unknown. Set home_entry_ready true only when the "
+        "visible page is the ordinary Taobao homepage/search-entry surface, not a search results page, "
+        "activity/campaign page, purchase-selection page, Tmall page, or unrelated page. Set home_url_status "
+        "to normal_taobao_home, taobao_search_results, taobao_activity_or_campaign, taobao_other, "
+        "chrome_start_page, unrelated, or unreadable. Set home_structure_status to ordinary_home_search_entry, "
+        "results_page_structure, activity_or_campaign_structure, purchase_selection_structure, unrelated_structure, "
+        "or unreadable. recommended_next must be accept_home, repair_home_entry, or stop. "
         "Do not output product rows, prices, shop names, item titles, business filtering, or price decisions."
     )
     return {
@@ -337,6 +349,56 @@ def _normalize_classifier_payload(payload: Dict[str, Any], *, raw_text: str) -> 
         "is_home_feed": is_home_feed,
         "result_page_evidence": result_page_evidence,
         "url_or_page_evidence": url_or_page_evidence,
+        "source_state": _normalize_enum(
+            payload.get("source_state"),
+            {
+                "ordinary_taobao_home",
+                "chrome_start_page_with_taobao_bookmark",
+                "old_taobao_results_page",
+                "unrelated_page",
+                "chrome_not_foreground",
+                "hard_blocked",
+                "unknown",
+            },
+            default="",
+        ),
+        "home_entry_ready": _optional_bool(payload.get("home_entry_ready")),
+        "home_url_status": _normalize_enum(
+            payload.get("home_url_status"),
+            {
+                "normal_taobao_home",
+                "taobao_search_results",
+                "taobao_activity_or_campaign",
+                "taobao_other",
+                "chrome_start_page",
+                "unrelated",
+                "unreadable",
+            },
+            default="",
+        ),
+        "visible_url_or_address_text": str(payload.get("visible_url_or_address_text") or "").strip(),
+        "home_structure_status": _normalize_enum(
+            payload.get("home_structure_status"),
+            {
+                "ordinary_home_search_entry",
+                "results_page_structure",
+                "activity_or_campaign_structure",
+                "purchase_selection_structure",
+                "unrelated_structure",
+                "unreadable",
+            },
+            default="",
+        ),
+        "home_structure_evidence": _normalize_text_list(payload.get("home_structure_evidence")),
+        "bookmark_visible": _optional_bool(payload.get("bookmark_visible")),
+        "bookmark_home_entry_used": _optional_bool(payload.get("bookmark_home_entry_used")),
+        "recovered_from_old_results": _optional_bool(payload.get("recovered_from_old_results")),
+        "hard_blocking_reason": str(payload.get("hard_blocking_reason") or "").strip(),
+        "recommended_next": _normalize_enum(
+            payload.get("recommended_next"),
+            {"accept_home", "repair_home_entry", "stop"},
+            default="",
+        ),
     }
 
 
@@ -402,6 +464,11 @@ def _optional_bool(value: Any) -> Optional[bool]:
     if text in {"", "null", "none", "unknown", "unreadable"}:
         return None
     return None
+
+
+def _normalize_enum(value: Any, allowed: set, default: str = "unknown") -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return text if text in allowed else default
 
 
 def _normalize_text_list(value: Any) -> List[str]:

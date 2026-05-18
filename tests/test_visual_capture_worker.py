@@ -18,6 +18,7 @@ from modules.session_capsule import RUNNABLE_STATUSES
 
 class FakeClient:
     classifier_results = None
+    use_queued_home_entry_classifier_once = False
 
     def __init__(self, act_result, classifier_result=None, stderr_tail="", tool_results=None):
         self.act_result = act_result
@@ -56,11 +57,18 @@ class FakeClient:
                     self.calls.pop()
                     self.synthetic_home_entry_ready = True
                     return {"content": [{"type": "text", "text": "home_entry_prepared=true home_entry_used=true recovered_from_old_results=false bookmark_home_entry_used=false"}]}
+                FakeClient.use_queued_home_entry_classifier_once = True
             if isinstance(self.act_result, list):
                 if self.act_result:
                     value = self.act_result.pop(0)
                     if isinstance(value, BaseException):
                         raise value
+                    if (
+                        "home_entry" in prompt
+                        and isinstance(value, dict)
+                        and "home_entry_prepared" in worker._tool_text(value)
+                    ):
+                        FakeClient.use_queued_home_entry_classifier_once = True
                     return value
                 return {"content": [{"type": "text", "text": "ok"}]}
             if isinstance(self.act_result, BaseException):
@@ -193,6 +201,21 @@ def _parse_test_page_state_payload(text):
         payload["result_page_evidence"] = parsed.get("result_page_evidence")
     if "url_or_page_evidence" in parsed:
         payload["url_or_page_evidence"] = parsed.get("url_or_page_evidence")
+    for key in [
+        "source_state",
+        "home_entry_ready",
+        "home_url_status",
+        "visible_url_or_address_text",
+        "home_structure_status",
+        "home_structure_evidence",
+        "bookmark_visible",
+        "bookmark_home_entry_used",
+        "recovered_from_old_results",
+        "hard_blocking_reason",
+        "recommended_next",
+    ]:
+        if key in parsed:
+            payload[key] = parsed.get(key)
     return payload
 
 
@@ -206,9 +229,43 @@ def _parse_test_page_state_text(text):
     return _normalize_test_page_state_value(parsed.get("state") or parsed.get("status"))
 
 
+def _test_home_entry_ready_state():
+    return {
+        "status": "visible_ready",
+        "confidence": 0.9,
+        "reason": "test_home_entry_ready",
+        "metrics": {},
+        "source": "json_classifier",
+        "raw_text": (
+            '{"state":"visible_ready","source_state":"ordinary_taobao_home",'
+            '"home_entry_ready":true,"home_url_status":"normal_taobao_home",'
+            '"home_structure_status":"ordinary_home_search_entry"}'
+        ),
+        "visible_search_keyword": "",
+        "keyword_match": None,
+        "search_box_text_kind": "suggestion",
+        "search_submitted": None,
+        "is_home_feed": True,
+        "result_page_evidence": [],
+        "url_or_page_evidence": ["taobao.com"],
+        "source_state": "ordinary_taobao_home",
+        "home_entry_ready": True,
+        "home_url_status": "normal_taobao_home",
+        "visible_url_or_address_text": "taobao.com",
+        "home_structure_status": "ordinary_home_search_entry",
+        "home_structure_evidence": ["test_home_search_entry"],
+        "bookmark_visible": None,
+        "bookmark_home_entry_used": None,
+        "recovered_from_old_results": None,
+        "hard_blocking_reason": "",
+        "recommended_next": "accept_home",
+    }
+
+
 class VisualCaptureWorkerTests(unittest.TestCase):
     def setUp(self):
         FakeClient.classifier_results = None
+        FakeClient.use_queued_home_entry_classifier_once = False
         self.classifier_patch = mock.patch.object(
             worker,
             "classify_screenshot_json",
@@ -219,22 +276,45 @@ class VisualCaptureWorkerTests(unittest.TestCase):
     def tearDown(self):
         self.classifier_patch.stop()
         FakeClient.classifier_results = None
+        FakeClient.use_queued_home_entry_classifier_once = False
 
     def _default_classifier(self, path, *, contract=None, keyword="", timeout_seconds=30.0):
         basename = os.path.basename(str(path or ""))
-        if basename.startswith("home_entry_prepared") and getattr(self, "synthetic_home_entry_ready", False):
-            self.synthetic_home_entry_ready = False
+        if (
+            basename.startswith("home_entry_prepared") or "home_entry_boundary" in basename
+        ) and not FakeClient.use_queued_home_entry_classifier_once:
             return {
                 "status": "visible_ready",
                 "confidence": 0.9,
-                "reason": "test_synthetic_home_entry_ready",
+                "reason": "test_default_home_entry_ready",
                 "metrics": {},
                 "source": "json_classifier",
-                "raw_text": '{"state":"visible_ready"}',
+                "raw_text": (
+                    '{"state":"visible_ready","source_state":"ordinary_taobao_home",'
+                    '"home_entry_ready":true,"home_url_status":"normal_taobao_home",'
+                    '"home_structure_status":"ordinary_home_search_entry"}'
+                ),
                 "visible_search_keyword": "",
                 "keyword_match": None,
                 "search_box_text_kind": "",
+                "search_submitted": None,
+                "is_home_feed": None,
+                "result_page_evidence": [],
+                "url_or_page_evidence": [],
+                "source_state": "ordinary_taobao_home",
+                "home_entry_ready": True,
+                "home_url_status": "normal_taobao_home",
+                "visible_url_or_address_text": "taobao.com",
+                "home_structure_status": "ordinary_home_search_entry",
+                "home_structure_evidence": ["test_home_search_entry"],
+                "bookmark_visible": None,
+                "bookmark_home_entry_used": None,
+                "recovered_from_old_results": None,
+                "hard_blocking_reason": "",
+                "recommended_next": "accept_home",
             }
+        if basename.startswith("home_entry_prepared") or "home_entry_boundary" in basename:
+            FakeClient.use_queued_home_entry_classifier_once = False
         queued = FakeClient.classifier_results
         if queued is not None:
             if queued:
@@ -267,6 +347,17 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     "is_home_feed": normalized.get("is_home_feed"),
                     "result_page_evidence": normalized.get("result_page_evidence") or [],
                     "url_or_page_evidence": normalized.get("url_or_page_evidence") or [],
+                    "source_state": normalized.get("source_state") or "",
+                    "home_entry_ready": normalized.get("home_entry_ready"),
+                    "home_url_status": normalized.get("home_url_status") or "",
+                    "visible_url_or_address_text": normalized.get("visible_url_or_address_text") or "",
+                    "home_structure_status": normalized.get("home_structure_status") or "",
+                    "home_structure_evidence": normalized.get("home_structure_evidence") or [],
+                    "bookmark_visible": normalized.get("bookmark_visible"),
+                    "bookmark_home_entry_used": normalized.get("bookmark_home_entry_used"),
+                    "recovered_from_old_results": normalized.get("recovered_from_old_results"),
+                    "hard_blocking_reason": normalized.get("hard_blocking_reason") or "",
+                    "recommended_next": normalized.get("recommended_next") or "",
                 }
             if text.strip().lower() not in {"true", "ok"}:
                 raise page_state_classifier.PageStateClassifierUnavailable("classifier_json_unparseable")
@@ -321,19 +412,22 @@ class VisualCaptureWorkerTests(unittest.TestCase):
 
     def test_search_and_scroll_prompts_keep_search_submission_and_foreground_rules(self):
         search_prompt = worker._keyword_search_prompt("万智牌 中止", 560)
-        bookmark_prompt = worker._keyword_search_home_entry_prompt(
+        pre_keyword_home_entry_prompt = worker._pre_keyword_home_entry_prompt(
             "万智牌 中止",
             {"config": {"allow_bookmark_home_entry_repair": True}},
         )
         scroll_prompt = worker._next_tile_prompt("万智牌 中止", 1, 560)
         reset_prompt = worker._keyword_search_reset_prompt("万智牌 中止")
 
+        self.assertIn("search_submit_boundary only", search_prompt)
+        self.assertIn("home-entry repair belongs to the previous home_entry_boundary", search_prompt)
         self.assertIn("search exactly this keyword", search_prompt)
         self.assertIn("'万智牌 中止'", search_prompt)
-        self.assertIn("ordinary Taobao home/search-entry UI", search_prompt)
-        self.assertIn("Taobao logo", search_prompt)
-        self.assertIn("return-home button", search_prompt)
-        self.assertIn("Do not replace text inside an old results-page search box", search_prompt)
+        self.assertIn("already verified ordinary Taobao homepage", search_prompt)
+        self.assertIn("Do not use a Taobao logo", search_prompt)
+        self.assertIn("return-home control", search_prompt)
+        self.assertIn("old results-page search box", search_prompt)
+        self.assertIn("search_submit_requires_home_entry", search_prompt)
         self.assertIn("mouse-clicking the visible search button", search_prompt)
         self.assertIn("Use Enter only as a fallback", search_prompt)
         self.assertIn("submission_method=search_button", search_prompt)
@@ -345,6 +439,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertNotIn("pressing Enter or clicking", search_prompt)
         self.assertNotIn("submit once more with Enter", search_prompt)
         self.assertIn("Wait until visible search results settle", search_prompt)
+        self.assertNotIn("visible Taobao bookmark button", search_prompt)
+        self.assertNotIn("click that Taobao bookmark directly", search_prompt)
+        self.assertNotIn("open or return to the ordinary Taobao homepage", search_prompt)
         self.assertIn("chrome_not_foreground", search_prompt)
         self.assertIn("do not type, scroll, search, or navigate in that app", search_prompt)
         self.assertIn("chrome_not_foreground", scroll_prompt)
@@ -361,13 +458,10 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("ordinary non-bottom scrolling", scroll_prompt)
         self.assertIn("keyword-boundary handling", scroll_prompt)
         self.assertNotIn("1/100", scroll_prompt)
-        self.assertIn("bounded Taobao capture worker", reset_prompt)
+        self.assertIn("Submit the current keyword search", reset_prompt)
         self.assertIn("chrome_not_foreground", reset_prompt)
-        self.assertIn("do not type a URL", reset_prompt)
-        self.assertIn("do not open a new browser tab", reset_prompt)
-        self.assertIn("ordinary Taobao home/search-entry UI", reset_prompt)
-        self.assertIn("return-home button", reset_prompt)
-        self.assertIn("ordinary homepage/search-entry search box", reset_prompt)
+        self.assertIn("search_submit_boundary only", reset_prompt)
+        self.assertIn("search_submit_requires_home_entry", reset_prompt)
         self.assertIn("'万智牌 中止'", reset_prompt)
         self.assertIn("mouse-clicking the visible search button", reset_prompt)
         self.assertIn("Use Enter only as a fallback", reset_prompt)
@@ -383,11 +477,13 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("Tap, Input, KeyboardPress, Scroll, or ClearInput", reset_prompt)
         self.assertNotIn("Bring the existing Chrome window", search_prompt)
         self.assertNotIn("Bring the existing Chrome window", scroll_prompt)
-        self.assertIn("Chrome is already foreground on a visible new tab", bookmark_prompt)
-        self.assertIn("click that Taobao bookmark directly", bookmark_prompt)
-        self.assertIn("do not open another new tab first", bookmark_prompt)
+        self.assertIn("Prepare the Taobao homepage/search-entry boundary", pre_keyword_home_entry_prompt)
+        self.assertIn("visible Taobao bookmark button", pre_keyword_home_entry_prompt)
+        self.assertIn("click that Taobao bookmark directly", pre_keyword_home_entry_prompt)
+        self.assertIn("do not open another new tab first", pre_keyword_home_entry_prompt)
+        self.assertIn("return-home control", pre_keyword_home_entry_prompt)
+        self.assertIn("Do not replace text inside an old", pre_keyword_home_entry_prompt)
         self.assertNotIn("switch to Chrome first", search_prompt)
-        self.assertIn("existing visible Taobao home page", search_prompt)
         self.assertNotIn("open a new browser tab", search_prompt.lower().replace("do not open a new browser tab", ""))
         self.assertNotIn("normal browser tab", reset_prompt)
 
@@ -575,7 +671,8 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             timeout_seconds=5,
         )
 
-        self.assertEqual(search_result["mode"], "bounded_act_search")
+        self.assertEqual(search_result["mode"], "bounded_act_search_submit")
+        self.assertEqual(search_result["boundary"], "search_submit")
         self.assertEqual(scroll_result["mode"], "bounded_act_scroll")
         self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
         self.assertIn("search exactly this keyword", client.calls[0]["arguments"]["prompt"])
@@ -591,8 +688,71 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("next visible results viewport", client.calls[1]["arguments"]["prompt"])
         self.assertIn("about 560 px", client.calls[1]["arguments"]["prompt"])
         self.assertIn("exactly one normal page-level", client.calls[1]["arguments"]["prompt"])
-        self.assertIn("Do not chain multiple wheel ticks", client.calls[1]["arguments"]["prompt"])
-        self.assertIn("save the next screenshot at this intermediate position", client.calls[1]["arguments"]["prompt"])
+
+    def test_rate_limited_search_submit_and_scroll_retry_after_cooldown(self):
+        client = FakeClient(
+            [
+                {"content": [{"type": "text", "text": "HTTP 429 too many requests"}]},
+                {"content": [{"type": "text", "text": "search submitted submission_method=search_button"}]},
+                {"content": [{"type": "text", "text": "rate_limited quota exceeded"}]},
+                {"content": [{"type": "text", "text": "scrolled to next results viewport"}]},
+            ]
+        )
+        contract = {
+            "run_id": "run",
+            "session_index": 1,
+            "task_dir": tempfile.gettempdir(),
+            "hard_stop_policy": {
+                "rate_limit_retry_attempts": 1,
+                "rate_limit_cooldown": 7,
+                "rate_limit_backoff": 1.5,
+            },
+        }
+        diagnostics = {}
+
+        with mock.patch.object(worker, "_interruptible_sleep", return_value=None) as sleep_mock:
+            search_result = worker._perform_keyword_search(
+                client=client,
+                contract=contract,
+                keyword="万智牌 中止",
+                scroll_distance=560,
+                capture_plan={},
+                tools=[],
+                diagnostics=diagnostics,
+                foreground_recovery={"events_used": 0},
+                evidence_dir=tempfile.gettempdir(),
+                interrupt_check=None,
+                keyword_deadline=time.monotonic() + 30,
+                timeout_seconds=5,
+            )
+            scroll_result = worker._perform_page_scroll(
+                client=client,
+                contract=contract,
+                keyword="万智牌 中止",
+                tile_index=1,
+                scroll_distance=560,
+                capture_plan={},
+                tools=[],
+                diagnostics=diagnostics,
+                foreground_recovery={"events_used": 0},
+                evidence_dir=tempfile.gettempdir(),
+                interrupt_check=None,
+                keyword_deadline=time.monotonic() + 30,
+                timeout_seconds=5,
+            )
+
+        self.assertEqual(search_result["mode"], "bounded_act_search_submit")
+        self.assertEqual(scroll_result["mode"], "bounded_act_scroll")
+        self.assertEqual([call["name"] for call in client.calls], ["act", "act", "act", "act"])
+        self.assertEqual(len(diagnostics["rate_limit_retries"]), 2)
+        self.assertEqual(
+            [item["stage"] for item in diagnostics["rate_limit_retries"]],
+            ["search_submit_boundary", "scroll_tile_1"],
+        )
+        self.assertTrue(all(item["will_retry"] for item in diagnostics["rate_limit_retries"]))
+        self.assertEqual(sleep_mock.call_count, 2)
+        self.assertIn("Do not chain multiple wheel ticks", client.calls[3]["arguments"]["prompt"])
+        self.assertIn("save the next screenshot at this intermediate position", client.calls[3]["arguments"]["prompt"])
 
     def test_tile_scroll_distance_is_capped_to_avoid_skipping_intermediate_viewports(self):
         calibration = estimate_tile_scroll_distance(
@@ -609,7 +769,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertEqual(calibration["tile_scroll_distance_px"], 320)
         self.assertEqual(calibration["max_tile_scroll_distance_px"], 320)
 
-    def test_keyword_search_act_exception_old_results_retries_home_entry_once(self):
+    def test_keyword_search_act_exception_old_results_does_not_repair_inside_search_submit(self):
         client = FakeClient(
             [
                 RuntimeError(
@@ -632,33 +792,26 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         )
         diagnostics = {}
 
-        result = worker._perform_keyword_search(
-            client=client,
-            contract={},
-            keyword="万智牌 唤兽师贾路",
-            scroll_distance=560,
-            capture_plan={},
-            tools=[],
-            diagnostics=diagnostics,
-            foreground_recovery={"events_used": 0},
-            evidence_dir=tempfile.gettempdir(),
-            interrupt_check=None,
-            keyword_deadline=time.monotonic() + 30,
-            timeout_seconds=5,
-        )
+        with self.assertRaises(RuntimeError):
+            worker._perform_keyword_search(
+                client=client,
+                contract={},
+                keyword="万智牌 唤兽师贾路",
+                scroll_distance=560,
+                capture_plan={},
+                tools=[],
+                diagnostics=diagnostics,
+                foreground_recovery={"events_used": 0},
+                evidence_dir=tempfile.gettempdir(),
+                interrupt_check=None,
+                keyword_deadline=time.monotonic() + 30,
+                timeout_seconds=5,
+            )
 
-        self.assertTrue(result["retry_from_act_exception"])
-        self.assertEqual(result["mode"], "bounded_act_search")
-        self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
-        retry_prompt = client.calls[1]["arguments"]["prompt"]
-        self.assertIn("recovered_from_old_results=true", retry_prompt)
-        self.assertIn("visible Taobao logo", retry_prompt)
-        self.assertIn("do not open a new browser tab", retry_prompt)
-        self.assertEqual(diagnostics["home_entry_act_exception_retry"]["status"], "completed")
-        self.assertEqual(
-            diagnostics["home_entry_act_exception_retry"]["mode"],
-            "home_entry_retry_after_act_exception",
-        )
+        self.assertEqual([call["name"] for call in client.calls], ["act"])
+        self.assertNotIn("home_entry_act_exception_retry", diagnostics)
+        self.assertIn("search_submit_boundary", client.calls[0]["arguments"]["prompt"])
+        self.assertIn("must not be performed in this step", client.calls[0]["arguments"]["prompt"])
 
     def test_keyword_search_act_exception_chrome_not_foreground_attempts_recovery_not_home_retry(self):
         client = FakeClient(
@@ -681,9 +834,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 timeout_seconds=5,
             )
 
-        self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
+        self.assertEqual([call["name"] for call in client.calls], ["act"])
 
-    def test_keyword_search_act_exception_chrome_text_retries_when_screenshot_is_results(self):
+    def test_keyword_search_act_exception_chrome_text_checks_foreground_but_does_not_home_retry(self):
         client = FakeClient(
             [
                 RuntimeError("Failed to execute act: Failed to continue: chrome_not_foreground"),
@@ -715,28 +868,28 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         )
         diagnostics = {}
 
-        result = worker._perform_keyword_search(
-            client=client,
-            contract={"page_sampling": {"allow_page_state_json_classifier": True}},
-            keyword="万智牌 唤兽师贾路",
-            scroll_distance=560,
-            capture_plan={"allow_page_state_json_classifier": True},
-            tools=[],
-            diagnostics=diagnostics,
-            foreground_recovery={"events_used": 0},
-            evidence_dir=tempfile.gettempdir(),
-            interrupt_check=None,
-            keyword_deadline=time.monotonic() + 30,
-            timeout_seconds=5,
-        )
+        with self.assertRaises(RuntimeError):
+            worker._perform_keyword_search(
+                client=client,
+                contract={"page_sampling": {"allow_page_state_json_classifier": True}},
+                keyword="万智牌 唤兽师贾路",
+                scroll_distance=560,
+                capture_plan={"allow_page_state_json_classifier": True},
+                tools=[],
+                diagnostics=diagnostics,
+                foreground_recovery={"events_used": 0},
+                evidence_dir=tempfile.gettempdir(),
+                interrupt_check=None,
+                keyword_deadline=time.monotonic() + 30,
+                timeout_seconds=5,
+            )
 
-        self.assertTrue(result["retry_from_act_exception"])
-        self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
+        self.assertEqual([call["name"] for call in client.calls], ["act"])
         self.assertEqual(
             diagnostics["foreground_recovery_exception_checks"][0]["page_state"]["status"],
             "visible_results",
         )
-        self.assertEqual(diagnostics["home_entry_act_exception_retry"]["status"], "completed")
+        self.assertNotIn("home_entry_act_exception_retry", diagnostics)
 
     def test_foreground_loss_during_search_recovers_and_verifies_current_step(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -884,7 +1037,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 [call["name"] for call in client.calls],
                 ["act", "act", "act"],
             )
-            self.assertTrue(os.path.exists(os.path.join(tmp, "evidence", "foreground_exception_keyword_search.png")))
+            self.assertTrue(os.path.exists(os.path.join(tmp, "evidence", "foreground_exception_search_submit_boundary.png")))
             self.assertEqual(
                 payload["diagnostics"]["foreground_recovery_exception_checks"][0]["page_state"]["status"],
                 "chrome_not_foreground",
@@ -1392,12 +1545,15 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 mock.patch.object(
                     worker,
                     "_classify_screenshot",
-                    return_value={
+                    side_effect=[
+                        _test_home_entry_ready_state(),
+                        {
                         "status": "unknown",
                         "confidence": 0.35,
                         "reason": "heuristics_inconclusive",
                         "metrics": {},
-                    },
+                        },
+                    ],
                 ):
                 result = worker._capture_keyword_with_mcp(
                     client=client,
@@ -1484,7 +1640,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertFalse(os.path.exists(task["abnormal_screenshot_path"]))
             self.assertEqual(
                 [call["name"] for call in client.calls],
-                ["act"],
+                ["act", "act"],
             )
 
     def test_keyword_capture_resets_once_when_visible_keyword_is_unverified_with_assert(self):
@@ -1552,9 +1708,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(reset_retry["recovered"]["screenshot_path"], os.path.join(tmp, "evidence", "tile_00.png"))
             retry_prompt = client.calls[1]["arguments"]["prompt"]
             self.assertIn("chrome_not_foreground", retry_prompt)
-            self.assertIn("ordinary Taobao home/search-entry UI", retry_prompt)
-            self.assertIn("Do not replace text inside an old results-page search box", retry_prompt)
-            self.assertIn("home_entry_used=true", retry_prompt)
+            self.assertIn("search_submit_boundary only", retry_prompt)
+            self.assertIn("search_submit_requires_home_entry", retry_prompt)
+            self.assertIn("search_submitted=true or false", retry_prompt)
             self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
 
     def test_new_keyword_post_act_mismatch_resets_once_from_old_results_page(self):
@@ -2262,18 +2418,23 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         prompt = worker._keyword_search_home_entry_prompt("万智牌 中止")
         pre_keyword_prompt = worker._pre_keyword_home_entry_prompt("万智牌 中止")
 
-        self.assertIn("existing visible Taobao home page", prompt)
-        self.assertIn("ordinary Taobao home/search-entry UI", prompt)
-        self.assertIn("Taobao logo", prompt)
+        self.assertIn("search_submit_boundary only", prompt)
+        self.assertIn("home-entry repair belongs to the previous home_entry_boundary", prompt)
+        self.assertIn("already verified ordinary Taobao homepage", prompt)
+        self.assertIn("Do not use a Taobao logo", prompt)
         self.assertIn("Home/首页 entry", prompt)
-        self.assertIn("home_entry_used=true", prompt)
-        self.assertIn("Do not replace text inside an old results-page search box", prompt)
-        self.assertIn("do not type a URL", prompt)
-        self.assertIn("do not open a new browser tab", prompt)
-        self.assertIn("do not run scripts", prompt)
+        self.assertIn("return-home control", prompt)
+        self.assertIn("bookmark", prompt)
+        self.assertIn("old results-page search box", prompt)
+        self.assertIn("search_submit_requires_home_entry", prompt)
+        self.assertIn("browser address bar", prompt)
+        self.assertIn("URL typing", prompt)
         self.assertIn("Do not use short action APIs", prompt)
         self.assertIn("Tap, Input, KeyboardPress, Scroll, or ClearInput", prompt)
         self.assertIn("Do not type the next keyword yet", pre_keyword_prompt)
+        self.assertIn("open or return to the ordinary Taobao homepage", pre_keyword_prompt)
+        self.assertIn("Home/首页 entry", pre_keyword_prompt)
+        self.assertIn("return-home control", pre_keyword_prompt)
         self.assertIn("not a results page", pre_keyword_prompt)
         self.assertIn("not a results page, activity page, purchase-selection page, campaign page, or non-homepage search box", pre_keyword_prompt)
 
@@ -2283,8 +2444,8 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             "hard_stop_policy": {"allow_bookmark_home_entry_repair": True},
         }
 
-        prompt = worker._keyword_search_home_entry_prompt("万智牌 中止", contract=contract)
-        retry_prompt = worker._keyword_search_home_entry_retry_after_exception_prompt(
+        prompt = worker._pre_keyword_home_entry_prompt("万智牌 中止", contract=contract)
+        retry_prompt = worker._pre_keyword_home_entry_retry_prompt(
             "万智牌 中止",
             contract=contract,
         )
@@ -2297,7 +2458,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("Never close the final remaining Chrome tab", prompt)
         self.assertIn("if the tab count is unclear, leave the old tab open", prompt)
         self.assertIn("bookmark_home_entry_used=true or false", prompt)
-        self.assertIn("visible new tab plus button", retry_prompt)
+        self.assertIn("visible browser new tab plus button", retry_prompt)
         self.assertIn("visible Taobao bookmark button", retry_prompt)
         self.assertNotIn("do not open a new browser tab", prompt)
         self.assertIn("do not type a URL", prompt)
@@ -2338,8 +2499,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     worker,
                     "_classify_screenshot",
                     side_effect=[
+                        _test_home_entry_ready_state(),
                         {
-                            "status": "visible_ready",
+                            "status": "visible_results",
                             "confidence": 0.72,
                             "reason": "test_visible_results",
                             "visible_search_keyword": "万智牌 闪电击",
@@ -2350,8 +2512,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                             "result_page_evidence": ["test_results_layout"],
                             "metrics": {},
                         },
+                        _test_home_entry_ready_state(),
                         {
-                            "status": "visible_ready",
+                            "status": "visible_results",
                             "confidence": 0.72,
                             "reason": "reset_visible_results",
                             "visible_search_keyword": "万智牌 撼地灵",
@@ -2425,12 +2588,14 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     worker,
                     "_classify_screenshot",
                     side_effect=[
+                        _test_home_entry_ready_state(),
                         {
                             "status": "visible_results",
                             "confidence": 0.82,
                             "reason": "visible_results_keyword_unclear",
                             "metrics": {},
                         },
+                        _test_home_entry_ready_state(),
                         {
                             "status": "visible_results",
                             "confidence": 0.82,
@@ -2463,9 +2628,9 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(reset_retry["status"], "recovered")
             self.assertEqual(reset_retry["attempted"]["status"], "attempted")
             self.assertEqual(reset_retry["recovered"]["status"], "recovered")
-            self.assertIn("act", reset_retry["attempted"]["steps"])
-            self.assertIn("act", reset_retry["steps"])
-            self.assertEqual(reset_retry["attempted"]["steps"]["act"], reset_retry["steps"]["act"])
+            self.assertIn("home_entry_boundary", reset_retry["attempted"]["steps"])
+            self.assertIn("search_submit_boundary", reset_retry["attempted"]["steps"])
+            self.assertEqual(reset_retry["attempted"]["steps"], reset_retry["steps"])
             self.assertEqual(
                 [call["name"] for call in client.calls],
                 ["act", "act"],
@@ -2567,20 +2732,23 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 mock.patch.object(
                     worker,
                     "classify_screenshot_json",
-                    return_value={
-                        "status": "visible_results",
-                        "confidence": 0.9,
-                        "reason": "readable listings visible",
-                        "metrics": {},
-                        "source": "json_classifier",
-                        "raw_text": '{"state":"visible_results"}',
-                        "visible_search_keyword": "万智牌 中止",
-                        "keyword_match": True,
-                        "search_box_text_kind": "actual_input",
-                        "search_submitted": True,
-                        "is_home_feed": False,
-                        "result_page_evidence": ["sort/filter bar"],
-                    },
+                    side_effect=[
+                        _test_home_entry_ready_state(),
+                        {
+                            "status": "visible_results",
+                            "confidence": 0.9,
+                            "reason": "readable listings visible",
+                            "metrics": {},
+                            "source": "json_classifier",
+                            "raw_text": '{"state":"visible_results"}',
+                            "visible_search_keyword": "万智牌 中止",
+                            "keyword_match": True,
+                            "search_box_text_kind": "actual_input",
+                            "search_submitted": True,
+                            "is_home_feed": False,
+                            "result_page_evidence": ["sort/filter bar"],
+                        },
+                    ],
                 ) as classifier:
                 result = worker._capture_keyword_with_mcp(
                     client=client,
@@ -2598,7 +2766,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(payload["screenshots"][0]["page_state"]["status"], "visible_results")
             self.assertEqual(payload["screenshots"][0]["page_state"]["source"], "json_classifier")
             self.assertEqual(payload["screenshots"][0]["page_state"]["visible_search_keyword"], "万智牌 中止")
-            self.assertEqual([call["name"] for call in client.calls], ["act"])
+            self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
             classifier.assert_called()
             heuristic.assert_not_called()
 
@@ -2757,7 +2925,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual([item["tile_id"] for item in observations], ["tile_00", "tile_01"])
             self.assertEqual([item["tile_id"] for item in evidence_checks], ["tile_00", "tile_01"])
             self.assertEqual(observations[0]["page_state"]["visible_search_keyword"], "万智牌 中止")
-            self.assertEqual([item["goal_state"] for item in decisions], ["BOUNDARY_VERIFY", "CAPTURING"])
+            self.assertEqual([item["goal_state"] for item in decisions], ["SEARCH_SUBMIT_BOUNDARY", "CAPTURE_TILES_BOUNDARY"])
             self.assertEqual([item["gate_decision"] for item in decisions], ["accept", "accept"])
             self.assertEqual(worker._read_json(boundary_path)["tile_id"], "tile_00")
             self.assertEqual(worker._read_json(goal_contract_path)["keyword"], "万智牌 中止")
@@ -2765,7 +2933,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(payload["diagnostics"]["artifacts"]["evidence_check"], evidence_check_path)
             self.assertEqual(payload["diagnostics"]["artifacts"]["goal_contract"], goal_contract_path)
             self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
-            self.assertEqual(self.mock_classifier.call_count, 2)
+            self.assertEqual(self.mock_classifier.call_count, 3)
 
     def test_non_bottom_scroll_tile_without_readable_search_keyword_keeps_capturing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2974,7 +3142,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     "unknown",
                 )
                 self.assertEqual(payload["diagnostics"]["post_act_reset_retry"]["status"], "attempted")
-                self.assertEqual([call["name"] for call in client.calls], ["act", "act"])
+                self.assertEqual([call["name"] for call in client.calls], ["act", "act", "act", "act"])
 
     def test_json_classifier_captcha_stops_for_review(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3766,6 +3934,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 ],
             )
             act_results = [
+                {"content": [{"type": "text", "text": "home_entry_prepared=true"}]},
                 {"content": [{"type": "text", "text": "search submitted"}]},
                 RuntimeError("Replanned 20 times, exceeding the limit."),
             ]
@@ -4154,7 +4323,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertEqual(result["status"], "needs_review")
             self.assertEqual(result["stop_reason"], "rate_limited")
             self.assertEqual(payload["rough_state"], "rate_limited")
-            search_act = payload["diagnostics"]["keyword_search"]
+            search_act = payload["diagnostics"]["pre_keyword_home_entry"]["steps"]["act"]
             self.assertTrue(search_act["http_429_detected"])
             excerpt = search_act["rate_limit_diagnostics"][0]["excerpt"]
             self.assertIn("[url]", excerpt)

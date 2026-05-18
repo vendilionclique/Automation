@@ -14,6 +14,12 @@ EVIDENCE_CHECK_SCHEMA = "taobao_goal_evidence_check_v1"
 CAPTURE_DECISION_SCHEMA = "taobao_capture_gate_decision_v1"
 SCHEMA = GOAL_CONTRACT_SCHEMA
 
+HOME_ENTRY_BOUNDARY = "HOME_ENTRY_BOUNDARY"
+SEARCH_SUBMIT_BOUNDARY = "SEARCH_SUBMIT_BOUNDARY"
+CAPTURE_TILES_BOUNDARY = "CAPTURE_TILES_BOUNDARY"
+BOUNDARY_VERIFY = "BOUNDARY_VERIFY"
+CAPTURING = "CAPTURING"
+
 ACCEPT = "accept"
 ACCEPT_END = "accept_end"
 REPAIR = "repair"
@@ -36,6 +42,16 @@ EVIDENCE_FIELDS = (
     "is_home_feed",
     "result_page_evidence",
     "url_or_page_evidence",
+    "source_state",
+    "home_entry_ready",
+    "home_url_status",
+    "visible_url_or_address_text",
+    "home_structure_status",
+    "home_structure_evidence",
+    "bookmark_visible",
+    "bookmark_home_entry_used",
+    "recovered_from_old_results",
+    "hard_blocking_reason",
     "blocking_reason",
     "recommended_next",
     "confidence",
@@ -61,6 +77,9 @@ USER_BLOCKING_REASONS = {
     "white_skeleton",
     "search_submit_unconfirmed",
     "search_results_structure_unverified",
+    "home_entry_unverified",
+    "home_entry_not_reached",
+    "home_entry_unavailable",
 }
 
 HARD_GATE_BLOCKERS = {
@@ -143,11 +162,18 @@ def build_goal_contract(
         "run_id": contract.get("run_id") or "",
         "session_index": contract.get("session_index") or 0,
         "goal": "reach_current_keyword_taobao_results_from_visible_home_search_entry",
+        "business_boundaries": [
+            HOME_ENTRY_BOUNDARY,
+            SEARCH_SUBMIT_BOUNDARY,
+            CAPTURE_TILES_BOUNDARY,
+        ],
         "success_evidence": [
+            "home_entry_boundary proves the ordinary Taobao homepage/search-entry surface before typing a keyword",
             "chrome_or_taobao_related_foreground",
             "taobao_results_or_empty_results_page",
             "visible evidence belongs to current keyword",
-            "tile_00 proves the search was submitted into a results-page structure and not a homepage feed",
+            "search_submit_boundary tile_00 proves the search was submitted into a results-page structure and not a homepage feed",
+            "capture_tiles_boundary only samples within the accepted current-keyword results page",
             "no login captcha risk white skeleton permission panel or account-state-changing popup",
         ],
         "forbidden": [
@@ -171,7 +197,7 @@ def build_goal_contract(
 def build_evidence_check(request: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
     data = request if isinstance(request, dict) else kwargs
     keyword = str(data.get("keyword") or "")
-    goal_state = str(data.get("goal_state") or "")
+    goal_state = _normalize_goal_state(data.get("goal_state") or "")
     observation = data.get("observation") or {}
     page_state = observation.get("page_state") or {}
     verification = observation.get("verification") or {}
@@ -181,24 +207,31 @@ def build_evidence_check(request: Optional[Dict[str, Any]] = None, **kwargs: Any
     keyword_match = _keyword_match_from_page_state(page_state, keyword_status)
     blocking_reason = _blocking_reason_from_page_kind(page_kind)
     boundary_issue = ""
-    if goal_state == "BOUNDARY_VERIFY" and page_kind in CAPTURABLE_PAGE_KINDS and keyword_match == "matched":
+    if goal_state == SEARCH_SUBMIT_BOUNDARY and page_kind in CAPTURABLE_PAGE_KINDS and keyword_match == "matched":
         boundary_issue = _boundary_search_submission_issue(page_state)
     goal_met = (
-        goal_state == "BOUNDARY_VERIFY"
+        goal_state == HOME_ENTRY_BOUNDARY
+        and _home_entry_issue(page_state) == ""
+        and not blocking_reason
+    ) or (
+        goal_state == SEARCH_SUBMIT_BOUNDARY
         and page_kind in CAPTURABLE_PAGE_KINDS
         and keyword_match == "matched"
         and not boundary_issue
         and not blocking_reason
     ) or (
-        goal_state == "CAPTURING"
+        goal_state == CAPTURE_TILES_BOUNDARY
         and page_kind in CAPTURABLE_PAGE_KINDS
         and keyword_match != "mismatched"
         and not blocking_reason
     )
-    if page_kind == "results_end" and goal_state == "CAPTURING":
+    home_entry_issue = _home_entry_issue(page_state) if goal_state == HOME_ENTRY_BOUNDARY else ""
+    if page_kind == "results_end" and goal_state == CAPTURE_TILES_BOUNDARY:
         recommended_next = ACCEPT_END
     elif goal_met:
-        recommended_next = ACCEPT
+        recommended_next = "accept_home" if goal_state == HOME_ENTRY_BOUNDARY else ACCEPT
+    elif home_entry_issue:
+        recommended_next = STOP if home_entry_issue in HARD_GATE_BLOCKERS | REVIEW_GATE_BLOCKERS else REPAIR
     elif boundary_issue:
         recommended_next = REPAIR
     elif blocking_reason in BLOCKING_STOP_REASONS or page_kind == "unknown":
@@ -217,10 +250,20 @@ def build_evidence_check(request: Optional[Dict[str, Any]] = None, **kwargs: Any
             "is_home_feed": _is_home_feed_value(page_state),
             "result_page_evidence": _normalize_text_list(page_state.get("result_page_evidence")),
             "url_or_page_evidence": _normalize_text_list(page_state.get("url_or_page_evidence")),
-            "blocking_reason": blocking_reason,
+            "source_state": str(page_state.get("source_state") or ""),
+            "home_entry_ready": _optional_bool(page_state.get("home_entry_ready")),
+            "home_url_status": str(page_state.get("home_url_status") or ""),
+            "visible_url_or_address_text": str(page_state.get("visible_url_or_address_text") or ""),
+            "home_structure_status": str(page_state.get("home_structure_status") or ""),
+            "home_structure_evidence": _normalize_text_list(page_state.get("home_structure_evidence")),
+            "bookmark_visible": _optional_bool(page_state.get("bookmark_visible")),
+            "bookmark_home_entry_used": _optional_bool(page_state.get("bookmark_home_entry_used")),
+            "recovered_from_old_results": _optional_bool(page_state.get("recovered_from_old_results")),
+            "hard_blocking_reason": str(page_state.get("hard_blocking_reason") or ""),
+            "blocking_reason": home_entry_issue or boundary_issue or blocking_reason,
             "recommended_next": recommended_next,
             "confidence": page_state.get("confidence", 0.8 if page_kind != "unknown" else 0.0),
-            "reason": boundary_issue or _evidence_reason(keyword, page_kind, keyword_match, blocking_reason),
+            "reason": home_entry_issue or boundary_issue or _evidence_reason(keyword, page_kind, keyword_match, blocking_reason),
         }
     )
     check["keyword"] = keyword
@@ -233,7 +276,7 @@ def build_evidence_check(request: Optional[Dict[str, Any]] = None, **kwargs: Any
 
 def decide_capture_gate(request: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Dict[str, Any]:
     data = request if isinstance(request, dict) else kwargs
-    goal_state = str(data.get("goal_state") or "")
+    goal_state = _normalize_goal_state(data.get("goal_state") or "")
     evidence_check = data.get("evidence_check") or {}
     goal_contract = data.get("goal_contract") or {}
     history: List[Dict[str, Any]] = []
@@ -373,7 +416,7 @@ def normalize_evidence_check(payload: Dict[str, Any], raw_text: str = "") -> Dic
         blocking_reason = _blocking_reason_from_page_kind(page_kind)
     recommended_next = _normalize_choice(
         payload.get("recommended_next"),
-        {ACCEPT, REPAIR, STOP, ACCEPT_END},
+        {ACCEPT, REPAIR, STOP, ACCEPT_END, "accept_home"},
         _recommended_next_from_payload(payload, page_kind, keyword_match, blocking_reason),
     )
     confidence = _float_or_zero(payload.get("confidence"))
@@ -396,6 +439,16 @@ def normalize_evidence_check(payload: Dict[str, Any], raw_text: str = "") -> Dic
         "is_home_feed": _is_home_feed_value(payload),
         "result_page_evidence": _normalize_text_list(payload.get("result_page_evidence")),
         "url_or_page_evidence": _normalize_text_list(payload.get("url_or_page_evidence")),
+        "source_state": str(payload.get("source_state") or ""),
+        "home_entry_ready": _optional_bool(payload.get("home_entry_ready")),
+        "home_url_status": str(payload.get("home_url_status") or ""),
+        "visible_url_or_address_text": str(payload.get("visible_url_or_address_text") or ""),
+        "home_structure_status": str(payload.get("home_structure_status") or ""),
+        "home_structure_evidence": _normalize_text_list(payload.get("home_structure_evidence")),
+        "bookmark_visible": _optional_bool(payload.get("bookmark_visible")),
+        "bookmark_home_entry_used": _optional_bool(payload.get("bookmark_home_entry_used")),
+        "recovered_from_old_results": _optional_bool(payload.get("recovered_from_old_results")),
+        "hard_blocking_reason": str(payload.get("hard_blocking_reason") or ""),
         "blocking_reason": blocking_reason,
         "recommended_next": recommended_next,
         "confidence": confidence,
@@ -425,8 +478,23 @@ def gate_evidence_check(
         return _decision(STOP, "low_confidence_evidence_check", stage, terminal_status=NEEDS_REVIEW)
     if blocking_reason in BLOCKING_STOP_REASONS or page_kind in BLOCKING_STOP_REASONS:
         return _decision(STOP, blocking_reason or page_kind, stage, terminal_status=NEEDS_REVIEW)
+    if blocking_reason in REVIEW_GATE_BLOCKERS or page_kind in REVIEW_GATE_BLOCKERS:
+        return _decision(STOP, blocking_reason or page_kind, stage, terminal_status=NEEDS_REVIEW)
     boundary_issue = ""
-    if stage == "BOUNDARY_VERIFY" and page_kind in CAPTURABLE_PAGE_KINDS and str(check.get("keyword_match") or "") == "matched":
+    stage = _normalize_goal_state(stage)
+    if stage == HOME_ENTRY_BOUNDARY:
+        home_entry_issue = _home_entry_issue(check)
+        if home_entry_issue:
+            if home_entry_issue in HARD_GATE_BLOCKERS | REVIEW_GATE_BLOCKERS:
+                return _decision(STOP, home_entry_issue, stage, terminal_status=NEEDS_REVIEW)
+            key = _budget_key(REPAIR_HOME_ENTRY)
+            if counts.get(key, 0) < int(budget.get(key, 0)):
+                return _decision(REPAIR, f"repair_allowed:{REPAIR_HOME_ENTRY}:{home_entry_issue}", stage, repair_action=REPAIR_HOME_ENTRY)
+            return _decision(STOP, f"repair_budget_exhausted:{REPAIR_HOME_ENTRY}:{home_entry_issue}", stage, terminal_status=NEEDS_REVIEW)
+        return _decision(ACCEPT, "home_entry_goal_met", "home_entry", terminal_status="")
+
+    boundary_issue = ""
+    if stage == SEARCH_SUBMIT_BOUNDARY and page_kind in CAPTURABLE_PAGE_KINDS and str(check.get("keyword_match") or "") == "matched":
         boundary_issue = _boundary_search_submission_issue(check)
     if boundary_issue:
         repair_action = REPAIR_HOME_ENTRY
@@ -434,16 +502,16 @@ def gate_evidence_check(
         if counts.get(key, 0) < int(budget.get(key, 0)):
             return _decision(REPAIR, f"repair_allowed:{repair_action}:{boundary_issue}", stage, repair_action=repair_action)
         return _decision(STOP, f"repair_budget_exhausted:{repair_action}:{boundary_issue}", stage, terminal_status=NEEDS_REVIEW)
-    if stage == "BOUNDARY_VERIFY" and page_kind == "results_end" and not check.get("goal_met"):
+    if stage == SEARCH_SUBMIT_BOUNDARY and page_kind == "results_end" and not check.get("goal_met"):
         repair_action = REPAIR_HOME_ENTRY
         key = _budget_key(repair_action)
         if counts.get(key, 0) < int(budget.get(key, 0)):
             return _decision(REPAIR, f"repair_allowed:{repair_action}", stage, repair_action=repair_action)
         return _decision(STOP, f"repair_budget_exhausted:{repair_action}", stage, terminal_status=NEEDS_REVIEW)
-    if stage == "CAPTURING" and (recommended_next == ACCEPT_END or page_kind == "results_end"):
+    if stage == CAPTURE_TILES_BOUNDARY and (recommended_next == ACCEPT_END or page_kind == "results_end"):
         return _decision(ACCEPT_END, "results_end", "keyword_end", terminal_status="captured")
     if (
-        stage == "CAPTURING"
+        stage == CAPTURE_TILES_BOUNDARY
         and page_kind in CAPTURABLE_PAGE_KINDS
         and str(check.get("keyword_match") or "") != "mismatched"
         and not blocking_reason
@@ -492,6 +560,45 @@ def _repair_action_for(check: Dict[str, Any]) -> str:
         return REPAIR_CLOSE_NON_ACCOUNT_POPUP
     if check.get("keyword_match") in {"mismatched", "unreadable", "not_visible"}:
         return REPAIR_HOME_ENTRY
+    return ""
+
+
+def _normalize_goal_state(value: Any) -> str:
+    text = str(value or "").strip()
+    aliases = {
+        "": "",
+        BOUNDARY_VERIFY: SEARCH_SUBMIT_BOUNDARY,
+        "boundary_verify": SEARCH_SUBMIT_BOUNDARY,
+        "search_submit": SEARCH_SUBMIT_BOUNDARY,
+        "search_submit_boundary": SEARCH_SUBMIT_BOUNDARY,
+        SEARCH_SUBMIT_BOUNDARY: SEARCH_SUBMIT_BOUNDARY,
+        "home_entry": HOME_ENTRY_BOUNDARY,
+        "home_entry_boundary": HOME_ENTRY_BOUNDARY,
+        HOME_ENTRY_BOUNDARY: HOME_ENTRY_BOUNDARY,
+        CAPTURING: CAPTURE_TILES_BOUNDARY,
+        "capturing": CAPTURE_TILES_BOUNDARY,
+        "capture_tiles": CAPTURE_TILES_BOUNDARY,
+        "capture_tiles_boundary": CAPTURE_TILES_BOUNDARY,
+        CAPTURE_TILES_BOUNDARY: CAPTURE_TILES_BOUNDARY,
+    }
+    return aliases.get(text, aliases.get(text.lower(), text))
+
+
+def _home_entry_issue(payload: Dict[str, Any]) -> str:
+    hard_block = str(payload.get("hard_blocking_reason") or "").strip()
+    if hard_block:
+        return hard_block
+    source_state = str(payload.get("source_state") or "").strip()
+    if source_state == "chrome_not_foreground":
+        return "chrome_not_foreground"
+    if source_state == "hard_blocked":
+        return "unknown"
+    if _optional_bool(payload.get("home_entry_ready")) is not True:
+        return "home_entry_unverified"
+    if str(payload.get("home_url_status") or "") != "normal_taobao_home":
+        return "home_entry_unverified"
+    if str(payload.get("home_structure_status") or "") != "ordinary_home_search_entry":
+        return "home_entry_unverified"
     return ""
 
 
@@ -705,6 +812,16 @@ def normalize_evidence_check_json(raw: Any) -> Dict[str, Any]:
                 "is_home_feed": False,
                 "result_page_evidence": [],
                 "url_or_page_evidence": [],
+                "source_state": "",
+                "home_entry_ready": None,
+                "home_url_status": "",
+                "visible_url_or_address_text": "",
+                "home_structure_status": "",
+                "home_structure_evidence": [],
+                "bookmark_visible": None,
+                "bookmark_home_entry_used": None,
+                "recovered_from_old_results": None,
+                "hard_blocking_reason": "",
                 "blocking_reason": "json_invalid",
                 "recommended_next": NEEDS_REVIEW,
                 "confidence": 0.0,
@@ -728,6 +845,16 @@ def normalize_evidence_check_json(raw: Any) -> Dict[str, Any]:
         "is_home_feed": _is_home_feed_value(normalized),
         "result_page_evidence": _normalize_text_list(normalized.get("result_page_evidence")),
         "url_or_page_evidence": _normalize_text_list(normalized.get("url_or_page_evidence")),
+        "source_state": str(normalized.get("source_state") or ""),
+        "home_entry_ready": _optional_bool(normalized.get("home_entry_ready")),
+        "home_url_status": str(normalized.get("home_url_status") or ""),
+        "visible_url_or_address_text": str(normalized.get("visible_url_or_address_text") or ""),
+        "home_structure_status": str(normalized.get("home_structure_status") or ""),
+        "home_structure_evidence": _normalize_text_list(normalized.get("home_structure_evidence")),
+        "bookmark_visible": _optional_bool(normalized.get("bookmark_visible")),
+        "bookmark_home_entry_used": _optional_bool(normalized.get("bookmark_home_entry_used")),
+        "recovered_from_old_results": _optional_bool(normalized.get("recovered_from_old_results")),
+        "hard_blocking_reason": str(normalized.get("hard_blocking_reason") or ""),
         "blocking_reason": blocking_reason,
         "recommended_next": recommended_next,
         "confidence": _float_or_zero(normalized.get("confidence")),
@@ -752,13 +879,23 @@ def validate_evidence_check(check: Dict[str, Any]) -> tuple:
         errors.append("search_submitted_not_optional_bool")
     if check.get("is_home_feed") is not None and not isinstance(check.get("is_home_feed"), bool):
         errors.append("is_home_feed_not_optional_bool")
+    if check.get("home_entry_ready") is not None and not isinstance(check.get("home_entry_ready"), bool):
+        errors.append("home_entry_ready_not_optional_bool")
+    if check.get("bookmark_visible") is not None and not isinstance(check.get("bookmark_visible"), bool):
+        errors.append("bookmark_visible_not_optional_bool")
+    if check.get("bookmark_home_entry_used") is not None and not isinstance(check.get("bookmark_home_entry_used"), bool):
+        errors.append("bookmark_home_entry_used_not_optional_bool")
+    if check.get("recovered_from_old_results") is not None and not isinstance(check.get("recovered_from_old_results"), bool):
+        errors.append("recovered_from_old_results_not_optional_bool")
     if not isinstance(check.get("result_page_evidence"), list):
         errors.append("result_page_evidence_not_list")
     if not isinstance(check.get("url_or_page_evidence"), list):
         errors.append("url_or_page_evidence_not_list")
+    if not isinstance(check.get("home_structure_evidence"), list):
+        errors.append("home_structure_evidence_not_list")
     if check.get("blocking_reason") not in USER_BLOCKING_REASONS:
         errors.append("blocking_reason_invalid")
-    if check.get("recommended_next") not in {ACCEPT, REPAIR, STOP, NEEDS_REVIEW, "continue", "end", ACCEPT_END}:
+    if check.get("recommended_next") not in {ACCEPT, REPAIR, STOP, NEEDS_REVIEW, "continue", "end", ACCEPT_END, "accept_home"}:
         errors.append("recommended_next_invalid")
     confidence = check.get("confidence")
     if not isinstance(confidence, (int, float)) or confidence < 0.0 or confidence > 1.0:
