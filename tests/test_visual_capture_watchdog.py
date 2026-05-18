@@ -41,6 +41,8 @@ class FakeProcess:
         self.polls = list(polls or [])
         self.pid = pid
         self.wait_calls = []
+        self.terminate_calls = 0
+        self.kill_calls = 0
 
     def poll(self):
         if self.polls:
@@ -58,6 +60,14 @@ class FakeProcess:
                 continue
             return value
         return self.returncode
+
+    def terminate(self):
+        self.terminate_calls += 1
+        self.returncode = -15
+
+    def kill(self):
+        self.kill_calls += 1
+        self.returncode = -9
 
 
 class HeartbeatScript:
@@ -263,6 +273,33 @@ class VisualCaptureWatchdogTests(unittest.TestCase):
         self.assertIn("visual-capture-worker", args)
         self.assertIn("--contract", args)
         self.assertTrue(os.path.isdir(kwargs.get("cwd")))
+        self.assertTrue(kwargs.get("start_new_session"))
+
+    def test_watchdog_terminal_cleanup_terminates_live_worker_group(self):
+        heartbeat = HeartbeatScript(
+            heartbeat_allowed(),
+            heartbeat_blocked("paused", action="paused"),
+        )
+        process = FakeProcess(returncode=None)
+        popen = PopenFactory(process)
+
+        with mock.patch.object(visual_capture_watchdog.os, "killpg") as killpg:
+            result = self.run_watchdog(heartbeat, popen=popen)
+
+        self.assertEqual(result["reason"], "paused")
+        self.assertEqual(len(popen.calls), 1)
+        killpg.assert_called_once_with(process.pid, visual_capture_watchdog.signal.SIGTERM)
+        self.assertEqual(process.wait_calls, [5.0])
+
+    def test_worker_group_cleanup_still_signals_when_worker_already_exited(self):
+        process = FakeProcess(returncode=0)
+
+        with mock.patch.object(visual_capture_watchdog.os, "killpg") as killpg:
+            visual_capture_watchdog._terminate_worker_process_group(process)
+
+        killpg.assert_called_once_with(process.pid, visual_capture_watchdog.signal.SIGTERM)
+        self.assertEqual(process.terminate_calls, 0)
+        self.assertEqual(process.wait_calls, [5.0])
 
     def test_allowed_capture_starts_despite_old_paused_session_result(self):
         heartbeat = HeartbeatScript(

@@ -4310,6 +4310,22 @@ def _closeable_popup_overlay_prompt(keyword: str, stage: str, repair_index: int)
     )
 
 
+def _closeable_popup_overlay_toolbox_prompt() -> str:
+    return (
+        "Reusable visual tool for common Taobao overlays: before continuing the current "
+        "business boundary, check whether a normal Taobao marketing/coupon/red-packet "
+        "modal is dimming the page or covering the search box/results controls. Examples "
+        "include 红包, 优惠券, 补贴, 领取, 即将过期, and similar promotion popups. "
+        "If that popup has a clearly visible gray X close control on or near the popup's "
+        "own upper-right corner, click only that popup/overlay gray X, wait for the overlay to "
+        "disappear, and then continue the same boundary. Treat this as a local visual "
+        "tool, not as a navigation or search step. Do not click the Chrome/window close "
+        "button, login, captcha, security, permission, checkout, cart, favorite, reward "
+        "claim, coupon-use, or account-state-changing controls. If the close control is "
+        "not clearly safe, stop and report closeable_popup_overlay instead of exploring. "
+    )
+
+
 def _run_initial_foreground_recovery(
     client: MidsceneStdioClient,
     contract: Dict[str, Any],
@@ -4773,6 +4789,7 @@ def _pre_keyword_home_entry_prompt(
     contract: Optional[Dict[str, Any]] = None,
 ) -> str:
     navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    popup_tool = _closeable_popup_overlay_toolbox_prompt()
     return (
         "Prepare the Taobao homepage/search-entry boundary for the next keyword. "
         "The business rule is simple: the active page must be the ordinary taobao.com "
@@ -4790,10 +4807,7 @@ def _pre_keyword_home_entry_prompt(
         "foreground safely. If login, captcha, security verification, risk warning, "
         "unusual account state, or an automation permission panel is visible, stop "
         "and report failure. "
-        "If a normal Taobao in-page modal or marketing overlay dims the page and "
-        "has a clear gray X close control around the popup itself, click only that "
-        "popup/overlay gray X before continuing; never click browser/window close "
-        "buttons or account-state controls. "
+        f"{popup_tool}"
         f"{navigation_rule}"
         "If the current page is an old Taobao results page, bottom-of-results page, "
         "activity/campaign page, purchase-selection page, unrelated site, or any page "
@@ -4819,6 +4833,7 @@ def _pre_keyword_home_entry_retry_prompt(
     contract: Optional[Dict[str, Any]] = None,
 ) -> str:
     navigation_rule = _bookmark_home_entry_repair_prompt(contract)
+    popup_tool = _closeable_popup_overlay_toolbox_prompt()
     return (
         "The previous pre-keyword boundary check still saw an old results page, "
         "a bottom-of-results page, an activity/campaign page, an unrelated page, "
@@ -4836,6 +4851,7 @@ def _pre_keyword_home_entry_retry_prompt(
         "failure. If Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome "
         "app is visible, report chrome_not_foreground so the Python worker can "
         "recover foreground safely. "
+        f"{popup_tool}"
         f"{navigation_rule}"
         "Leave the current non-homepage context through a visible Taobao logo, Home/首页 "
         "entry, return-home control, already visible normal homepage tab, or the "
@@ -4898,6 +4914,7 @@ def _search_submit_boundary_prompt(
     contract: Optional[Dict[str, Any]] = None,
 ) -> str:
     del contract
+    popup_tool = _closeable_popup_overlay_toolbox_prompt()
     return (
         "Submit the current keyword search from the already verified ordinary Taobao homepage. "
         "This is the search_submit_boundary only; home-entry repair belongs to the previous "
@@ -4913,12 +4930,7 @@ def _search_submit_boundary_prompt(
         "If Chrome/Taobao is unavailable, or login, captcha, security verification, "
         "risk warning, unusual account state, or an automation permission panel "
         "is visible, stop and report failure. "
-        "If a normal Taobao in-page modal or marketing overlay dims the page and "
-        "has a clear gray X close control around the popup itself, usually near "
-        "the popup's own upper-right corner, it is a closeable_popup_overlay; "
-        "click only that popup/overlay gray X and then continue from the same "
-        "visible step. Do not click browser/window close buttons or account-state "
-        "controls. "
+        f"{popup_tool}"
         "The current page should already be the ordinary taobao.com homepage/search-entry "
         "surface. If it is not, stop and report search_submit_requires_home_entry. "
         "Do not use a Taobao logo, Home/首页 entry, return-home control, bookmark, new "
@@ -4967,11 +4979,8 @@ def _next_tile_prompt(keyword: str, tile_index: int, scroll_distance: int) -> st
         "so the Python worker can run bounded foreground recovery; do not type, "
         "scroll, search, or navigate in that app. If Chrome/Taobao is unavailable, or login, captcha, security/risk, "
         "unusual account state, white skeleton, or a permission panel is visible, "
-        "stop and report failure. If a normal Taobao in-page modal or marketing overlay dims "
-        "the page and has a clear gray X close control around the popup itself, usually near "
-        "the popup's own upper-right corner, report closeable_popup_overlay or click only "
-        "that popup/overlay gray X before continuing; never click browser/window close "
-        "buttons or account-state controls. If the visible page already appears to be at the bottom of "
+        "stop and report failure. "
+        "If the visible page already appears to be at the bottom of "
         "Taobao results, do not keep trying to scroll; report that the results end is visible. "
         "Bottom signals include a long pagination row, previous/next page buttons, page jump "
         "input, page count with current/total pages, footer columns, rules/agreements/help links, copyright/ICP/"

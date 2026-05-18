@@ -180,6 +180,9 @@ class PageStateClassifierTests(unittest.TestCase):
         prompt = payload["messages"][0]["content"][0]["text"]
         self.assertIn("closeable_popup_overlay", prompt)
         self.assertIn("gray X close control", prompt)
+        self.assertIn("priority over visible_ready", prompt)
+        self.assertIn("red-packet", prompt)
+        self.assertIn("expiring-benefit popups", prompt)
         self.assertIn("Do not use closeable_popup_overlay for login", prompt)
         self.assertIn("search_box_text_kind", prompt)
         self.assertIn("search_submitted", prompt)

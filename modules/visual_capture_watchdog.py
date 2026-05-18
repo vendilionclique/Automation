@@ -8,6 +8,7 @@ single capture worker may start.
 """
 import json
 import os
+import signal
 import shlex
 import subprocess
 import time
@@ -284,6 +285,7 @@ def run_capture_watchdog(
                         cwd=project_root,
                         stdout=worker_stdout,
                         stderr=worker_stderr,
+                        start_new_session=True,
                     )
                 except OSError as exc:
                     runtime["last_capture_returncode"] = -1
@@ -332,6 +334,17 @@ def run_capture_watchdog(
             sleep_fn(poll_seconds)
 
     finally:
+        if worker is not None:
+            _terminate_worker_process_group(worker, timeout_seconds=5.0)
+            runtime["current_capture_pid"] = None
+            _write_runtime(paths["runtime_path"], runtime, now_fn)
+            _event(
+                project_root,
+                plan_id,
+                session_index,
+                "capture_watchdog_cleaned_worker_process_group",
+                capture_pid=getattr(worker, "pid", None),
+            )
         _close_quietly(worker_stdout)
         _close_quietly(worker_stderr)
         _release_watchdog_lock(paths["lock_path"])
@@ -586,6 +599,66 @@ def _pid_exists(pid: int) -> bool:
     except OSError:
         return True
     return True
+
+
+def _terminate_worker_process_group(worker: Any, timeout_seconds: float = 5.0) -> None:
+    pid = getattr(worker, "pid", None)
+    group_signaled = False
+    worker_running = False
+    try:
+        worker_running = worker.poll() is None
+    except Exception:
+        worker_running = True
+    if pid:
+        try:
+            os.killpg(int(pid), signal.SIGTERM)
+            group_signaled = True
+        except ProcessLookupError:
+            if worker_running:
+                _terminate_worker_process(worker)
+        except Exception:
+            if worker_running:
+                _terminate_worker_process(worker)
+    elif worker_running:
+        _terminate_worker_process(worker)
+    elif not group_signaled:
+        return
+    try:
+        worker.wait(timeout=timeout_seconds)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        return
+    if pid:
+        try:
+            os.killpg(int(pid), signal.SIGKILL)
+        except Exception:
+            _kill_worker_process(worker)
+    else:
+        _kill_worker_process(worker)
+    try:
+        worker.wait(timeout=1.0)
+    except Exception:
+        pass
+
+
+def _terminate_worker_process(worker: Any) -> None:
+    terminate = getattr(worker, "terminate", None)
+    if callable(terminate):
+        try:
+            terminate()
+        except Exception:
+            pass
+
+
+def _kill_worker_process(worker: Any) -> None:
+    kill = getattr(worker, "kill", None)
+    if callable(kill):
+        try:
+            kill()
+        except Exception:
+            pass
 
 
 def _elapsed_seconds(start: datetime, end: datetime) -> float:
