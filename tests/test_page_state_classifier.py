@@ -81,6 +81,86 @@ class PageStateClassifierTests(unittest.TestCase):
         self.assertEqual(payload["status"], "closeable_popup_overlay")
         self.assertEqual(payload["confidence"], 0.88)
 
+    def test_normalize_classifier_payload_maps_state_is_home_feed_to_visible_ready_on_taobao_home(self):
+        payload = page_state_classifier._normalize_classifier_payload(
+            {
+                "state": "is_home_feed",
+                "confidence": 0.76,
+                "reason": "normal taobao.com homepage recommendation feed",
+                "search_submitted": False,
+                "url_or_page_evidence": "taobao.com",
+            },
+            raw_text="{}",
+        )
+
+        self.assertEqual(payload["status"], "visible_ready")
+        self.assertEqual(payload["confidence"], 0.76)
+        self.assertTrue(payload["is_home_feed"])
+        self.assertFalse(payload["search_submitted"])
+
+    def test_normalize_classifier_payload_keeps_activity_home_feed_state_unknown(self):
+        payload = page_state_classifier._normalize_classifier_payload(
+            {
+                "state": "is_home_feed",
+                "confidence": "high",
+                "reason": "Taobao activity feed with search box",
+                "visible_search_keyword": "打印纸",
+                "search_submitted": False,
+                "is_home_feed": True,
+                "url_or_page_evidence": "huodong.taobao.com/wow/a/act/tao/dailygroup/23509/24308/wupr",
+            },
+            raw_text="{}",
+        )
+
+        self.assertEqual(payload["status"], "unknown")
+        self.assertTrue(payload["is_home_feed"])
+        self.assertEqual(payload["visible_search_keyword"], "打印纸")
+
+    def test_normalize_classifier_payload_does_not_block_normal_home_for_generic_activity_word(self):
+        payload = page_state_classifier._normalize_classifier_payload(
+            {
+                "state": "is_home_feed",
+                "confidence": 0.74,
+                "reason": "normal taobao.com homepage with activity entrance and recommendations",
+                "search_submitted": False,
+                "is_home_feed": True,
+                "url_or_page_evidence": ["taobao.com"],
+            },
+            raw_text="{}",
+        )
+
+        self.assertEqual(payload["status"], "visible_ready")
+        self.assertTrue(payload["is_home_feed"])
+
+    def test_normalize_classifier_payload_blocks_explicit_activity_page_text(self):
+        payload = page_state_classifier._normalize_classifier_payload(
+            {
+                "state": "is_home_feed",
+                "reason": "activity page with search box, not ordinary Taobao homepage",
+                "search_submitted": False,
+                "is_home_feed": True,
+                "url_or_page_evidence": ["taobao.com"],
+            },
+            raw_text="{}",
+        )
+
+        self.assertEqual(payload["status"], "unknown")
+
+    def test_normalize_classifier_payload_maps_conflicting_home_feed_state_to_unknown(self):
+        payload = page_state_classifier._normalize_classifier_payload(
+            {
+                "state": "is_home_feed",
+                "search_submitted": True,
+                "is_home_feed": True,
+                "result_page_evidence": ["sort/filter bar"],
+            },
+            raw_text="{}",
+        )
+
+        self.assertEqual(payload["status"], "unknown")
+        self.assertTrue(payload["is_home_feed"])
+        self.assertTrue(payload["search_submitted"])
+
     def test_request_payload_describes_closeable_popup_overlay_boundary(self):
         with tempfile.NamedTemporaryFile(suffix=".png") as f:
             f.write(
@@ -104,6 +184,7 @@ class PageStateClassifierTests(unittest.TestCase):
         self.assertIn("search_box_text_kind", prompt)
         self.assertIn("search_submitted", prompt)
         self.assertIn("is_home_feed", prompt)
+        self.assertIn("Never use is_home_feed as the state value", prompt)
         self.assertIn("result_page_evidence", prompt)
         self.assertIn("url_or_page_evidence", prompt)
         self.assertIn("normal homepage/search-entry surface", prompt)

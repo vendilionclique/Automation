@@ -141,6 +141,7 @@ def _normalize_test_page_state_value(value):
         "search_results",
         "results_page",
         "visible_ready",
+        "is_home_feed",
         "unknown",
     }
     return text if text in allowed else ""
@@ -251,26 +252,21 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     payload.setdefault("search_submitted", True)
                     payload.setdefault("is_home_feed", False)
                     payload.setdefault("result_page_evidence", ["test_results_layout"])
+                normalized = page_state_classifier._normalize_classifier_payload(payload, raw_text=text)
                 return {
-                    "status": state,
-                    "confidence": float(payload.get("confidence") or (0.35 if state == "unknown" else 0.9)),
-                    "reason": payload.get("reason") or "test_json_classifier",
+                    "status": normalized["status"],
+                    "confidence": normalized["confidence"],
+                    "reason": normalized.get("reason") or "test_json_classifier",
                     "metrics": {},
                     "source": "json_classifier",
                     "raw_text": text,
-                    "visible_search_keyword": payload.get("visible_search_keyword") or "",
-                    "keyword_match": payload.get("keyword_match"),
-                    "search_box_text_kind": page_state_classifier._normalize_search_box_text_kind(
-                        payload.get("search_box_text_kind")
-                    ),
-                    "search_submitted": payload.get("search_submitted"),
-                    "is_home_feed": payload.get("is_home_feed"),
-                    "result_page_evidence": page_state_classifier._normalize_text_list(
-                        payload.get("result_page_evidence")
-                    ),
-                    "url_or_page_evidence": page_state_classifier._normalize_text_list(
-                        payload.get("url_or_page_evidence")
-                    ),
+                    "visible_search_keyword": normalized.get("visible_search_keyword") or "",
+                    "keyword_match": normalized.get("keyword_match"),
+                    "search_box_text_kind": normalized.get("search_box_text_kind") or "",
+                    "search_submitted": normalized.get("search_submitted"),
+                    "is_home_feed": normalized.get("is_home_feed"),
+                    "result_page_evidence": normalized.get("result_page_evidence") or [],
+                    "url_or_page_evidence": normalized.get("url_or_page_evidence") or [],
                 }
             if text.strip().lower() not in {"true", "ok"}:
                 raise page_state_classifier.PageStateClassifierUnavailable("classifier_json_unparseable")
@@ -1682,11 +1678,11 @@ class VisualCaptureWorkerTests(unittest.TestCase):
 
             payload = worker._read_json(task["result_path"])
             self.assertEqual(result["status"], "needs_review")
-            self.assertEqual(result["stop_reason"], "home_entry_not_reached")
+            self.assertEqual(result["stop_reason"], "home_entry_reset_failed")
             self.assertEqual(payload["status"], "needs_review")
             home_prompt = client.calls[0]["arguments"]["prompt"]
             self.assertIn("Prepare the Taobao homepage/search-entry boundary", home_prompt)
-            self.assertIn("Do not replace text inside the old results-page search box", home_prompt)
+            self.assertIn("Do not replace text inside an old, activity, campaign, or otherwise non-homepage search box", home_prompt)
             self.assertNotEqual(payload["status"], "captured")
 
     def test_pre_keyword_visible_ready_old_keyword_allows_searching_next_keyword(self):
@@ -1807,7 +1803,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
             self.assertIn("visible Taobao bookmark button", retry_prompt)
             self.assertIn("Do not type anything into the address bar", retry_prompt)
 
-    def test_pre_keyword_hard_or_unknown_states_do_not_retry_or_search(self):
+    def test_pre_keyword_hard_states_do_not_retry_or_search(self):
         cases = [
             (
                 "login",
@@ -1833,11 +1829,6 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 "non_chrome",
                 '{"state":"chrome_not_foreground","reason":"WPS is visible"}',
                 "foreground_recovery_exhausted",
-            ),
-            (
-                "unknown",
-                '{"state":"unknown","reason":"unclear screen"}',
-                "home_entry_unverified",
             ),
         ]
 
@@ -1908,6 +1899,196 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                 self.assertNotIn("pre_keyword_home_entry_retry", payload["diagnostics"])
                 self.assertNotIn("keyword_search", payload["diagnostics"])
 
+    def test_pre_keyword_home_entry_unverified_retries_bounded_reset_once_then_searches_when_verified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-unverified-retry-success",
+                "keyword_index": 2,
+                "keyword": "万智牌 动荡",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+                "page_sampling": {"allow_page_state_json_classifier": True},
+            }
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "home_entry_prepared=false unclear current page"}]},
+                    {"content": [{"type": "text", "text": "home_entry_prepared=true home_entry_used=true recovered_from_old_results=true bookmark_home_entry_used=false"}]},
+                    {"content": [{"type": "text", "text": "home_entry_used=true submission_method=search_button"}]},
+                ],
+                classifier_result=[
+                    {"content": [{"type": "text", "text": '{"state":"unknown","reason":"unclear screen"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_ready","reason":"normal taobao.com homepage"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"visible_results","visible_search_keyword":"万智牌 动荡","keyword_match":true}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=2,
+                    tools=["act", "take_screenshot"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "captured")
+            self.assertEqual(payload["diagnostics"]["pre_keyword_home_entry"]["status"], "verified")
+            retry = payload["diagnostics"]["pre_keyword_home_entry_retry"]
+            self.assertEqual(retry["status"], "verified")
+            self.assertEqual(retry["trigger"]["stop_reason"], "home_entry_unverified")
+            prompts = [
+                str((call.get("arguments") or {}).get("prompt") or "")
+                for call in client.calls
+                if call.get("name") == "act"
+            ]
+            self.assertEqual(len(prompts), 3)
+            self.assertIn("Prepare the Taobao homepage/search-entry boundary", prompts[0])
+            self.assertIn("previous pre-keyword boundary check", prompts[1])
+            self.assertIn("search exactly this keyword", prompts[2])
+
+    def test_pre_keyword_home_entry_unverified_retry_failure_stops_before_keyword_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {
+                "task_id": "task-unverified-retry-fail",
+                "keyword_index": 2,
+                "keyword": "万智牌 动荡",
+                "evidence_dir": os.path.join(tmp, "evidence"),
+                "result_path": os.path.join(tmp, "evidence", "keyword_result.json"),
+                "capture_plan": {
+                    "max_tiles_per_keyword": 1,
+                    "tile_scroll_distance_px": 500,
+                    "primary_screenshot_path": os.path.join(tmp, "evidence", "tile_00.png"),
+                },
+            }
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+                "page_sampling": {"allow_page_state_json_classifier": True},
+            }
+            client = FakeClient(
+                [
+                    {"content": [{"type": "text", "text": "home_entry_prepared=false unclear current page"}]},
+                    {"content": [{"type": "text", "text": "home_entry_prepared=false still unclear"}]},
+                ],
+                classifier_result=[
+                    {"content": [{"type": "text", "text": '{"state":"unknown","reason":"unclear screen"}'}]},
+                    {"content": [{"type": "text", "text": '{"state":"unknown","reason":"still unclear"}'}]},
+                ],
+            )
+
+            with mock.patch.object(worker, "control_interrupt_for_worker", return_value={"interrupted": False}), \
+                mock.patch.object(worker, "_interruptible_sleep", return_value=None), \
+                mock.patch.object(worker, "_sleep_micro_pause", return_value=None):
+                result = worker._capture_keyword_with_mcp(
+                    client=client,
+                    task=task,
+                    contract=contract,
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    fallback_index=2,
+                    tools=["act", "take_screenshot"],
+                )
+
+            payload = worker._read_json(task["result_path"])
+            self.assertEqual(result["status"], "needs_review")
+            self.assertEqual(result["stop_reason"], "home_entry_reset_failed")
+            self.assertEqual(payload["diagnostics"]["pre_keyword_home_entry_retry"]["status"], "blocked")
+            prompts = [
+                str((call.get("arguments") or {}).get("prompt") or "")
+                for call in client.calls
+                if call.get("name") == "act"
+            ]
+            self.assertEqual(len(prompts), 2)
+            self.assertFalse(any("search exactly this keyword" in prompt for prompt in prompts))
+            self.assertNotIn("keyword_search", payload["diagnostics"])
+
+    def test_session_home_entry_reset_failure_stops_batch_before_next_keyword(self):
+        class FakeMcpSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def list_tools(self, **kwargs):
+                return sorted(worker.MCP_REQUIRED_TOOLS)
+
+            def call_tool(self, name, arguments, **kwargs):
+                self.connected = name == "computer_connect"
+                return {"content": [{"type": "text", "text": "ok"}]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            keyword_tasks = [
+                {"keyword": "万智牌 中止"},
+                {"keyword": "万智牌 动荡"},
+                {"keyword": "万智牌 闪电击"},
+            ]
+            contract = {
+                "run_id": "run",
+                "session_index": 1,
+                "task_dir": tmp,
+                "model_boundary": {"allow_midscene_act": True},
+                "hard_stop_policy": {"timeout_per_keyword_seconds": 30},
+            }
+            capture_results = [
+                {"status": "captured", "keyword": "万智牌 中止", "stop_reason": ""},
+                {
+                    "status": "needs_review",
+                    "keyword": "万智牌 动荡",
+                    "stop_reason": "home_entry_reset_failed",
+                },
+            ]
+
+            with mock.patch.object(worker, "_control_interrupt", return_value=None), \
+                mock.patch.object(worker, "_raise_if_controlled", return_value=None), \
+                mock.patch.object(worker, "_mcp_launcher_path", return_value="/tmp/fake_midscene_launcher.sh"), \
+                mock.patch.object(worker, "MidsceneStdioClient", return_value=FakeMcpSession()), \
+                mock.patch.object(worker, "_capture_keyword_with_mcp", side_effect=capture_results) as capture_mock, \
+                mock.patch.object(worker, "_should_run_post_keyword_cleanup", return_value=False), \
+                mock.patch.object(worker, "_sleep_between_keywords", return_value=None), \
+                mock.patch.object(worker, "_request_worker_cooldown") as cooldown_mock:
+                result = worker._run_real_capture_contract(
+                    contract=contract,
+                    contract_path=os.path.join(tmp, "contract.json"),
+                    run_id="run",
+                    session_index=1,
+                    task_dir=tmp,
+                    keyword_tasks=keyword_tasks,
+                )
+
+            self.assertEqual(result["status"], "needs_review")
+            self.assertEqual(result["stop_reason"], "home_entry_reset_failed")
+            self.assertEqual(len(result["keyword_results"]), 2)
+            self.assertEqual(capture_mock.call_count, 2)
+            attempted_keywords = [
+                call.kwargs["task"]["keyword"]
+                for call in capture_mock.call_args_list
+            ]
+            self.assertEqual(attempted_keywords, ["万智牌 中止", "万智牌 动荡"])
+            cooldown_mock.assert_not_called()
+
     def test_pre_keyword_home_entry_gate_allows_visible_ready_text_and_blocks_results(self):
         cases = [
             (
@@ -1962,6 +2143,24 @@ class VisualCaptureWorkerTests(unittest.TestCase):
                     "keyword_match": False,
                 },
                 "home_entry_not_reached",
+            ),
+            (
+                "explicit_activity_page",
+                {
+                    "status": "visible_ready",
+                    "reason": "activity page with search box",
+                    "url_or_page_evidence": ["taobao.com"],
+                },
+                "home_entry_unverified",
+            ),
+            (
+                "generic_home_activity_copy",
+                {
+                    "status": "visible_ready",
+                    "reason": "normal taobao.com homepage with activity recommendations",
+                    "url_or_page_evidence": ["taobao.com"],
+                },
+                "",
             ),
         ]
 
@@ -2076,7 +2275,7 @@ class VisualCaptureWorkerTests(unittest.TestCase):
         self.assertIn("Tap, Input, KeyboardPress, Scroll, or ClearInput", prompt)
         self.assertIn("Do not type the next keyword yet", pre_keyword_prompt)
         self.assertIn("not a results page", pre_keyword_prompt)
-        self.assertIn("not a results page and not a results-page search box", pre_keyword_prompt)
+        self.assertIn("not a results page, activity page, purchase-selection page, campaign page, or non-homepage search box", pre_keyword_prompt)
 
     def test_home_search_prompt_allows_configured_visible_bookmark_repair_only(self):
         contract = {

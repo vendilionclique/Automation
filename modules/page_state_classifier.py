@@ -144,6 +144,7 @@ def _request_payload(model: str, image_path: Path, keyword: str, temperature: fl
         "state must be one of: chrome_not_foreground, captcha_required, login_required, risk_suspected, "
         "popup_blocked, closeable_popup_overlay, white_skeleton, empty_result, results_end, "
         "visible_results, search_results, results_page, visible_ready, unknown. "
+        "Never use is_home_feed as the state value; it is only the boolean field is_home_feed. "
         "Use chrome_not_foreground when Codex, Terminal, Cursor, VS Code, WPS, or another non-Chrome app "
         "is the visible foreground window. Use closeable_popup_overlay only for a normal Taobao in-page "
         "modal or marketing overlay where the page behind it is visibly dimmed by a translucent layer and "
@@ -171,7 +172,8 @@ def _request_payload(model: str, image_path: Path, keyword: str, temperature: fl
         "价格/区间/筛选, pagination/previous/next/jump controls, or a clear search-results layout rather "
         "than homepage channels, campaigns, hot recommendations, or 猜你喜欢. Put short visible cues in "
         "result_page_evidence and address/page evidence in url_or_page_evidence when available. Set "
-        "is_home_feed true for a homepage recommendation feed; product cards alone do not prove submitted search. "
+        "state visible_ready and is_home_feed true for a normal taobao.com homepage recommendation feed. "
+        "Set is_home_feed true for a homepage recommendation feed; product cards alone do not prove submitted search. "
         "Do not output product rows, prices, shop names, item titles, business filtering, or price decisions."
     )
     return {
@@ -291,11 +293,7 @@ def _parse_json_object(text: str) -> Dict[str, Any]:
 
 
 def _normalize_classifier_payload(payload: Dict[str, Any], *, raw_text: str) -> Dict[str, Any]:
-    state = str(payload.get("state") or "unknown").strip()
-    if state not in CLASSIFIER_STATES:
-        state = "unknown"
-    confidence = _float_value(payload.get("confidence"), default=0.35 if state == "unknown" else 0.82)
-    confidence = max(0.0, min(1.0, confidence))
+    raw_state = str(payload.get("state") or "unknown").strip()
     keyword_match = payload.get("keyword_match")
     if isinstance(keyword_match, str):
         lowered = keyword_match.strip().lower()
@@ -311,6 +309,20 @@ def _normalize_classifier_payload(payload: Dict[str, Any], *, raw_text: str) -> 
     is_home_feed = _optional_bool(payload.get("is_home_feed"))
     if is_home_feed is None:
         is_home_feed = _optional_bool(payload.get("home_feed"))
+    result_page_evidence = _normalize_text_list(payload.get("result_page_evidence"))
+    url_or_page_evidence = _normalize_text_list(payload.get("url_or_page_evidence"))
+    state = _normalize_classifier_state(
+        raw_state=raw_state,
+        is_home_feed=is_home_feed,
+        search_submitted=search_submitted,
+        result_page_evidence=result_page_evidence,
+        url_or_page_evidence=url_or_page_evidence,
+        reason=str(payload.get("reason") or ""),
+    )
+    if raw_state == "is_home_feed" and is_home_feed is None:
+        is_home_feed = True
+    confidence = _float_value(payload.get("confidence"), default=0.35 if state == "unknown" else 0.82)
+    confidence = max(0.0, min(1.0, confidence))
     return {
         "status": state,
         "confidence": confidence,
@@ -323,9 +335,52 @@ def _normalize_classifier_payload(payload: Dict[str, Any], *, raw_text: str) -> 
         "search_box_text_kind": _normalize_search_box_text_kind(payload.get("search_box_text_kind")),
         "search_submitted": search_submitted,
         "is_home_feed": is_home_feed,
-        "result_page_evidence": _normalize_text_list(payload.get("result_page_evidence")),
-        "url_or_page_evidence": _normalize_text_list(payload.get("url_or_page_evidence")),
+        "result_page_evidence": result_page_evidence,
+        "url_or_page_evidence": url_or_page_evidence,
     }
+
+
+def _normalize_classifier_state(
+    *,
+    raw_state: str,
+    is_home_feed: Optional[bool],
+    search_submitted: Optional[bool],
+    result_page_evidence: List[str],
+    url_or_page_evidence: List[str],
+    reason: str,
+) -> str:
+    state = str(raw_state or "unknown").strip()
+    if state == "is_home_feed":
+        if search_submitted is True or result_page_evidence:
+            return "unknown"
+        if _looks_like_non_ordinary_taobao_home(url_or_page_evidence, reason):
+            return "unknown"
+        return "visible_ready"
+    if state not in CLASSIFIER_STATES:
+        return "unknown"
+    return state
+
+
+def _looks_like_non_ordinary_taobao_home(url_or_page_evidence: List[str], reason: str = "") -> bool:
+    text = " ".join([*(url_or_page_evidence or []), reason or ""]).lower()
+    if not text:
+        return False
+    markers = [
+        "huodong.taobao.com",
+        "dailygroup",
+        "s.taobao.com/search",
+        "world.taobao.com",
+        "tmall.com",
+        "采购优选",
+        "活动页",
+        "活动会场",
+        "会场页",
+        "activity page",
+        "campaign page",
+        "purchase-selection",
+        "search?",
+    ]
+    return any(marker in text for marker in markers)
 
 
 def _optional_bool(value: Any) -> Optional[bool]:

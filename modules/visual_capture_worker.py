@@ -92,6 +92,7 @@ HARD_ABNORMAL_REASONS = {
     "rate_limited",
     "manual_review_needed",
     "page_state_detection_failed",
+    "home_entry_reset_failed",
 }
 
 
@@ -358,6 +359,16 @@ def _run_real_capture_contract(
                         "stop_reason": reason,
                         "keyword_results": keyword_results,
                         "notes": "Real Midscene computer MCP capture stopped by supervisor control.",
+                    }
+                if status == "needs_review" and reason in {"home_entry_unverified", "home_entry_not_reached", "home_entry_reset_failed"}:
+                    return {
+                        "status": "needs_review",
+                        "stop_reason": reason,
+                        "keyword_results": keyword_results,
+                        "notes": (
+                            "Pre-keyword home-entry failed after bounded reset; "
+                            "stopped the session before the next keyword to avoid context pollution."
+                        ),
                     }
                 if _should_stop_immediately(status, reason):
                     _request_worker_cooldown(run_id, session_index, reason)
@@ -1562,6 +1573,9 @@ def _prepare_home_entry_before_keyword(
             return retry_payload
         payload = retry_payload
         review_reason = str(payload.get("stop_reason") or review_reason)
+        if review_reason in {"home_entry_unverified", "home_entry_not_reached"}:
+            payload["stop_reason"] = "home_entry_reset_failed"
+            review_reason = "home_entry_reset_failed"
     if review_reason:
         raise MidsceneActionAbnormal(
             reason=review_reason,
@@ -1688,9 +1702,35 @@ def _home_entry_review_reason(page_state: Dict[str, Any]) -> str:
         return review_reason
     if status in {"results_end", "results_page", "search_results", "visible_results"}:
         return "home_entry_not_reached"
+    if status == "visible_ready" and _home_entry_has_non_ordinary_taobao_evidence(page_state):
+        return "home_entry_unverified"
     if status != "visible_ready":
         return "home_entry_unverified"
     return ""
+
+
+def _home_entry_has_non_ordinary_taobao_evidence(page_state: Dict[str, Any]) -> bool:
+    evidence = _page_state_text_list((page_state or {}).get("url_or_page_evidence"))
+    raw_text = str((page_state or {}).get("raw_text") or "")
+    reason = str((page_state or {}).get("reason") or "")
+    text = " ".join([*evidence, raw_text, reason]).lower()
+    if not text:
+        return False
+    markers = {
+        "huodong.taobao.com",
+        "dailygroup",
+        "s.taobao.com/search",
+        "world.taobao.com",
+        "tmall.com",
+        "采购优选",
+        "活动页",
+        "活动会场",
+        "会场页",
+        "activity page",
+        "campaign page",
+        "purchase-selection",
+    }
+    return any(marker in text for marker in markers)
 
 
 def _search_box_text_kind(page_state: Dict[str, Any]) -> str:
@@ -1754,8 +1794,8 @@ def _should_retry_pre_keyword_home_entry(review_reason: str, page_state: Dict[st
     if _foreground_loss_detected(page_state):
         return False
     status = str((page_state or {}).get("status") or UNKNOWN)
-    if status == UNKNOWN:
-        return False
+    if review_reason == "home_entry_unverified":
+        return True
     if review_reason == "home_entry_not_reached":
         return status in {"results_end", "results_page", "search_results", "visible_results"}
     return False
@@ -4465,6 +4505,10 @@ def _pre_keyword_home_entry_prompt(
     navigation_rule = _bookmark_home_entry_repair_prompt(contract)
     return (
         "Prepare the Taobao homepage/search-entry boundary for the next keyword. "
+        "The business rule is simple: the active page must be the ordinary taobao.com "
+        "homepage before searching. If the current page is not the ordinary Taobao "
+        "homepage, do not use its search box; leave it and open or return to the "
+        "ordinary Taobao homepage. "
         "Use only visible-screen reasoning and system mouse/keyboard actions. Do "
         "not read DOM, HTML, network, cookies, storage, selector maps, page source, "
         "JS-evaluated data, or clipboard contents. Do not use short action APIs "
@@ -4482,14 +4526,16 @@ def _pre_keyword_home_entry_prompt(
         "buttons or account-state controls. "
         f"{navigation_rule}"
         "If the current page is an old Taobao results page, bottom-of-results page, "
-        "or a page whose visible search box belongs to the previous keyword, leave "
-        "that old results page first through a visible Taobao logo, Home/首页 entry, "
+        "activity/campaign page, purchase-selection page, unrelated site, or any page "
+        "whose visible search box is not the ordinary taobao.com homepage search box, "
+        "leave that page first through a visible Taobao logo, Home/首页 entry, "
         "return-home control, already visible normal homepage tab, or the configured "
         "visible bookmark home-entry repair when it is allowed. Do not replace text "
-        "inside the old results-page search box. "
+        "inside an old, activity, campaign, or otherwise non-homepage search box. "
         "The prepared boundary must be the normal homepage/search-entry surface, "
-        "not a results page and not a results-page search box. Homepage placeholder, "
-        "recommendation, hot-search, or suggestion text is acceptable. Stop after "
+        "not a results page, activity page, purchase-selection page, campaign page, "
+        "or non-homepage search box. Homepage placeholder, recommendation, hot-search, "
+        "or suggestion text is acceptable only on the ordinary taobao.com homepage. Stop after "
         "the ordinary Taobao homepage/search-entry search box is visible "
         f"and ready for the next keyword {keyword!r}. In the final action message, "
         "include home_entry_prepared=true, home_entry_used=true, "
@@ -4505,8 +4551,9 @@ def _pre_keyword_home_entry_retry_prompt(
     navigation_rule = _bookmark_home_entry_repair_prompt(contract)
     return (
         "The previous pre-keyword boundary check still saw an old results page, "
-        "a bottom-of-results page, or a homepage/search-entry field containing an "
-        "old or unrelated keyword. Perform one bounded home-entry repair before "
+        "a bottom-of-results page, an activity/campaign page, an unrelated page, "
+        "or a homepage/search-entry field that was not proven to be on the ordinary "
+        "taobao.com homepage. Perform one bounded home-entry repair before "
         "the next keyword. Use only visible-screen reasoning and system mouse/"
         "keyboard actions. Do not read DOM, HTML, network, cookies, storage, "
         "selector maps, page source, JS-evaluated data, or clipboard contents. "
@@ -4520,13 +4567,15 @@ def _pre_keyword_home_entry_retry_prompt(
         "app is visible, report chrome_not_foreground so the Python worker can "
         "recover foreground safely. "
         f"{navigation_rule}"
-        "Leave the old keyword context through a visible Taobao logo, Home/首页 "
+        "Leave the current non-homepage context through a visible Taobao logo, Home/首页 "
         "entry, return-home control, already visible normal homepage tab, or the "
         "configured visible bookmark home-entry repair when it is allowed. Do not "
-        "replace text inside the old results-page search box. The repaired "
-        "boundary must be the normal Taobao homepage/search-entry surface, not a "
-        "results page and not a results-page search box. Homepage placeholder, "
-        "recommendation, hot-search, or suggestion text is acceptable. Stop ready "
+        "replace text inside any current-page search box unless it is the ordinary "
+        "taobao.com homepage search box. The repaired boundary must be the normal "
+        "Taobao homepage/search-entry surface, not a results page, activity page, "
+        "purchase-selection page, campaign page, or non-homepage search box. Homepage "
+        "placeholder, recommendation, hot-search, or suggestion text is acceptable "
+        "only on the ordinary taobao.com homepage. Stop ready "
         f"for the next keyword {keyword!r}. "
         "In the final action message, include home_entry_prepared=true, "
         "home_entry_used=true, recovered_from_old_results=true, and "
